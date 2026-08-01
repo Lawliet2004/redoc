@@ -1,15 +1,17 @@
 # Redoc Crate Dependency Ledger
 
-This document tracks all external crate dependencies, their purposes, approximate binary size costs, and rejected alternatives.
+This document tracks external crate dependencies, their purposes, approximate binary size costs, and rejected alternatives.
 
 | Crate / Dep | Crate Used In | Purpose | Size Cost | Alternatives Rejected |
 | ----------- | ------------- | ------- | --------- | --------------------- |
 | `serde`, `serde_json` | `core`, `file-io`, `doc-engine`, etc. | Data serialization / deserialization for JSON & models | ~300 KB | `bincode` (less debuggable), `cbor` (unnecessary overhead) |
-| `zip` | `file-io`, `export` | Reading/writing `.redoc` ZIP container files | ~250 KB | `async-zip` (unneeded async complexity for local disk sync) |
+| `zip` | `core`, `file-io`, `export` | Reading/writing `.redoc` ZIP container files and OOXML packages | ~250 KB | `async-zip` (unneeded async complexity for local disk sync) |
 | `quick-xml` | `file-io`, `export` | High performance XML parser/writer for OOXML / DOCX / PPTX | ~180 KB | `xml-rs` (slower, memory intensive) |
 | `printpdf`, `image` | `export` | Native PDF generation with embedded PNG/JPEG image support | ~1.2 MB | Headless chromium (heavy 150MB+ binary) |
-| `tiny-skia` | `export` | Fast software 2D rasterizer for rendering slide SVG elements into PDF images | ~400 KB | `cairo`, `skia-safe` (requires heavy C++ build dependencies) |
-| `fontdb` | `export` | System font discovery and matching for PDF layout engine | ~150 KB | Hardcoding system font paths (brittle across OSes) |
+| `docx-rs` | `export` | DOCX read/write for document export and import | ~400 KB | Hand-built OOXML XML only |
+| `rust_xlsxwriter` | `export` | XLSX export writer | ~300 KB | `umya-spreadsheet` (heavier API surface) |
+| `calamine` | `export` | XLSX import / spreadsheet parsing | ~200 KB | Manual OOXML parsing |
+| `unicode-segmentation` | `export`, `doc-engine` | Grapheme-aware text segmentation for layout | ~30 KB | Byte-index string slicing |
 | `thiserror` | Workspace-wide | Idiomatic typed error definition | ~20 KB | Hand-rolled `Display` / `Error` boilerplate |
 | `tracing`, `tracing-appender` | `core` | Structured logging and daily log file rotation | ~120 KB | `log` + `env_logger` (lacks log file rotation) |
 | `parking_lot` | `core` | High performance sync primitives (`Mutex`, `RwLock`) | ~40 KB | `std::sync` (higher contention overhead on Windows) |
@@ -17,3 +19,19 @@ This document tracks all external crate dependencies, their purposes, approximat
 | `sha2` | `file-io` | Content-addressed asset deduplication (SHA-256) | ~40 KB | `md-5` (cryptographically broken) |
 | `specta`, `tauri-specta` | `desktop/src-tauri` | Type-safe end-to-end TS bindings generation | ~150 KB | Hand-written TypeScript interfaces (prone to drift) |
 | `proptest` | `formula` (dev) | Property-based testing for formula parser & evaluation engine | Dev-only | Manual unit test cases alone |
+
+## Removed / not in use
+
+- **`tiny-skia`**, **`fontdb`** — previously listed in early design docs; not present in any current `Cargo.toml`. PDF/text layout uses `printpdf` and `unicode-segmentation` instead.
+
+## Version notes
+
+### `zip` (split versions — known tech debt)
+
+| Crate | `Cargo.toml` pin |
+| ----- | ---------------- |
+| `redoc-core` | `zip = "8.6.0"` |
+| `redoc-file-io` | `zip = "0.6"` |
+| `redoc-export` | `zip = "0.6"` |
+
+`core` upgraded to the 8.x line while container I/O and export crates remain on 0.6. Cargo resolves both into the workspace binary today; unifying on a single `zip` major version is a future cleanup item.

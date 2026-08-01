@@ -12,8 +12,6 @@ serde_json = "1.0"
 thiserror = "1.0"
 printpdf = { version = "0.7", features = ["embedded_images"] }
 image = { version = "0.24.9", default-features = false, features = ["png", "jpeg"] }
-tiny-skia = "0.11"
-fontdb = "0.16"
 docx-rs = "0.4"
 rust_xlsxwriter = "0.79"
 calamine = "0.26"

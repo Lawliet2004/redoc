@@ -205,6 +205,31 @@ fn parse_cell_or_ident(
     None
 }
 
+/// Parse `A1`, `Sheet!A1`, or `Sheet!A1:B2` into sheet + range bounds.
+pub fn parse_a1_range(s: &str) -> Option<(Option<String>, u32, u32, u32, u32)> {
+    let trimmed = s.trim();
+    let (sheet, rest) = if let Some(idx) = trimmed.rfind('!') {
+        let sheet_part = trimmed[..idx].trim();
+        let sheet_name = sheet_part
+            .strip_prefix('\'')
+            .and_then(|s| s.strip_suffix('\''))
+            .unwrap_or(sheet_part);
+        (Some(sheet_name.to_string()), trimmed[idx + 1..].trim())
+    } else {
+        (None, trimmed)
+    };
+
+    if let Some((start, end)) = rest.split_once(':') {
+        let (start_row, start_col) = parse_a1_reference(start)?;
+        let (end_row, end_col) = parse_a1_reference(end)?;
+        Some((sheet, start_row, start_col, end_row, end_col))
+    } else if let Some((row, col)) = parse_a1_reference(rest) {
+        Some((sheet, row, col, row, col))
+    } else {
+        None
+    }
+}
+
 pub fn parse_a1_reference(s: &str) -> Option<(u32, u32)> {
     let mut col_str = String::new();
     let mut row_str = String::new();

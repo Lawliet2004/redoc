@@ -1,12 +1,15 @@
 use serde_json::Value;
 
-pub fn migrate_version(body: Value, from_version: u32, to_version: u32) -> Result<Value, String> {
+pub fn migrate_version(mut body: Value, from_version: u32, to_version: u32) -> Result<Value, String> {
     let mut current = from_version;
-    let data = body;
     while current < to_version {
         match current {
             0 => {
-                // v0 -> v1 migration
+                // v0 containers stored body JSON without an explicit content schema marker.
+                if let Value::Object(ref mut map) = body {
+                    map.entry("contentVersion")
+                        .or_insert(Value::Number(1.into()));
+                }
                 current = 1;
             }
             1 => {
@@ -16,5 +19,34 @@ pub fn migrate_version(body: Value, from_version: u32, to_version: u32) -> Resul
             _ => return Err(format!("No migration path for version {}", current)),
         }
     }
-    Ok(data)
+    Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CURRENT_FORMAT_VERSION;
+    use serde_json::json;
+
+    #[test]
+    fn migrate_v0_to_current_adds_content_version_marker() {
+        let body = json!({ "type": "doc", "content": [] });
+        let migrated = migrate_version(body, 0, CURRENT_FORMAT_VERSION).expect("migration succeeds");
+        assert_eq!(migrated["contentVersion"], 1);
+    }
+
+    #[test]
+    fn migrate_is_noop_when_already_at_target_version() {
+        let body = json!({ "type": "doc", "contentVersion": 1 });
+        let migrated = migrate_version(body.clone(), CURRENT_FORMAT_VERSION, CURRENT_FORMAT_VERSION)
+            .expect("noop migration");
+        assert_eq!(migrated, body);
+    }
+
+    #[test]
+    fn migrate_rejects_unknown_source_version() {
+        let body = json!({});
+        let err = migrate_version(body, 2, 3).unwrap_err();
+        assert!(err.contains("No migration path"));
+    }
 }

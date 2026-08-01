@@ -1,86 +1,103 @@
-# Redoc implementation status
+# Redoc implementation status (post-remediation audit)
 
-This status is intentionally evidence-based against `prompt.md` and the close-remaining-feature-gaps plan.
+Evidence-based snapshot of the current repository. Claims below are tied to source files, not roadmap intent.
 
-## Phase 0–4 Completion
+## Verified working
 
-### Phase 0 — Bug Fixes & Baseline Tests
-- DONE: Fixed panic on missing `meta.json` / `body.json` in ZIP containers → returns `FileIoError::InvalidContainer`.
-- DONE: Fixed corrupt-file read path to return `Err` not panic (covered by `corrupt_zip_returns_error_not_panic` integration test).
-- DONE: Formula parser hardened: `parse_formula` and `parse_a1_reference` are fuzz-tested via proptest across all single-letter column + 1–100 row combinations; dollar-sign absolute refs (`$A$1`) parse without panic.
-- DONE: Schema migration path exercised: version-0 containers are migrated to version-1 on load (`test_schema_migration_runs_on_legacy_container`).
-- DONE: Future-version containers set `read_only=true` + warning string (`test_newer_version_container_sets_read_only_and_warning`).
+### Shell (`apps/desktop`, `packages/editor-common`, `packages/ui`)
 
-### Phase 1 — Sheet Engine
-- DONE: **Dollar/absolute refs** (`$A$1`, `A$1`, `$A1`): parser recognises and strips `$` markers; reference-adjustment skips anchored axes on row/column insert-delete.
-- DONE: **Reference adjustment**: insert/delete row or column shifts all non-anchored cell references in formulas across the dependency graph.
-- DONE: **Multi-key Sort**: Sort dialog supports up to N sort keys with stable ordering; undo snapshots the pre-sort state.
-- DONE: **Merged cells**: `merges` array on each sheet; resize and fill correctly skip merged spans; export preserves merges.
-- DONE: **Dynamic pie chart**: chart sidebar supports `=OFFSET`-style dynamic range references for the pie data series.
-- DONE: **Sheet menus**: right-click sheet tab exposes Rename / Insert / Delete / Move Left / Move Right / Duplicate.
+- **Home screen** with blank/open flows and template starters (`HomeScreen.tsx`).
+- **Recents + pins** persisted via Tauri commands `get_recents` / `toggle_pin_recent` (`lib.rs`, `HomeScreen.tsx`).
+- **Settings** dialog with autosave interval, theme, telemetry toggle (`SettingsDialog.tsx`, `App.tsx`).
+- **Command palette** (`Ctrl+K`) and registry-driven menus from `registerCommands.ts` / `buildMenus`.
+- **F1** opens keyboard-shortcuts dialog; **F4** repeats last formatting command (`registerCommands.ts`, `EditorCommands.ts`).
+- **Drag-and-drop**: `.redoc` files via `tauri://drag-drop` and `RunEvent::Opened`; images dropped on home (`App.tsx`, `lib.rs`).
+- **Save As** via native dialog, updates path/title/recents (`handleSaveAs` in `App.tsx`).
+- **Per-mode buffers** when switching Doc/Sheet/Slide (`ModeBuffer`, `handleSwitchMode` in `App.tsx`).
+- **Dirty close guard** before mode switch / new / open (`confirmDiscardIfDirty` in `App.tsx`).
+- **Recovery prompt** with discard-all (`checkRecovery`, `discardRecoverySnapshots` in `App.tsx` / `lib.rs`).
+- **Window title** reflects document name and dirty prefix (`setTitle` in `App.tsx`).
+- **Scoped filesystem**: Tauri capabilities grant document read/write and app-data only (`capabilities/default.json`).
+- **Accessibility**: axe-core Vitest suite (`tests/a11y/shell.a11y.test.tsx`, `pnpm a11y:check`).
 
-### Phase 2 — Document Engine
-- DONE: **Doc validation**: ProseMirror schema enforces allowed marks/nodes on paste and import; invalid structures are pruned, not thrown.
-- DONE: **DOCX fidelity**: heading levels, bold/italic/underline/strikethrough, ordered/unordered lists, table borders, and page breaks export correctly via `docx-rs`.
-- DONE: **PDF improvements**: element rotation preserved via affine transform; page margins respected; image assets embedded from container `assets_data`.
+### Sheet (`packages/sheet-editor`, `crates/sheet-engine`, `crates/formula`)
 
-### Phase 3 — Slide Engine
-- DONE: **Slide schema**: `slide_engine` ProseMirror schema covers text boxes, images, shapes, charts, tables, and speaker notes.
-- DONE: **PPTX fidelity**: `a:xfrm rot` written for rotated shapes; `p:notes` / `p:notesSlide` parts included; transitions serialised to `p:transition`.
-- DONE: **8-handle resize**: slide canvas exposes all eight resize handles (corners + mid-edges) with aspect-ratio lock on corner drag.
-- DONE: **Presenter window**: separate Tauri window with current/next slide preview, speaker notes pane, and per-element entrance-animation step-through.
+- **Canvas grid** with virtualization, hiDPI scaling (`devicePixelRatio`), damage-rect invalidation (`markGridDirtyRect`), and text-measure cache (`textMeasureCache.ts`, `SheetEditor.tsx`).
+- **50+ formula functions** in `crates/formula` including **XLOOKUP**, **OFFSET**, **INDIRECT**, lookup/stat/date/text families (`functions.rs`, `eval.rs`).
+- **AutoFilter** with column chevrons and value checklists (`SheetEditor.tsx`, `sheet-engine/workbook/filter.rs`).
+- **Multi-key sort** dialog with stable ordering (`SortDialog.tsx`).
+- **Merged cells** render/export path (`merges` signal, `renderMergedCell`).
+- **Charts** bar/line/pie sidebar bound to sheet ranges (`chartType`, chart panel in `SheetEditor.tsx`).
+- **Freeze panes** from selection (`freezeRows` / `freezeCols`).
+- **Insert/delete rows and columns** via Rust commands (`insertRowsAt`, `insertColsAt`, etc.).
+- **Find/replace** via shared `FindBar` (`findBarOpen`, `findReplaceMode`).
+- **Named ranges** UI (`namedRanges` signal, add/delete handlers).
+- **Number formats** dialog (`NumberFormatDialog.tsx`).
+- **Data validation** lists (`DataValidationDialog.tsx`, formula-bar dropdown).
+- **Hyperlinks** on cells (`cellHyperlink`, style.hyperlink).
 
-### Phase 4 — Infrastructure & UX
-- DONE: **Schema migrations**: `migrations.rs` applies incremental body transforms from version N to `CURRENT_FORMAT_VERSION`; tested via integration test.
-- DONE: **Snapshot rotation**: undo history caps at 100 snapshots; oldest entries evicted when limit exceeded.
-- DONE: **Structured logging**: `tracing` subscriber initialised in Tauri setup; per-command spans with `INFO`/`WARN`/`ERROR` levels; log file rotated at 5 MB.
-- DONE: **Save As**: Tauri `save` dialog → writes a new container at chosen path and updates window title / recent-files list.
-- DONE: **Drag-and-drop**: `.redoc` files dragged onto the app window are opened via `RunEvent::Opened`; images dropped into editors are inlined as assets.
-- DONE: **Command routing**: `EDITOR_COMMAND` event bus routes palette commands to the active editor surface; F4 repeats last formatting command.
+### Document (`packages/doc-editor`, `crates/doc-engine`, `crates/export`)
 
+- **ProseMirror editor** with custom schema built from `prosemirror-schema-basic` + lists/tables/images (`DocEditor.tsx`).
+- **Marks**: bold, italic, underline, strike, link, highlight, etc.
+- **Tables**: merge/split cells, column resizing, table editing plugin.
+- **Find/replace** via `FindBar`.
+- **Page setup** persisted in document JSON (`PageSetupDialog`, `pageSetup` in `buildDocJson`).
+- **Print preview** (`PrintPreview.tsx`).
+- **Headings H1�H6** in toolbar and schema.
+- **Image resize** (drag handle) and **drop-to-insert** (`resizeSelectedImage`, `onDrop`).
+- **Paste sanitization** (`pasteSanitizer.ts`, `transformPastedHTML`).
+- **DOCX import**: lists, hyperlinks, highlight/color runs (`export/src/docx.rs` import path).
+- **DOCX export**: numbering, `w:vertAlign`, table borders (`add_list_numbering`, border/numbering writers in `docx.rs`).
 
-## Verified complete in the current repository
+### Slides (`packages/slide-editor`, `crates/slide-engine`, `crates/export`)
 
-- DONE: Tauri v2 desktop shell with SolidJS lazy-loaded editor surfaces and LibreOffice-class dense chrome.
-- DONE: Registry-driven menus via `CommandItem.menuPath` + `buildMenus(mode)`; command palette uses the same registry; Print routes through `emitEditorCommand("print")`.
-- DONE: Shared command bus (`EDITOR_COMMAND`) with F4 repeat-last-formatting, F1 shortcut cheatsheet, and shell shortcuts.
-- DONE: Document editor: fonts/marks, page breaks, tables with `columnResizing`/`tableEditing`, link/image dialogs, find/replace, Doc context menu (cut/copy/paste, format, insert, find).
-- DONE: Spreadsheet: AutoFilter column chevrons + value checklists, multi-column Sort dialog, full undo snapshots, chart title/range sidebar, wrap auto-row-height, print dialog (sheet/selection/fit), context menu, Ctrl+Shift+V values paste, Ctrl+nav data edges.
-- DONE: Presentation: per-element entrance fade in presenter, handout print (1/2/4/6 + notes), resizable notes pane, rotation/transitions, PPTX notes + rotation export.
-- DONE: Export: XLSX native bar/line/pie charts (import skips charts with warning); PDF element rotation; PPTX `a:xfrm rot` + notesSlide parts.
-- DONE: Accessibility: axe-core Vitest suite (`pnpm a11y:check`) wired into `quality:check`; high-contrast tokens; toolbar roving tabindex.
-- DONE: Packaging: `.redoc` fileAssociations + OS open argv/`RunEvent::Opened` → mode from `meta.mode`; installer size gate (55 MB when bundle artifacts exist); updater Settings toggle (secret-gated, no hard fail); perf budget gate opt-in via `REDOC_PERF_GATE=1`.
+- **Slide editor** restored with canvas, sidebar, and element model (`SlideEditor.tsx`).
+- **8-handle resize** (nw/n/ne/e/se/s/sw/w) with shift-aspect lock (`ResizeHandle`, `SlideEditor.css`).
+- **Zoom** control (10�200% scale transform).
+- **Themes/layouts** sidebar with layout masters (`applyLayout`, theme color tokens).
+- **Presenter window** as separate Tauri webview (`PresenterView.tsx`, `open_presenter_window` in `lib.rs`).
+- **Table and chart elements** in slide model and renderer.
+- **Align / distribute** selected elements (`distributeSelected`).
+- **Group / ungroup** (`groupSelected`, `ungroupSelected`).
+- **Shape library**: rect, rounded rect, ellipse, triangle, diamond, star, line, arrow (`shapeUtils.tsx`).
+- **Handout print** 1/2/4/6 per page with optional speaker notes (`printPerPage`, print dialog).
+- **PDF and PPTX export** from Rust (`export/pdf.rs`, `export/pptx.rs`).
 
-## Still limited / intentional non-goals
+### Infrastructure
 
-- DONE: PPTX import, deep OOXML fidelity, macros, collaboration, cloud sync.
-- DONE: Code signing requires platform certs/secrets; unsigned early releases remain supported.
-- DONE: Chart import round-trip not claimed; XLSX import warns and skips charts.
+- **Typed Tauri bindings** via `tauri-specta`; `pnpm generate:bindings` produces `packages/api-client/src/generated.ts`; quality gate enforces no direct `@tauri-apps/api` outside generated client.
+- **Panic boundaries** on Tauri commands via `handle_panic!` macro wrapping `catch_unwind` (`lib.rs`).
+- **Daily log rotation** via `tracing_appender::rolling::daily` (`crates/core/src/logging.rs`).
+- **Quality gates**: gzipped frontend budget, generated bindings check, installer size gate, optional perf gate (`scripts/quality-gates.mjs`).
 
-## QA checklist (new acceptance)
+## Known limitations / non-goals
 
-- [ ] AutoFilter: enable → column chevrons → uncheck value hides rows → survives `.redoc` reload
-- [ ] Sort… dialog: A then B stable multi-key order; undo restores snapshot
-- [ ] Menu item with `menuPath` appears in menu + palette; no dead menu actions
-- [ ] Sheet print selection-only; slide handouts 2/page
-- [ ] Presenter reveals fade entrances one-by-one
-- [ ] `pnpm a11y:check` fails if CommandPalette search loses `aria-label`
-- [ ] F1 opens shortcut list; F4 repeats last bold/italic/etc.
-- [ ] Opening a `.redoc` via association sets Doc/Sheet/Slide from `meta.mode`
+- **PPTX import** deferred � opening `.pptx` shows �not yet supported� toast (`App.tsx`).
+- **No macros, pivot tables, real-time collaboration, or cloud sync** (out of scope for v1).
+- **Chart import from XLSX** skipped with user-visible warnings (`export/src/xlsx.rs`).
+- **`zip` crate versions not unified**: `redoc-core` pins `zip = "8.6.0"` while `redoc-file-io` and `redoc-export` use `zip = "0.6"` (separate major lines in `Cargo.toml` files).
+- **DocEditor schema is hand-mirrored** from ProseMirror basics � not generated from a shared `schema.json`.
+- **Log rotation is calendar daily**, not size-based 5 MB caps (`tracing_appender` daily roller only).
 
-## Verification
+## QA checklist pointers
+
+Manual acceptance steps live in [docs/qa-checklist.md](./qa-checklist.md). Run that checklist before release; unchecked items are intentional manual verification, not missing implementation claims.
+
+## Verification commands
 
 ```powershell
-pnpm test
 pnpm typecheck
+pnpm test
 pnpm lint
 pnpm build
 pnpm quality:check
 pnpm a11y:check
 ```
 
-## Phase 7 � Tests and CI Hardening
-- DONE: Proptest for Formula Parser and Evaluator.
-- DONE: Golden File Round-Trip Tests (Doc, Sheet, Slide, corrupt zip, missing asset).
-- DONE: Frontend Unit Tests (utils base64/TSV, sheet-editor history, slide-editor geometry).
-- DONE: CI Hardening (Rust toolchain, cargo test --workspace, cargo clippy --workspace).
+Rust workspace (also exercised in CI):
+
+```powershell
+cargo test --workspace
+cargo clippy --workspace
+```

@@ -1,5 +1,5 @@
 import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
-import { EditorState, Plugin, TextSelection } from "prosemirror-state";
+import { EditorState, Plugin, TextSelection, NodeSelection } from "prosemirror-state";
 import { Decoration, DecorationSet, EditorView } from "prosemirror-view";
 import { Schema, MarkSpec, NodeSpec, Mark, Node, Fragment, Slice } from "prosemirror-model";
 import { schema as basicSchema } from "prosemirror-schema-basic";
@@ -19,6 +19,7 @@ import {
   deleteColumn,
 } from "prosemirror-tables";
 import { Dialog } from "@redoc/ui";
+import { PrintPreview } from "./PrintPreview";
 import {
   IconBold, IconItalic, IconUnderline, IconStrikethrough, IconAlignLeft, IconAlignCenter,
   IconAlignRight, IconAlignJustify, IconList, IconOrderedList, IconUndo, IconRedo, IconSearch,
@@ -38,6 +39,7 @@ import { BubbleToolbar } from "./BubbleToolbar";
 import { PageSetupDialog, type PageSetupConfig } from "./PageSetupDialog";
 import { DocToolbar } from "./DocToolbar";
 import { FindReplace } from "./FindReplace";
+import { transformPastedHTML } from "./pasteSanitizer";
 import type { DocContent, DocEditorProps, TableCommandState } from "./types";
 
 /** Persist as bold/italic so DOCX/PDF exporters match. */
@@ -129,11 +131,31 @@ const pageBreakSpec: NodeSpec = {
 const styledNodes = addListNodes(basicSchema.spec.nodes, "paragraph block*", "block")
   .update("paragraph", {
     ...basicSchema.spec.nodes.get("paragraph"),
-    attrs: { align: { default: "left" }, indent: { default: 0 }, lineHeight: { default: 1.5 } },
+    attrs: {
+      align: { default: "left" },
+      indent: { default: 0 },
+      lineHeight: { default: 1.5 },
+      spacingBefore: { default: 0 },
+      spacingAfter: { default: 0 },
+    },
+    parseDOM: [
+      {
+        tag: "p",
+        getAttrs: (dom) => {
+          const el = dom as HTMLElement;
+          const mt = el.style.marginTop?.replace("pt", "");
+          const mb = el.style.marginBottom?.replace("pt", "");
+          return {
+            spacingBefore: mt ? Number(mt) || 0 : 0,
+            spacingAfter: mb ? Number(mb) || 0 : 0,
+          };
+        },
+      },
+    ],
     toDOM: (node) => [
       "p",
       {
-        style: `text-align:${node.attrs.align};margin-left:${node.attrs.indent}em;line-height:${node.attrs.lineHeight}`,
+        style: `text-align:${node.attrs.align};margin-left:${node.attrs.indent}em;line-height:${node.attrs.lineHeight};margin-top:${node.attrs.spacingBefore}pt;margin-bottom:${node.attrs.spacingAfter}pt`,
       },
       0,
     ],
@@ -145,11 +167,79 @@ const styledNodes = addListNodes(basicSchema.spec.nodes, "paragraph block*", "bl
       align: { default: "left" },
       indent: { default: 0 },
       lineHeight: { default: 1.5 },
+      spacingBefore: { default: 0 },
+      spacingAfter: { default: 0 },
     },
+    parseDOM: [
+      {
+        tag: "h1",
+        attrs: { level: 1 },
+        getAttrs: (dom) => {
+          const el = dom as HTMLElement;
+          const mt = el.style.marginTop?.replace("pt", "");
+          const mb = el.style.marginBottom?.replace("pt", "");
+          return {
+            level: 1,
+            spacingBefore: mt ? Number(mt) || 0 : 0,
+            spacingAfter: mb ? Number(mb) || 0 : 0,
+          };
+        },
+      },
+      {
+        tag: "h2",
+        attrs: { level: 2 },
+        getAttrs: (dom) => {
+          const el = dom as HTMLElement;
+          const mt = el.style.marginTop?.replace("pt", "");
+          const mb = el.style.marginBottom?.replace("pt", "");
+          return { level: 2, spacingBefore: mt ? Number(mt) || 0 : 0, spacingAfter: mb ? Number(mb) || 0 : 0 };
+        },
+      },
+      {
+        tag: "h3",
+        attrs: { level: 3 },
+        getAttrs: (dom) => {
+          const el = dom as HTMLElement;
+          const mt = el.style.marginTop?.replace("pt", "");
+          const mb = el.style.marginBottom?.replace("pt", "");
+          return { level: 3, spacingBefore: mt ? Number(mt) || 0 : 0, spacingAfter: mb ? Number(mb) || 0 : 0 };
+        },
+      },
+      {
+        tag: "h4",
+        attrs: { level: 4 },
+        getAttrs: (dom) => {
+          const el = dom as HTMLElement;
+          const mt = el.style.marginTop?.replace("pt", "");
+          const mb = el.style.marginBottom?.replace("pt", "");
+          return { level: 4, spacingBefore: mt ? Number(mt) || 0 : 0, spacingAfter: mb ? Number(mb) || 0 : 0 };
+        },
+      },
+      {
+        tag: "h5",
+        attrs: { level: 5 },
+        getAttrs: (dom) => {
+          const el = dom as HTMLElement;
+          const mt = el.style.marginTop?.replace("pt", "");
+          const mb = el.style.marginBottom?.replace("pt", "");
+          return { level: 5, spacingBefore: mt ? Number(mt) || 0 : 0, spacingAfter: mb ? Number(mb) || 0 : 0 };
+        },
+      },
+      {
+        tag: "h6",
+        attrs: { level: 6 },
+        getAttrs: (dom) => {
+          const el = dom as HTMLElement;
+          const mt = el.style.marginTop?.replace("pt", "");
+          const mb = el.style.marginBottom?.replace("pt", "");
+          return { level: 6, spacingBefore: mt ? Number(mt) || 0 : 0, spacingAfter: mb ? Number(mb) || 0 : 0 };
+        },
+      },
+    ],
     toDOM: (node) => [
       `h${node.attrs.level}`,
       {
-        style: `text-align:${node.attrs.align};margin-left:${node.attrs.indent}em;line-height:${node.attrs.lineHeight}`,
+        style: `text-align:${node.attrs.align};margin-left:${node.attrs.indent}em;line-height:${node.attrs.lineHeight};margin-top:${node.attrs.spacingBefore}pt;margin-bottom:${node.attrs.spacingAfter}pt`,
       },
       0,
     ],
@@ -241,8 +331,51 @@ const styledNodes = addListNodes(basicSchema.spec.nodes, "paragraph block*", "bl
   })
   .addToEnd("page_break", pageBreakSpec);
 
+const imageBase = basicSchema.spec.nodes.get("image")!;
+const imageAttrs = imageBase.attrs ?? {};
+const nodesWithImage = styledNodes.update("image", {
+  ...imageBase,
+  attrs: {
+    src: imageAttrs.src ?? {},
+    alt: { default: null },
+    title: { default: null },
+    width: { default: null },
+    height: { default: null },
+  },
+  parseDOM: [
+    {
+      tag: "img[src]",
+      getAttrs(dom) {
+        const el = dom as HTMLElement;
+        const w = el.getAttribute("width") || el.style.width;
+        const h = el.getAttribute("height") || el.style.height;
+        return {
+          src: el.getAttribute("src"),
+          alt: el.getAttribute("alt"),
+          title: el.getAttribute("title"),
+          width: w ? Number.parseInt(String(w), 10) || null : null,
+          height: h ? Number.parseInt(String(h), 10) || null : null,
+        };
+      },
+    },
+  ],
+  toDOM(node) {
+    const style: string[] = [];
+    if (node.attrs.width) style.push(`width:${node.attrs.width}px`);
+    if (node.attrs.height) style.push(`height:${node.attrs.height}px`);
+    return [
+      "img",
+      {
+        src: node.attrs.src,
+        alt: node.attrs.alt || "",
+        style: style.length ? style.join(";") : undefined,
+      },
+    ];
+  },
+});
+
 const mySchema = new Schema({
-  nodes: styledNodes,
+  nodes: nodesWithImage,
   marks: customMarks,
 });
 
@@ -356,12 +489,17 @@ export function DocEditor(props: DocEditorProps) {
   const [highlightColor, setHighlightColor] = createSignal("#ffff00");
   const [currentBlockType, setCurrentBlockType] = createSignal("paragraph");
   const [currentLineSpacing, setCurrentLineSpacing] = createSignal("1.5");
+  const [spacingBefore, setSpacingBefore] = createSignal(0);
+  const [spacingAfter, setSpacingAfter] = createSignal(0);
+  const [tabStops, setTabStops] = createSignal<number[]>([96, 192, 288]);
   const [pageCount, setPageCount] = createSignal(1);
   const [headings, setHeadings] = createSignal<{ level: number; text: string; pos: number }[]>([]);
   const [linkDialogOpen, setLinkDialogOpen] = createSignal(false);
   const [linkHref, setLinkHref] = createSignal("https://");
   const [imageDialogOpen, setImageDialogOpen] = createSignal(false);
   const [imageSrc, setImageSrc] = createSignal("");
+  const [printPreviewOpen, setPrintPreviewOpen] = createSignal(false);
+  const [selectedImage, setSelectedImage] = createSignal<{ pos: number; width: number; height: number } | null>(null);
   const [contextMenu, setContextMenu] = createSignal<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
 
   const [painterState, setPainterState] = createSignal<"idle" | "armed" | "locked">("idle");
@@ -474,6 +612,7 @@ export function DocEditor(props: DocEditorProps) {
         findPlugin(findQuery, matchCase, matchIndex),
         new Plugin({
           props: {
+            transformPastedHTML: (html) => transformPastedHTML(html),
             transformPasted: (slice) => prunePastedSlice(slice, mySchema),
           },
         }),
@@ -483,7 +622,17 @@ export function DocEditor(props: DocEditorProps) {
           wrappingInputRule(/^(\d+)\.\s$/, mySchema.nodes.ordered_list, (match) => ({ order: +match[1] }), (match, node) => node.childCount + node.attrs.order === +match[1]),
         ] }),
         keymap({
-          "Tab": sinkListItem(mySchema.nodes.list_item),
+          "Tab": (state, dispatch) => {
+            const { $from } = state.selection;
+            if ($from.parent.type.name === "list_item") {
+              return sinkListItem(mySchema.nodes.list_item)(state, dispatch);
+            }
+            if (dispatch) {
+              dispatch(state.tr.insertText("\t"));
+              return true;
+            }
+            return false;
+          },
           "Shift-Tab": liftListItem(mySchema.nodes.list_item),
           "Mod-b": toggleMark(mySchema.marks.bold),
           "Mod-i": toggleMark(mySchema.marks.italic),
@@ -562,6 +711,12 @@ export function DocEditor(props: DocEditorProps) {
         if (parent.attrs && parent.attrs.lineHeight !== undefined) {
           setCurrentLineSpacing(String(parent.attrs.lineHeight));
         }
+        if (parent.attrs?.spacingBefore !== undefined) {
+          setSpacingBefore(Number(parent.attrs.spacingBefore) || 0);
+        }
+        if (parent.attrs?.spacingAfter !== undefined) {
+          setSpacingAfter(Number(parent.attrs.spacingAfter) || 0);
+        }
 
         if (transaction.selectionSet || transaction.docChanged) {
           syncToolbarFromSelection(newState, setFontFamily, setFontSize, setTextColor, setHighlightColor);
@@ -616,6 +771,17 @@ export function DocEditor(props: DocEditorProps) {
           setBubbleLeft(coords.left);
         } else {
           setBubbleVisible(false);
+        }
+
+        const sel = newState.selection;
+        if (sel instanceof NodeSelection && sel.node.type.name === "image") {
+          setSelectedImage({
+            pos: sel.from,
+            width: Number(sel.node.attrs.width) || 320,
+            height: Number(sel.node.attrs.height) || 240,
+          });
+        } else {
+          setSelectedImage(null);
         }
       },
       handlePaste(_view, event) {
@@ -674,6 +840,36 @@ export function DocEditor(props: DocEditorProps) {
   onCleanup(() => {
     if (view) view.destroy();
   });
+
+  const resizeSelectedImage = (width: number, height: number) => {
+    const img = selectedImage();
+    if (!view || !img) return;
+    const node = view.state.doc.nodeAt(img.pos);
+    if (!node || node.type.name !== "image") return;
+    view.dispatch(
+      view.state.tr.setNodeMarkup(img.pos, undefined, {
+        ...node.attrs,
+        width: Math.max(40, width),
+        height: Math.max(40, height),
+      }),
+    );
+    setSelectedImage({ pos: img.pos, width: Math.max(40, width), height: Math.max(40, height) });
+  };
+
+  const insertImageFromFile = (file: File, pos?: number) => {
+    if (!view) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const src = String(reader.result || "");
+      if (!src) return;
+      const node = mySchema.nodes.image.create({ src, alt: file.name, width: 320, height: 240 });
+      const tr = pos != null
+        ? view!.state.tr.insert(pos, node)
+        : view!.state.tr.replaceSelectionWith(node);
+      view!.dispatch(tr);
+    };
+    reader.readAsDataURL(file);
+  };
 
   const withView = (fn: (v: EditorView) => void) => {
     if (view) fn(view);
@@ -902,6 +1098,8 @@ export function DocEditor(props: DocEditorProps) {
             align: "left",
             indent: 0,
             lineHeight: 1.5,
+            spacingBefore: 0,
+            spacingAfter: 0,
             ...(node.type.name === "heading" ? { level: node.attrs.level } : {}),
           });
         }
@@ -975,6 +1173,21 @@ export function DocEditor(props: DocEditorProps) {
           break;
         case "style-h2":
           execBlockType("heading2");
+          break;
+        case "style-h3":
+          execBlockType("heading3");
+          break;
+        case "style-h4":
+          execBlockType("heading4");
+          break;
+        case "style-h5":
+          execBlockType("heading5");
+          break;
+        case "style-h6":
+          execBlockType("heading6");
+          break;
+        case "print-preview":
+          setPrintPreviewOpen(true);
           break;
         case "print":
           window.print();
@@ -1261,6 +1474,10 @@ export function DocEditor(props: DocEditorProps) {
         onIncreaseIndent={() => adjustIndent(1)}
         currentLineSpacing={currentLineSpacing()}
         onChangeLineSpacing={(v) => execBlockAttrs({ lineHeight: v })}
+        spacingBefore={spacingBefore()}
+        spacingAfter={spacingAfter()}
+        onChangeSpacingBefore={(v) => execBlockAttrs({ spacingBefore: v })}
+        onChangeSpacingAfter={(v) => execBlockAttrs({ spacingAfter: v })}
       />
 
       <FindReplace
@@ -1292,9 +1509,11 @@ export function DocEditor(props: DocEditorProps) {
         {(() => {
           const getCssContent = (text: string | undefined) => {
             if (!text) return `""`;
-            const withTotal = text.replace(/{total}/g, String(pageCount()));
+            const withTotal = text
+              .replace(/{pages}/g, String(pageCount()))
+              .replace(/{total}/g, String(pageCount()));
             const parts = withTotal.split(/{page}/g);
-            return parts.length === 1 ? JSON.stringify(parts[0]) : parts.map(p => JSON.stringify(p)).join(' counter(page) ');
+            return parts.length === 1 ? JSON.stringify(parts[0]) : parts.map((p) => JSON.stringify(p)).join(" counter(page) ");
           };
           return (
             <style>{`
@@ -1382,16 +1601,29 @@ export function DocEditor(props: DocEditorProps) {
 
       <Show when={pageSetup().header}>
         <div class="doc-print-header">
-          {pageSetup().header?.replace(/{total}/g, String(pageCount())).replace(/{page}/g, "")}
+          {pageSetup().header
+            ?.replace(/{pages}/g, String(pageCount()))
+            ?.replace(/{total}/g, String(pageCount()))
+            ?.replace(/{page}/g, "1")}
         </div>
       </Show>
       <Show when={pageSetup().footer}>
         <div class="doc-print-footer">
-          {pageSetup().footer?.replace(/{total}/g, String(pageCount())).replace(/{page}/g, "")}
+          {pageSetup().footer
+            ?.replace(/{pages}/g, String(pageCount()))
+            ?.replace(/{total}/g, String(pageCount()))
+            ?.replace(/{page}/g, "1")}
         </div>
       </Show>
 
-      <Ruler zoom={zoom()} leftMargin={pageSetup().margins.left * 96} rightMargin={pageSetup().margins.right * 96} pageWidth={paperDimensions().width} />
+      <Ruler
+        zoom={zoom()}
+        leftMargin={pageSetup().margins.left * 96}
+        rightMargin={pageSetup().margins.right * 96}
+        pageWidth={paperDimensions().width}
+        tabStops={tabStops()}
+        onAddTabStop={(pos) => setTabStops((prev) => [...prev, pos].sort((a, b) => a - b))}
+      />
 
       <div style={{ flex: 1, display: "flex", "min-height": "0", overflow: "hidden" }}>
         <main
@@ -1425,6 +1657,15 @@ export function DocEditor(props: DocEditorProps) {
             <div
               ref={editorRef}
               style={{ "min-height": "800px", outline: "none", "font-family": "Liberation Serif, serif", "font-size": "12pt" }}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (!view) return;
+                const file = e.dataTransfer?.files?.[0];
+                if (!file || !file.type.startsWith("image/")) return;
+                const pos = view.posAtCoords({ left: e.clientX, top: e.clientY })?.pos;
+                insertImageFromFile(file, pos);
+              }}
               onContextMenu={(event) => {
                 event.preventDefault();
                 const items: ContextMenuItem[] = [
@@ -1445,6 +1686,42 @@ export function DocEditor(props: DocEditorProps) {
                 setContextMenu({ x: event.clientX, y: event.clientY, items });
               }}
             />
+            <Show when={selectedImage() && view}>
+              <div
+                role="button"
+                aria-label="Resize image"
+                title="Drag to resize image"
+                style={{
+                  position: "fixed",
+                  left: `${view!.coordsAtPos(selectedImage()!.pos).right - 6}px`,
+                  top: `${view!.coordsAtPos(selectedImage()!.pos).bottom - 6}px`,
+                  width: "12px",
+                  height: "12px",
+                  background: "var(--doc-accent)",
+                  border: "2px solid white",
+                  cursor: "nwse-resize",
+                  "z-index": 50,
+                }}
+                onPointerDown={(e) => {
+                  const img = selectedImage()!;
+                  const node = view!.state.doc.nodeAt(img.pos);
+                  const startW = Number(node?.attrs.width) || img.width;
+                  const startH = Number(node?.attrs.height) || img.height;
+                  e.preventDefault();
+                  const startX = e.clientX;
+                  const startY = e.clientY;
+                  const onMove = (ev: PointerEvent) => {
+                    resizeSelectedImage(startW + (ev.clientX - startX), startH + (ev.clientY - startY));
+                  };
+                  const onUp = () => {
+                    window.removeEventListener("pointermove", onMove);
+                    window.removeEventListener("pointerup", onUp);
+                  };
+                  window.addEventListener("pointermove", onMove);
+                  window.addEventListener("pointerup", onUp);
+                }}
+              />
+            </Show>
           </div>
         </main>
         <IconSidebar panels={sidebarPanels()} defaultPanel="properties" />
@@ -1533,6 +1810,13 @@ export function DocEditor(props: DocEditorProps) {
           if (view) emitDocChange(view.state.doc, config);
         }}
       />
+
+      <Show when={printPreviewOpen()}>
+        <PrintPreview
+          content={editorRef?.innerHTML || ""}
+          onClose={() => setPrintPreviewOpen(false)}
+        />
+      </Show>
     </div>
   );
 }

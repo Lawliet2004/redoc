@@ -72,3 +72,69 @@ export function hitTest(element: SnapElement, px: number, py: number): boolean {
   return px >= element.x && px <= element.x + element.width &&
          py >= element.y && py <= element.y + element.height;
 }
+
+export type AlignMode = "left" | "center" | "right" | "top" | "middle" | "bottom";
+
+/** Returns new positions for aligning one or more elements on the slide canvas. */
+export function alignElements(
+  elements: SnapElement[],
+  mode: AlignMode,
+  canvasWidth = 960,
+  canvasHeight = 540,
+): Array<{ id: string; x: number; y: number }> {
+  if (!elements.length) return [];
+
+  if (elements.length === 1) {
+    const el = elements[0];
+    let x = el.x;
+    let y = el.y;
+    if (mode === "left") x = 0;
+    if (mode === "center") x = (canvasWidth - el.width) / 2;
+    if (mode === "right") x = canvasWidth - el.width;
+    if (mode === "top") y = 0;
+    if (mode === "middle") y = (canvasHeight - el.height) / 2;
+    if (mode === "bottom") y = canvasHeight - el.height;
+    return [{ id: el.id, x, y }];
+  }
+
+  const minX = Math.min(...elements.map((e) => e.x));
+  const maxX = Math.max(...elements.map((e) => e.x + e.width));
+  const minY = Math.min(...elements.map((e) => e.y));
+  const maxY = Math.max(...elements.map((e) => e.y + e.height));
+  const midX = (minX + maxX) / 2;
+  const midY = (minY + maxY) / 2;
+
+  return elements.map((el) => {
+    let x = el.x;
+    let y = el.y;
+    if (mode === "left") x = minX;
+    if (mode === "center") x = midX - el.width / 2;
+    if (mode === "right") x = maxX - el.width;
+    if (mode === "top") y = minY;
+    if (mode === "middle") y = midY - el.height / 2;
+    if (mode === "bottom") y = maxY - el.height;
+    return { id: el.id, x, y };
+  });
+}
+
+export function assignGroupId<T extends { id: string; groupId?: string }>(
+  elements: T[],
+  ids: string[],
+  groupId: string,
+): T[] {
+  return elements.map((el) => (ids.includes(el.id) ? { ...el, groupId } : el));
+}
+
+export function clearGroupIds<T extends { id: string; groupId?: string }>(
+  elements: T[],
+  selectedIds: string[],
+): T[] {
+  const selectedGroups = new Set(
+    elements.filter((el) => selectedIds.includes(el.id) && el.groupId).map((el) => el.groupId),
+  );
+  return elements.map((el) =>
+    selectedIds.includes(el.id) || (el.groupId && selectedGroups.has(el.groupId))
+      ? { ...el, groupId: undefined }
+      : el,
+  );
+}

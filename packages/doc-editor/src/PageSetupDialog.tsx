@@ -181,7 +181,7 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
                 value={header()}
                 onInput={(e) => setHeader(e.currentTarget.value)}
                 style={{ height: "28px", padding: "0 8px" }}
-                placeholder="e.g. {page} of {total}"
+            placeholder="e.g. Document Title — Page {page} of {pages}"
               />
             </label>
             <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
@@ -192,7 +192,7 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
                 value={footer()}
                 onInput={(e) => setFooter(e.currentTarget.value)}
                 style={{ height: "28px", padding: "0 8px" }}
-                placeholder="e.g. {page} of {total}"
+            placeholder="e.g. Document Title — Page {page} of {pages}"
               />
             </label>
           </div>

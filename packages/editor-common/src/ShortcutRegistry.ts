@@ -28,7 +28,7 @@ const MENU_ORDER = [
   "Help",
 ];
 
-class ShortcutRegistry {
+export class ShortcutRegistry {
   private commands: Map<string, CommandItem> = new Map();
 
   register(command: CommandItem) {

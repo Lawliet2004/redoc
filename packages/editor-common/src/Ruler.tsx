@@ -7,21 +7,35 @@ interface RulerProps {
   rightMargin?: number;
   /** Zoom percent */
   zoom?: number;
+  /** Tab stop positions in px from content left */
+  tabStops?: number[];
+  /** Called when user clicks ruler to add a tab stop */
+  onAddTabStop?: (positionPx: number) => void;
 }
 
-/** Visual horizontal ruler with cm tick marks and margin indicators. */
+/** Visual horizontal ruler with cm tick marks, margin indicators, and tab stops. */
 export function Ruler(props: RulerProps) {
   const pageWidth = () => props.pageWidth ?? 816;
   const left = () => props.leftMargin ?? 96;
   const right = () => props.rightMargin ?? 96;
   const zoom = () => (props.zoom ?? 100) / 100;
   const scaledWidth = () => pageWidth() * zoom();
+  const tabStops = () => props.tabStops ?? [];
 
   // ~37.8 px per cm at 96dpi
   const ticks = () => {
     const cm = 37.795;
     const count = Math.ceil(pageWidth() / cm) + 1;
     return Array.from({ length: count }, (_, i) => i);
+  };
+
+  const handleRulerClick = (event: MouseEvent) => {
+    if (!props.onAddTabStop) return;
+    const target = event.currentTarget as HTMLElement;
+    const rect = target.getBoundingClientRect();
+    const x = (event.clientX - rect.left) / zoom();
+    if (x < left() || x > pageWidth() - right()) return;
+    props.onAddTabStop(Math.round(x));
   };
 
   return (
@@ -33,6 +47,7 @@ export function Ruler(props: RulerProps) {
           margin: "0 auto",
           width: `${scaledWidth()}px`,
         }}
+        onClick={handleRulerClick}
       >
         {/* margin bands */}
         <div
@@ -80,6 +95,21 @@ export function Ruler(props: RulerProps) {
             "border-top": "6px solid #ddd",
           }}
         />
+        {tabStops().map((stop) => (
+          <div
+            style={{
+              position: "absolute",
+              left: `${stop * zoom()}px`,
+              bottom: "0",
+              width: "0",
+              height: "0",
+              "border-left": "4px solid transparent",
+              "border-right": "4px solid transparent",
+              "border-bottom": "6px solid #1a73e8",
+              transform: "translateX(-4px)",
+            }}
+          />
+        ))}
         {ticks().map((i) => {
           const x = i * 37.795 * zoom();
           const major = i % 1 === 0;

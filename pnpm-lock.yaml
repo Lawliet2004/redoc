@@ -171,6 +171,9 @@ importers:
       '@redoc/ui':
         specifier: workspace:*
         version: link:../ui
+      '@redoc/utils':
+        specifier: workspace:*
+        version: link:../utils
       solid-js:
         specifier: ^1.9.3
         version: 1.9.14
@@ -189,6 +192,9 @@ importers:
       '@redoc/ui':
         specifier: workspace:*
         version: link:../ui
+      '@tauri-apps/api':
+        specifier: ^2.2.0
+        version: 2.11.1
       solid-js:
         specifier: ^1.9.3
         version: 1.9.14

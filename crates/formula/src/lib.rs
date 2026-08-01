@@ -8,7 +8,7 @@ pub use ast::{BinaryOp, Expr, FormulaError, FormulaValue};
 pub use dep_graph::{CellCoord, DependencyGraph};
 pub use eval::{eval_expr, extract_dependencies, CellProvider};
 pub use functions::eval_func;
-pub use parser::{parse_a1_reference, parse_formula, tokenize, Token};
+pub use parser::{parse_a1_range, parse_a1_reference, parse_formula, tokenize, Token};
 
 #[cfg(test)]
 mod tests {
@@ -68,6 +68,15 @@ mod tests {
             ("=SUMIF(A1:B1,\">5\")", FormulaValue::Number(30.0)),
             ("=TEXT(12.34,\"0.0\")", FormulaValue::String("12.3".into())),
             ("=VLOOKUP(10,A1:B1,2)", FormulaValue::Number(20.0)),
+            ("=XLOOKUP(10,A1:B1,A1:B1)", FormulaValue::Number(10.0)),
+            ("=INDEX(A1:B1,2)", FormulaValue::Number(20.0)),
+            ("=MATCH(10,A1:B1,0)", FormulaValue::Number(1.0)),
+            ("=DATE(2020,1,15)", FormulaValue::Number(43845.0)),
+            ("=ISNUMBER(A1)", FormulaValue::Boolean(true)),
+            ("=VALUE(\"42\")", FormulaValue::Number(42.0)),
+            ("=CHOOSE(2,\"a\",\"b\")", FormulaValue::String("b".into())),
+            ("=OFFSET(A1,0,1)", FormulaValue::Number(20.0)),
+            ("=INDIRECT(\"A1\")", FormulaValue::Number(10.0)),
         ];
         for (formula, expected) in cases {
             let ast = parse_formula(formula).expect("formula parses");

@@ -137,3 +137,30 @@ impl RecoveryManager {
         list
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn clear_all_snapshots_removes_autosave_files_and_sentinel() {
+        let dir = std::env::temp_dir().join(format!("redoc-recovery-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(dir.join("autosave")).expect("create autosave dir");
+        fs::write(dir.join("autosave/doc-1.redoc"), b"snapshot").expect("write snapshot");
+        fs::write(dir.join("running.sentinel"), b"PID: 1").expect("write sentinel");
+
+        let manager = RecoveryManager::new(dir.clone());
+        assert!(manager.had_unclean_shutdown());
+        manager.clear_all_snapshots().expect("clear snapshots");
+
+        assert!(!manager.had_unclean_shutdown());
+        let remaining: Vec<_> = fs::read_dir(dir.join("autosave"))
+            .expect("read autosave dir")
+            .flatten()
+            .collect();
+        assert!(remaining.is_empty());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+}

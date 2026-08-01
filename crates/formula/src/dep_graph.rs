@@ -80,3 +80,33 @@ impl DependencyGraph {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn detects_dependency_cycle() {
+        let mut graph = DependencyGraph::default();
+        graph.update_cell_deps((1, 1), HashSet::from([(2, 1)]));
+        graph.update_cell_deps((2, 1), HashSet::from([(1, 1)]));
+
+        let result = graph.get_recalc_order(&[(1, 1)]);
+        assert_eq!(result, Err(FormulaError::Cycle));
+    }
+
+    #[test]
+    fn returns_topological_order_for_acyclic_graph() {
+        let mut graph = DependencyGraph::default();
+        graph.update_cell_deps((1, 1), HashSet::new());
+        graph.update_cell_deps((2, 1), HashSet::from([(1, 1)]));
+        graph.update_cell_deps((3, 1), HashSet::from([(2, 1)]));
+
+        let order = graph
+            .get_recalc_order(&[(1, 1)])
+            .expect("acyclic graph should order");
+        assert_eq!(order.first(), Some(&(1, 1)));
+        assert!(order.contains(&(3, 1)));
+    }
+}

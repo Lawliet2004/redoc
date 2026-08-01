@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { snapElementPosition, computeBounds, hitTest } from "./geometry";
+import { snapElementPosition, computeBounds, hitTest, alignElements, assignGroupId, clearGroupIds } from "./geometry";
 
 describe("snapElementPosition", () => {
   it("snaps an element center to the slide center", () => {
@@ -54,5 +54,55 @@ describe("hitTest", () => {
     expect(hitTest(element, 5, 5)).toBe(false);
     expect(hitTest(element, 61, 61)).toBe(false);
     expect(hitTest(element, 20, 70)).toBe(false);
+  });
+});
+
+describe("alignElements", () => {
+  it("centers a single element on the canvas", () => {
+    const [pos] = alignElements(
+      [{ id: "a", x: 0, y: 0, width: 100, height: 60 }],
+      "center",
+    );
+    expect(pos).toEqual({ id: "a", x: 430, y: 0 });
+  });
+
+  it("aligns multiple elements to the left edge of the selection bounds", () => {
+    const positions = alignElements(
+      [
+        { id: "a", x: 50, y: 10, width: 40, height: 20 },
+        { id: "b", x: 120, y: 30, width: 60, height: 30 },
+      ],
+      "left",
+    );
+    expect(positions).toEqual([
+      { id: "a", x: 50, y: 10 },
+      { id: "b", x: 50, y: 30 },
+    ]);
+  });
+});
+
+describe("group helpers", () => {
+  it("assignGroupId tags selected elements", () => {
+    const elements = [
+      { id: "a", x: 0, y: 0, width: 10, height: 10 },
+      { id: "b", x: 20, y: 0, width: 10, height: 10 },
+      { id: "c", x: 40, y: 0, width: 10, height: 10 },
+    ];
+    const grouped = assignGroupId(elements, ["a", "b"], "grp-1");
+    expect(grouped[0].groupId).toBe("grp-1");
+    expect(grouped[1].groupId).toBe("grp-1");
+    expect(grouped[2].groupId).toBeUndefined();
+  });
+
+  it("clearGroupIds removes group from selection and peers in same group", () => {
+    const elements = [
+      { id: "a", x: 0, y: 0, width: 10, height: 10, groupId: "grp-1" },
+      { id: "b", x: 20, y: 0, width: 10, height: 10, groupId: "grp-1" },
+      { id: "c", x: 40, y: 0, width: 10, height: 10, groupId: "grp-2" },
+    ];
+    const ungrouped = clearGroupIds(elements, ["a"]);
+    expect(ungrouped[0].groupId).toBeUndefined();
+    expect(ungrouped[1].groupId).toBeUndefined();
+    expect(ungrouped[2].groupId).toBe("grp-2");
   });
 });

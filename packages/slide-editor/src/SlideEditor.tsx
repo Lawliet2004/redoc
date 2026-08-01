@@ -15,50 +15,20 @@ import {
   IconBold, IconItalic, IconUnderline,
 } from "@redoc/icons";
 import { Dialog, showToast } from "@redoc/ui";
-import { snapElementPosition, type AlignmentGuide } from "./geometry";
+import { commands } from "@redoc/api-client";
+import { snapElementPosition, alignElements, assignGroupId, clearGroupIds, type AlignmentGuide } from "./geometry";
+import {
+  PLACEHOLDER_TITLE, PLACEHOLDER_BODY, defaultTheme, normalizeDeck, normalizeTransition, toDeck,
+  type Slide, type SlideElement, type SlideTransition, type ElementEntrance,
+} from "./deckNormalize";
+import { stashPresenterDeck } from "./presenterSession";
+import { ShapeBody, isFilledShape, isShapeType, type ShapeType } from "./shapeUtils";
+import "./SlideEditor.css";
 
-const PLACEHOLDER_TITLE = "Click to add Title";
-const PLACEHOLDER_BODY = "Click to add Text";
-
-type SlideTransition = "none" | "fade" | "slide-left" | "slide-right";
-type ElementEntrance = "none" | "fade";
 type PrintPerPage = 1 | 2 | 4 | 6;
 
 function isPlaceholder(content: string) {
   return content === PLACEHOLDER_TITLE || content === PLACEHOLDER_BODY;
-}
-
-function normalizeEntrance(value: unknown): ElementEntrance {
-  return value === "fade" ? "fade" : "none";
-}
-
-interface SlideElement {
-  id: string;
-  type: "text" | "rect" | "ellipse" | "line" | "arrow" | "image";
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  content: string;
-  fontSize?: number;
-  color?: string;
-  rotation?: number;
-  align?: "left" | "center" | "right";
-  bullets?: boolean;
-  entrance?: ElementEntrance;
-  fontFamily?: string;
-  bold?: boolean;
-  italic?: boolean;
-  underline?: boolean;
-}
-
-interface Slide {
-  id: string;
-  title: string;
-  layout: string;
-  elements: SlideElement[];
-  notes: string;
-  transition: SlideTransition;
 }
 
 interface SlideEditorProps {
@@ -71,186 +41,8 @@ interface SlideEditorProps {
   onRequestExportPdf?: () => void;
 }
 
-const defaultTheme = {
-  id: "default-light",
-  name: "Modern Light",
-  bgColor: "#ffffff",
-  textColor: "#1e293b",
-  accentColor: "#3b82f6",
-  fontFamily: "Inter, sans-serif",
-};
-
-type DrawTool = "select" | "line" | "rect" | "ellipse" | "arrow" | "text";
-
-function normalizeTransition(value: unknown, fallbackFade = false): SlideTransition {
-  if (value === "fade" || value === "slide-left" || value === "slide-right" || value === "none") return value;
-  return fallbackFade ? "fade" : "none";
-}
-
-function normalizeTextAlign(value: unknown): "left" | "center" | "right" {
-  return value === "left" || value === "right" ? value : "center";
-}
-
-function normalizeFlatElement(element: any, rotation: number, entrance: ElementEntrance): SlideElement | null {
-  const type = element.type as string;
-  const base = {
-    id: element.id || `el-${Math.random()}`,
-    x: typeof element.x === "number" ? element.x : 100,
-    y: typeof element.y === "number" ? element.y : 100,
-    width: typeof element.width === "number" ? element.width : 400,
-    height: typeof element.height === "number" ? element.height : 60,
-    rotation,
-    entrance,
-  };
-  if (type === "text") {
-    return {
-      ...base,
-      type: "text",
-      content: element.content ?? "",
-      fontSize: element.fontSize,
-      color: element.color ?? "#1e293b",
-      align: normalizeTextAlign(element.align),
-      bullets: Boolean(element.bullets),
-      fontFamily: element.fontFamily,
-      bold: Boolean(element.bold),
-      italic: Boolean(element.italic),
-      underline: Boolean(element.underline),
-    };
-  }
-  if (type === "image") {
-    return {
-      ...base,
-      type: "image",
-      content: element.content ?? "",
-      color: element.color ?? "#ffffff",
-    };
-  }
-  if (type === "rect" || type === "ellipse" || type === "line" || type === "arrow") {
-    return {
-      ...base,
-      type,
-      content: "",
-      color: element.color ?? "#3b82f6",
-    };
-  }
-  return null;
-}
-
-function normalizeDeck(deck: any): Slide[] {
-  if (!deck?.slides?.length) return [{
-    id: "slide-1", title: "Title Slide", layout: "title", notes: "", transition: "none", elements: [
-      { id: "el-1", type: "text", x: 100, y: 180, width: 760, height: 80, content: PLACEHOLDER_TITLE, fontSize: 40, color: "#1e293b", rotation: 0, align: "center" },
-      { id: "el-2", type: "text", x: 150, y: 280, width: 660, height: 50, content: PLACEHOLDER_BODY, fontSize: 22, color: "#64748b", rotation: 0, align: "center" },
-    ],
-  }];
-  const deckFade = Boolean(deck.fadeBetweenSlides);
-  return deck.slides.map((slide: any) => ({
-    id: slide.id,
-    title: slide.title || slide.layout || "Slide",
-    layout: slide.layout || "blank",
-    notes: slide.notes || "",
-    transition: normalizeTransition(slide.transition, deckFade),
-    elements: (slide.elements || []).map((element: any) => {
-      const kind = element.kind || {};
-      const rotation = typeof element.rotation === "number" ? element.rotation : 0;
-      const entrance = normalizeEntrance(element.entrance);
-      if (!element.kind && element.type) {
-        const flat = normalizeFlatElement(element, rotation, entrance);
-        if (flat) return flat;
-      }
-      if (kind.Text) {
-        return {
-          id: element.id,
-          type: "text" as const,
-          x: element.x,
-          y: element.y,
-          width: element.width,
-          height: element.height,
-          content: kind.Text.text,
-          fontSize: kind.Text.fontSize,
-          color: kind.Text.color,
-          rotation,
-          align: normalizeTextAlign(kind.Text.align),
-          bullets: Boolean(kind.Text.bullets),
-          entrance,
-          fontFamily: kind.Text.fontFamily,
-          bold: Boolean(kind.Text.bold),
-          italic: Boolean(kind.Text.italic),
-          underline: Boolean(kind.Text.underline),
-        };
-      }
-      if (kind.Shape) {
-        const shapeType = kind.Shape.shapeType;
-        const type = shapeType === "ellipse" || shapeType === "line" || shapeType === "arrow" ? shapeType : "rect";
-        const strokeColor = kind.Shape.strokeColor;
-        const color = type === "line" || type === "arrow"
-          ? (strokeColor && strokeColor !== "transparent" ? strokeColor : kind.Shape.fillColor || "#1e293b")
-          : kind.Shape.fillColor;
-        return { id: element.id, type, x: element.x, y: element.y, width: element.width, height: element.height, content: "", color: color || "#3b82f6", rotation, entrance };
-      }
-      if (kind.Image) return { id: element.id, type: "image", x: element.x, y: element.y, width: element.width, height: element.height, content: kind.Image.assetHash, color: "#ffffff", rotation, entrance };
-      return { id: element.id, type: "rect", x: element.x ?? 100, y: element.y ?? 100, width: element.width ?? 200, height: element.height ?? 120, content: "", color: "#e2e8f0", rotation, entrance };
-    }),
-  }));
-}
-
-function shapeKindForElement(element: SlideElement, theme: typeof defaultTheme) {
-  const isLine = element.type === "line" || element.type === "arrow";
-  const strokeColor = element.color || theme.textColor || "#000000";
-  return {
-    Shape: {
-      shapeType: element.type,
-      fillColor: isLine ? "transparent" : (element.color || theme.accentColor || "#3b82f6"),
-      strokeColor: isLine ? strokeColor : "transparent",
-      strokeWidth: isLine ? 3 : 0,
-    },
-  };
-}
-
-function toDeck(slides: Slide[], source: any, theme: typeof defaultTheme, activeIndex: number) {
-  const anyFade = slides.some((slide) => slide.transition === "fade");
-  return {
-    slides: slides.map((slide) => ({
-      id: slide.id,
-      layout: slide.layout,
-      notes: slide.notes,
-      bgOverride: null,
-      transition: slide.transition || "none",
-      elements: slide.elements.map((element, index) => ({
-        id: element.id,
-        x: element.x,
-        y: element.y,
-        width: element.width,
-        height: element.height,
-        rotation: element.rotation || 0,
-        zIndex: index,
-        entrance: element.entrance || "none",
-        kind: element.type === "text"
-          ? {
-              Text: {
-                text: element.content,
-                fontSize: element.fontSize || 20,
-                fontFamily: element.fontFamily || "Inter, sans-serif",
-                color: element.color || "#1e293b",
-                align: element.align || "center",
-                bullets: Boolean(element.bullets),
-                bold: Boolean(element.bold),
-                italic: Boolean(element.italic),
-                underline: Boolean(element.underline),
-              },
-            }
-          : element.type === "image"
-            ? { Image: { assetHash: element.content, mime: "image/url" } }
-            : shapeKindForElement(element, theme),
-      })),
-    })),
-    theme,
-    canvasWidth: source?.canvasWidth || 960,
-    canvasHeight: source?.canvasHeight || 540,
-    activeSlideIndex: activeIndex,
-    fadeBetweenSlides: anyFade,
-  };
-}
+type ResizeHandle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
+type DrawTool = "select" | ShapeType | "text";
 
 export function SlideEditor(props: SlideEditorProps) {
   const [slides, setSlides] = createSignal<Slide[]>(normalizeDeck(props.initialContent));
@@ -266,10 +58,23 @@ export function SlideEditor(props: SlideEditorProps) {
   let dragStartClient = { x: 0, y: 0 };
   let dragMoved = false;
   const DRAG_THRESHOLD = 5;
-  const [selectedElementId, setSelectedElementId] = createSignal<string | null>(null);
+  const [selectedElementIds, setSelectedElementIds] = createSignal<string[]>([]);
+  const selectedElementId = () => selectedElementIds()[0] ?? null;
+  const setSelectedElementId = (id: string | null) => setSelectedElementIds(id ? [id] : []);
   const [dragging, setDragging] = createSignal(false);
   const [dragOffset, setDragOffset] = createSignal({ x: 0, y: 0 });
-  const [resizing, setResizing] = createSignal<{ id: string; startX: number; startY: number; width: number; height: number } | null>(null);
+  const [resizing, setResizing] = createSignal<{
+    id: string;
+    handle: ResizeHandle;
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [zoom, setZoom] = createSignal(100);
+  const [filmstripDragIndex, setFilmstripDragIndex] = createSignal<number | null>(null);
   const [alignmentGuides, setAlignmentGuides] = createSignal<AlignmentGuide[]>([]);
   const [drawTool, setDrawTool] = createSignal<DrawTool>("select");
   const [fillColor, setFillColor] = createSignal("#3b82f6");
@@ -320,6 +125,105 @@ export function SlideEditor(props: SlideEditorProps) {
     emitChange(snapshot.slides);
   };
 
+  const selectElement = (id: string, additive = false) => {
+    if (additive) {
+      const current = selectedElementIds();
+      if (current.includes(id)) setSelectedElementIds(current.filter((x) => x !== id));
+      else setSelectedElementIds([...current, id]);
+    } else {
+      setSelectedElementIds([id]);
+    }
+  };
+
+  const getSelectedElements = (): SlideElement[] => {
+    const slide = activeSlide();
+    if (!slide) return [];
+    const ids = selectedElementIds();
+    if (ids.length) return slide.elements.filter((el) => ids.includes(el.id));
+    return [];
+  };
+
+  const alignSelected = (mode: "left" | "center" | "right" | "top" | "middle" | "bottom") => {
+    const els = getSelectedElements();
+    if (!els.length) return;
+    pushSlideHistory();
+    const positions = alignElements(els, mode);
+    for (const el of els) {
+      const pos = positions.find((p) => p.id === el.id);
+      if (pos) {
+        el.x = pos.x;
+        el.y = pos.y;
+      }
+    }
+    setSlides([...slides()]);
+    commitChange();
+  };
+
+  const distributeSelected = (axis: "h" | "v") => {
+    const els = [...getSelectedElements()].sort((a, b) => axis === "h" ? a.x - b.x : a.y - b.y);
+    if (els.length < 3) return;
+    pushSlideHistory();
+    if (axis === "h") {
+      const minX = els[0].x;
+      const maxX = els[els.length - 1].x;
+      const totalWidth = els.reduce((sum, e) => sum + e.width, 0);
+      const gap = (maxX + els[els.length - 1].width - minX - totalWidth) / (els.length - 1);
+      let x = minX;
+      for (const el of els) {
+        el.x = x;
+        x += el.width + gap;
+      }
+    } else {
+      const minY = els[0].y;
+      const maxY = els[els.length - 1].y;
+      const totalHeight = els.reduce((sum, e) => sum + e.height, 0);
+      const gap = (maxY + els[els.length - 1].height - minY - totalHeight) / (els.length - 1);
+      let y = minY;
+      for (const el of els) {
+        el.y = y;
+        y += el.height + gap;
+      }
+    }
+    setSlides([...slides()]);
+    commitChange();
+  };
+
+  const groupSelected = () => {
+    const ids = selectedElementIds();
+    if (ids.length < 2) return;
+    pushSlideHistory();
+    const gid = `grp-${Date.now()}`;
+    const list = [...slides()];
+    const slide = list[activeSlideIndex()];
+    slide.elements = assignGroupId(slide.elements, ids, gid);
+    list[activeSlideIndex()] = slide;
+    setSlides(list);
+    commitChange(list);
+  };
+
+  const ungroupSelected = () => {
+    const ids = selectedElementIds();
+    if (!ids.length) return;
+    pushSlideHistory();
+    const list = [...slides()];
+    const slide = list[activeSlideIndex()];
+    slide.elements = clearGroupIds(slide.elements, ids);
+    list[activeSlideIndex()] = slide;
+    setSlides(list);
+    commitChange(list);
+  };
+
+  const elementsToMoveWith = (el: SlideElement): SlideElement[] => {
+    const slide = activeSlide();
+    if (!slide) return [el];
+    const ids = selectedElementIds();
+    if (ids.length > 1 && ids.includes(el.id)) {
+      return slide.elements.filter((e) => ids.includes(e.id));
+    }
+    if (el.groupId) return slide.elements.filter((e) => e.groupId === el.groupId);
+    return [el];
+  };
+
   const activeSlide = () => slides()[activeSlideIndex()];
   const selectedElement = () => activeSlide()?.elements.find((el) => el.id === selectedElementId()) || null;
   const emitChange = (next: Slide[] = slides()) =>
@@ -334,6 +238,149 @@ export function SlideEditor(props: SlideEditorProps) {
       x: (clientX - rect.left) * (960 / rect.width),
       y: (clientY - rect.top) * (540 / rect.height),
     };
+  };
+
+  const slideBackground = () => activeSlide()?.bgOverride || theme().bgColor;
+
+  const applyResize = (el: SlideElement, handle: ResizeHandle, localX: number, localY: number, start: NonNullable<ReturnType<typeof resizing>>, shiftKey: boolean) => {
+    const minW = 40;
+    const minH = 30;
+    let { origX, origY, width, height } = start;
+    const ratio = width / height || 1;
+    const right = origX + width;
+    const bottom = origY + height;
+
+    if (handle.includes("e")) {
+      width = Math.max(minW, Math.min(960 - origX, localX - origX));
+    }
+    if (handle.includes("w")) {
+      const newX = Math.max(0, Math.min(right - minW, localX));
+      width = right - newX;
+      origX = newX;
+    }
+    if (handle.includes("s")) {
+      height = Math.max(minH, Math.min(540 - origY, localY - origY));
+    }
+    if (handle.includes("n")) {
+      const newY = Math.max(0, Math.min(bottom - minH, localY));
+      height = bottom - newY;
+      origY = newY;
+    }
+
+    if (shiftKey && (handle === "nw" || handle === "ne" || handle === "se" || handle === "sw")) {
+      if (handle.includes("e") || handle.includes("w")) {
+        height = width / ratio;
+        if (handle.includes("n")) origY = bottom - height;
+      } else {
+        width = height * ratio;
+        if (handle.includes("w")) origX = right - width;
+      }
+    }
+
+    el.x = Math.max(0, Math.min(960 - minW, origX));
+    el.y = Math.max(0, Math.min(540 - minH, origY));
+    el.width = Math.max(minW, Math.min(960 - el.x, width));
+    el.height = Math.max(minH, Math.min(540 - el.y, height));
+  };
+
+  const reorderSlides = (from: number, to: number) => {
+    if (from === to || from < 0 || to < 0 || from >= slides().length || to >= slides().length) return;
+    pushSlideHistory();
+    const next = [...slides()];
+    const [item] = next.splice(from, 1);
+    next.splice(to, 0, item);
+    setSlides(next);
+    const active = activeSlideIndex();
+    if (active === from) setActiveSlideIndex(to);
+    else if (from < active && to >= active) setActiveSlideIndex(active - 1);
+    else if (from > active && to <= active) setActiveSlideIndex(active + 1);
+    emitChange(next);
+  };
+
+  const addTable = () => {
+    pushSlideHistory();
+    const rows = 3;
+    const cols = 3;
+    const data = Array.from({ length: rows }, () => Array.from({ length: cols }, () => ""));
+    const element: SlideElement = {
+      id: `el-${Date.now()}`,
+      type: "table",
+      x: 120,
+      y: 120,
+      width: 360,
+      height: 180,
+      content: "",
+      tableRows: rows,
+      tableCols: cols,
+      tableData: data,
+      rotation: 0,
+    };
+    const list = [...slides()];
+    const slide = list[activeSlideIndex()];
+    list[activeSlideIndex()] = { ...slide, elements: [...slide.elements, element] };
+    setSlides(list);
+    setSelectedElementId(element.id);
+    emitChange(list);
+  };
+
+  const addChart = () => {
+    pushSlideHistory();
+    const element: SlideElement = {
+      id: `el-${Date.now()}`,
+      type: "chart",
+      x: 140,
+      y: 100,
+      width: 400,
+      height: 280,
+      content: "",
+      chartType: "bar",
+      chartTitle: "Chart",
+      chartData: [3, 5, 2, 8],
+      chartLabels: ["A", "B", "C", "D"],
+      rotation: 0,
+    };
+    const list = [...slides()];
+    const slide = list[activeSlideIndex()];
+    list[activeSlideIndex()] = { ...slide, elements: [...slide.elements, element] };
+    setSlides(list);
+    setSelectedElementId(element.id);
+    emitChange(list);
+  };
+
+  const pasteImageFromClipboard = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const src = String(reader.result || "");
+      if (!src) return;
+      pushSlideHistory();
+      const element: SlideElement = {
+        id: `el-${Date.now()}`,
+        type: "image",
+        x: 200,
+        y: 150,
+        width: 320,
+        height: 240,
+        content: src,
+        rotation: 0,
+      };
+      const list = [...slides()];
+      const slide = list[activeSlideIndex()];
+      list[activeSlideIndex()] = { ...slide, elements: [...slide.elements, element] };
+      setSlides(list);
+      setSelectedElementId(element.id);
+      emitChange(list);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const setSlideBgOverride = (color: string | null) => {
+    pushSlideHistory();
+    const list = [...slides()];
+    const slide = list[activeSlideIndex()];
+    if (!slide) return;
+    list[activeSlideIndex()] = { ...slide, bgOverride: color };
+    setSlides(list);
+    emitChange(list);
   };
 
   const commitChange = (next?: Slide[]) => {
@@ -460,15 +507,15 @@ export function SlideEditor(props: SlideEditorProps) {
     emitChange(next);
   };
 
-  const addShape = (type: "rect" | "ellipse" | "line" | "arrow") => {
+  const addShape = (type: ShapeType) => {
     pushSlideHistory();
     const el: SlideElement = {
       id: `el-${Date.now()}`,
       type,
       x: 380,
       y: 200,
-      width: 200,
-      height: 120,
+      width: type === "line" || type === "arrow" ? 200 : 200,
+      height: type === "line" || type === "arrow" ? 40 : 120,
       content: "",
       color: fillColor(),
     };
@@ -602,69 +649,11 @@ export function SlideEditor(props: SlideEditorProps) {
   };
 
   const openPresenter = () => {
-    const win = window.open("", "redoc-presenter", "popup,width=1280,height=800");
-    if (!win) return;
-    const deck = slides();
-    const start = activeSlideIndex();
-    const escape = (value: string) => value.replace(/[&<>\"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" }[character] || character));
-    const renderElements = (slide: Slide | undefined) => (slide?.elements || []).map((element) => {
-      const rot = element.rotation || 0;
-      const entrance = element.entrance === "fade" ? "fade" : "none";
-      const fadeStyle = entrance === "fade" ? "opacity:0;transition:opacity .35s ease;" : "";
-      const base = `position:absolute;left:${element.x}px;top:${element.y}px;width:${element.width}px;height:${element.height}px;transform:rotate(${rot}deg);${fadeStyle}`;
-      const attrs = `data-entrance="${entrance}"`;
-      if (element.type === "text") {
-        const align = element.align || "center";
-        const text = element.bullets
-          ? element.content.split("\n").map((line) => `• ${line}`).join("<br/>")
-          : escape(element.content);
-        const fw = element.bold ? "bold" : "normal";
-        const fs = element.italic ? "italic" : "normal";
-        const td = element.underline ? "underline" : "none";
-        const ff = element.fontFamily || "Inter, sans-serif";
-        return `<div ${attrs} style="${base}font-family:${ff};font-weight:${fw};font-style:${fs};text-decoration:${td};font-size:${element.fontSize || 20}px;color:${element.color || "#111827"};display:flex;align-items:center;justify-content:${align === "left" ? "flex-start" : align === "right" ? "flex-end" : "center"};text-align:${align}">${text}</div>`;
-      }
-      if (element.type === "image") return `<img ${attrs} src="${escape(element.content)}" alt="" style="${base}object-fit:contain"/>`;
-      if (element.type === "line" || element.type === "arrow") {
-        const color = escape(element.color || "#3b82f6");
-        const arrow = element.type === "arrow" ? `<polygon points="96,0 100,0 100,4" fill="${color}"/>` : "";
-        return `<svg ${attrs} viewBox="0 0 100 100" preserveAspectRatio="none" style="${base}"><line x1="0" y1="100" x2="100" y2="0" stroke="${color}" stroke-width="3"/>${arrow}</svg>`;
-      }
-      return `<div ${attrs} style="${base}background:${element.color || "#3b82f6"};border-radius:${element.type === "ellipse" ? "50%" : "4px"}"></div>`;
-    }).join("");
-    const payload = JSON.stringify(deck.map((s) => ({
-      title: s.title,
-      notes: s.notes,
-      transition: s.transition,
-      bg: theme().bgColor,
-      html: renderElements(s),
-    })));
-    win.document.open();
-    win.document.write(`<!doctype html><html><head><title>Presenter view</title><style>
-body{margin:0;background:#111827;color:#f8fafc;font-family:Inter,system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;gap:14px;padding:24px}
-#slide{width:960px;height:540px;position:relative;box-shadow:0 8px 30px #0008;overflow:hidden;cursor:pointer}
-#slide.fade{animation:fadeIn .4s ease}
-#slide.slide-left{animation:slideLeft .4s ease}
-#slide.slide-right{animation:slideRight .4s ease}
-@keyframes fadeIn{from{opacity:0}to{opacity:1}}
-@keyframes slideLeft{from{transform:translateX(40px);opacity:.2}to{transform:none;opacity:1}}
-@keyframes slideRight{from{transform:translateX(-40px);opacity:.2}to{transform:none;opacity:1}}
-#notes{width:960px;background:#1f2937;padding:14px;box-sizing:border-box;border-radius:6px}small{color:#cbd5e1}
-</style></head><body>
-<div id="slide"></div>
-<div id="notes"><strong>Speaker notes</strong><p id="notes-text"></p><small>Next: <span id="next"></span> · Elapsed: <span id="timer">00:00</span> · Space/click reveals · ←/→</small></div>
-<script>
-const deck=${payload}; let idx=${start}; let seconds=0; let revealIdx=0;
-const fadeEls=()=>[...document.querySelectorAll('#slide [data-entrance="fade"]')];
-const show=()=>{const s=deck[idx];const el=document.getElementById('slide');el.className='';el.style.background=s.bg;el.innerHTML=s.html;void el.offsetWidth;if(s.transition&&s.transition!=='none')el.className=s.transition;revealIdx=0;document.getElementById('notes-text').textContent=s.notes||'No notes';document.getElementById('next').textContent=(deck[idx+1]&&deck[idx+1].title)||'End of deck'};
-const advance=()=>{const pending=fadeEls();if(revealIdx<pending.length){pending[revealIdx].style.opacity='1';revealIdx++;return}if(idx<deck.length-1){idx++;show()}};
-const back=()=>{if(revealIdx>0){const pending=fadeEls();revealIdx--;pending[revealIdx].style.opacity='0';return}if(idx>0){idx--;show()}};
-show();setInterval(()=>{seconds++;document.getElementById('timer').textContent=String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0')},1000);
-document.getElementById('slide').addEventListener('click',advance);
-window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.preventDefault();advance()}if(e.key==='ArrowLeft'){e.preventDefault();back()}});
-</script></body></html>`);
-    win.document.close();
-    win.focus();
+    const deck = toDeck(slides(), props.initialContent, theme(), activeSlideIndex());
+    stashPresenterDeck(deck, activeSlideIndex());
+    void commands.openPresenterWindow().catch(() => {
+      showToast("Could not open presenter window", "error");
+    });
   };
 
   const printSlides = () => {
@@ -806,10 +795,21 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
       action: () => emitEditorCommand("redo"),
     });
 
+    let unlistenSlide: (() => void) | undefined;
+    import("@tauri-apps/api/event").then((mod) => {
+      mod.listen("slide_changed", (event: { payload?: { slideIndex?: number } }) => {
+        const idx = event.payload?.slideIndex;
+        if (typeof idx !== "number" || idx < 0 || idx >= slides().length) return;
+        if (idx === activeSlideIndex()) return;
+        selectSlide(idx);
+      }).then((fn: () => void) => { unlistenSlide = fn; });
+    }).catch(() => undefined);
+
     onCleanup(() => {
       window.removeEventListener(EDITOR_COMMAND, onCommand);
       window.removeEventListener("keydown", onKeyDown);
       slideShortcutIds.forEach((id) => shortcutRegistry.unregister(id));
+      unlistenSlide?.();
     });
   });
 
@@ -932,6 +932,19 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
               <option value="slide-left">Slide left</option>
               <option value="slide-right">Slide right</option>
             </select>
+          </label>
+          <label style={{ "font-size": "11px" }}>
+            Background override
+            <div style={{ display: "flex", gap: "6px", "margin-top": "4px", "align-items": "center" }}>
+              <input
+                type="color"
+                aria-label="Slide background override"
+                value={activeSlide()?.bgOverride || theme().bgColor}
+                onInput={(e) => setSlideBgOverride(e.currentTarget.value)}
+                style={{ width: "36px", height: "28px", border: "none", background: "transparent", cursor: "pointer" }}
+              />
+              <button type="button" class="g-toolbar-btn" onClick={() => setSlideBgOverride(null)}>Use theme</button>
+            </div>
           </label>
           <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
             Applied when changing to this slide in the editor and presenter.
@@ -1099,10 +1112,14 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
         <ToolbarButton title="Move slide up" onClick={() => moveSlide(-1)}><IconChevronUp /></ToolbarButton>
         <ToolbarButton title="Move slide down" onClick={() => moveSlide(1)}><IconChevronDown /></ToolbarButton>
         <ToolbarSep />
-        <ToolbarButton title="Insert Table" onClick={() => showToast("Table insertion in presentations is coming in a future release.", "info")}><IconTable /></ToolbarButton>
-        <ToolbarButton title="Insert Chart" onClick={() => showToast("Chart insertion in presentations is coming in a future release.", "info")}><IconChart /></ToolbarButton>
+        <ToolbarButton title="Insert Table" onClick={addTable}><IconTable /></ToolbarButton>
+        <ToolbarButton title="Insert Chart" onClick={addChart}><IconChart /></ToolbarButton>
         <ToolbarButton title="Insert Image" onClick={addImage}><IconImage /></ToolbarButton>
         <ToolbarButton title="Insert Text Box" onClick={addTextBox}><IconTextBox /></ToolbarButton>
+        <ToolbarSep />
+        <ToolbarButton title="Zoom out" onClick={() => setZoom((z) => Math.max(50, z - 10))}>−</ToolbarButton>
+        <span style={{ "font-size": "11px", color: "var(--text-secondary)", "min-width": "36px", "text-align": "center" }}>{zoom()}%</span>
+        <ToolbarButton title="Zoom in" onClick={() => setZoom((z) => Math.min(200, z + 10))}>+</ToolbarButton>
         <ToolbarSep />
         <ToolbarButton title="Present" onClick={openPresenter}><IconPresent /></ToolbarButton>
       </ToolbarRow>
@@ -1131,6 +1148,16 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
         >
           <IconEllipse />
         </ToolbarButton>
+        <ToolbarButton
+          title="Rounded rectangle"
+          active={drawTool() === "roundedRect"}
+          onClick={() => { setDrawTool("roundedRect"); addShape("roundedRect"); }}
+        >
+          ◢
+        </ToolbarButton>
+        <ToolbarButton title="Triangle" active={drawTool() === "triangle"} onClick={() => { setDrawTool("triangle"); addShape("triangle"); }}>△</ToolbarButton>
+        <ToolbarButton title="Diamond" active={drawTool() === "diamond"} onClick={() => { setDrawTool("diamond"); addShape("diamond"); }}>◇</ToolbarButton>
+        <ToolbarButton title="Star" active={drawTool() === "star"} onClick={() => { setDrawTool("star"); addShape("star"); }}>★</ToolbarButton>
         <ToolbarButton
           title="Arrow"
           active={drawTool() === "arrow"}
@@ -1166,6 +1193,17 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
           <IconTextColor />
           <span style={{ width: "14px", height: "3px", background: selectedElement()?.color || lineColor(), display: "block", "margin-top": "-2px" }} />
         </ToolbarColor>
+        <ToolbarSep />
+        <ToolbarButton title="Align left" onClick={() => alignSelected("left")}>⫷</ToolbarButton>
+        <ToolbarButton title="Align center" onClick={() => alignSelected("center")}>⫿</ToolbarButton>
+        <ToolbarButton title="Align right" onClick={() => alignSelected("right")}>⫸</ToolbarButton>
+        <ToolbarButton title="Align top" onClick={() => alignSelected("top")}>⫶</ToolbarButton>
+        <ToolbarButton title="Align middle" onClick={() => alignSelected("middle")}>⫯</ToolbarButton>
+        <ToolbarButton title="Align bottom" onClick={() => alignSelected("bottom")}>⫷</ToolbarButton>
+        <ToolbarButton title="Distribute horizontally" onClick={() => distributeSelected("h")}>⇹</ToolbarButton>
+        <ToolbarButton title="Distribute vertically" onClick={() => distributeSelected("v")}>⇳</ToolbarButton>
+        <ToolbarButton title="Group" onClick={groupSelected} disabled={selectedElementIds().length < 2}>Group</ToolbarButton>
+        <ToolbarButton title="Ungroup" onClick={ungroupSelected} disabled={!selectedElementIds().length}>Ungroup</ToolbarButton>
         <ToolbarSep />
         <ToolbarButton title="Bring to Front" onClick={() => reorderSelected(true)} ariaLabel="Bring to Front">
           <span style={{ "font-size": "10px", "font-weight": "700" }}>⤒</span>
@@ -1214,12 +1252,24 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
                 return (
                   <div
                     onClick={() => selectSlide(idx())}
+                    onPointerDown={(e) => {
+                      if (e.button !== 0) return;
+                      setFilmstripDragIndex(idx());
+                      e.currentTarget.setPointerCapture(e.pointerId);
+                    }}
+                    onPointerUp={(e) => {
+                      const from = filmstripDragIndex();
+                      if (from !== null && from !== idx()) reorderSlides(from, idx());
+                      setFilmstripDragIndex(null);
+                      e.currentTarget.releasePointerCapture(e.pointerId);
+                    }}
                     style={{
                       display: "flex",
                       "align-items": "flex-start",
                       gap: "6px",
-                      cursor: "pointer",
+                      cursor: "grab",
                       padding: "2px",
+                      opacity: filmstripDragIndex() === idx() ? 0.65 : 1,
                     }}
                   >
                     <span style={{ "font-size": "11px", color: "var(--text-muted)", width: "14px", "padding-top": "2px", "text-align": "right" }}>
@@ -1229,9 +1279,8 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
                       style={{
                         width: "112px",
                         height: "63px",
-                        background: theme().bgColor || "white",
+                        background: slide.bgOverride || theme().bgColor || "white",
                         border: active() ? "2px solid var(--slide-accent)" : "1px solid var(--border-color)",
-                        "border-radius": "0",
                         padding: "5px 6px",
                         overflow: "hidden",
                         "box-shadow": active() ? "0 0 0 1px var(--slide-accent)" : "0 1px 3px rgba(0,0,0,.35)",
@@ -1284,12 +1333,19 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
           }}
         >
           <div
+            style={{
+              transform: `scale(${zoom() / 100})`,
+              "transform-origin": "top center",
+              "flex-shrink": 0,
+            }}
+          >
+          <div
             ref={(el) => { canvasEl = el; }}
             class={`g-slide-canvas g-print-slide ${slideAnimClass() === "fade" ? "g-slide-anim-fade" : ""} ${slideAnimClass() === "slide-left" ? "g-slide-anim-left" : ""} ${slideAnimClass() === "slide-right" ? "g-slide-anim-right" : ""}`}
             style={{
               width: "960px",
               height: "540px",
-              background: theme().bgColor,
+              background: slideBackground(),
               "box-shadow": "0 2px 12px rgba(0,0,0,.45)",
               "border-radius": "0",
               position: "relative",
@@ -1323,6 +1379,18 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
               else return;
               event.preventDefault();
             }}
+            onPaste={(event) => {
+              const items = event.clipboardData?.items;
+              if (!items) return;
+              for (const item of Array.from(items)) {
+                if (item.type.startsWith("image/")) {
+                  event.preventDefault();
+                  const file = item.getAsFile();
+                  if (file) pasteImageFromClipboard(file);
+                  break;
+                }
+              }
+            }}
           >
             <For each={alignmentGuides()}>
               {(guide) => (
@@ -1354,20 +1422,24 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
             </For>
             <For each={activeSlide()?.elements || []}>
               {(el) => {
-                const isSelected = () => el.id === selectedElementId();
+                const isSelected = () => selectedElementIds().includes(el.id);
                 const placeholder = () => el.type === "text" && isPlaceholder(el.content);
                 return (
                   <div
-                    onClick={() => setSelectedElementId(el.id)}
+                    onClick={(event) => selectElement(el.id, event.shiftKey)}
                     onPointerDown={(event) => {
-                      if (el.type === "text" && document.activeElement === event.currentTarget.querySelector("[contenteditable]")) {
+                      if ((el.type === "text" || isFilledShape(el.type)) && document.activeElement === event.currentTarget.querySelector("[contenteditable]")) {
                         return;
                       }
                       event.stopPropagation();
                       dragPointerId = event.pointerId;
                       dragStartClient = { x: event.clientX, y: event.clientY };
                       dragMoved = false;
-                      setSelectedElementId(el.id);
+                      if (!event.shiftKey && !selectedElementIds().includes(el.id)) {
+                        selectElement(el.id, false);
+                      } else if (event.shiftKey) {
+                        selectElement(el.id, true);
+                      }
                       setAlignmentGuides([]);
                       const local = canvasToLocal(event.clientX, event.clientY);
                       setDragOffset({ x: local.x - el.x, y: local.y - el.y });
@@ -1376,9 +1448,7 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
                       const resize = resizing();
                       if (resize?.id === el.id) {
                         const local = canvasToLocal(event.clientX, event.clientY);
-                        const startLocal = canvasToLocal(resize.startX, resize.startY);
-                        el.width = Math.max(40, Math.min(960 - el.x, resize.width + local.x - startLocal.x));
-                        el.height = Math.max(30, Math.min(540 - el.y, resize.height + local.y - startLocal.y));
+                        applyResize(el, resize.handle, local.x, local.y, resize, event.shiftKey);
                         setAlignmentGuides([]);
                         setSlides([...slides()]);
                         return;
@@ -1393,6 +1463,8 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
                         event.currentTarget.setPointerCapture(event.pointerId);
                       }
                       const local = canvasToLocal(event.clientX, event.clientY);
+                      const prevX = el.x;
+                      const prevY = el.y;
                       const snapped = snapElementPosition(
                         el,
                         local.x - dragOffset().x,
@@ -1401,6 +1473,14 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
                       );
                       el.x = snapped.x;
                       el.y = snapped.y;
+                      const moveDx = el.x - prevX;
+                      const moveDy = el.y - prevY;
+                      for (const peer of elementsToMoveWith(el)) {
+                        if (peer.id !== el.id) {
+                          peer.x += moveDx;
+                          peer.y += moveDy;
+                        }
+                      }
                       dragMoved = true;
                       setAlignmentGuides(snapped.guides);
                       setSlides([...slides()]);
@@ -1505,71 +1585,132 @@ window.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.
                         style={{ position: "absolute", left: "50%", top: "-18px", width: "12px", height: "12px", background: "var(--slide-accent)", border: "2px solid white", "border-radius": "50%", cursor: "grab", transform: "translateX(-50%)", "z-index": 3 }}
                       />
                     </Show>
-                    {el.type === "rect" && (
-                      <div
-                        style={{
-                          width: "100%",
-                          height: "100%",
-                          background: el.color || "#3b82f6",
-                          "border-radius": "4px",
-                        }}
-                      />
-                    )}
-                    {el.type === "ellipse" && (
-                      <div
-                        style={{
-                          width: "100%",
-                          height: "100%",
-                          background: el.color || "#3b82f6",
-                          "border-radius": "50%",
-                        }}
-                      />
+                    {isFilledShape(el.type) && (
+                      <>
+                        <ShapeBody type={el.type} color={el.color || "#3b82f6"} id={el.id} />
+                        <div
+                          contentEditable
+                          onFocus={(e) => {
+                            pushSlideHistory();
+                            if (!el.content) e.currentTarget.innerText = "";
+                          }}
+                          onBlur={(e) => {
+                            el.content = e.currentTarget.innerText.trim();
+                            e.currentTarget.innerText = el.content;
+                            setSlides([...slides()]);
+                            commitChange();
+                          }}
+                          style={{
+                            position: "absolute",
+                            inset: "8px",
+                            "font-family": el.fontFamily || "Inter, sans-serif",
+                            "font-size": `${el.fontSize || 16}px`,
+                            color: el.color === "#3b82f6" ? "#ffffff" : (el.color || "#ffffff"),
+                            "text-align": el.align || "center",
+                            outline: "none",
+                            display: "flex",
+                            "align-items": "center",
+                            "justify-content": "center",
+                            "pointer-events": "auto",
+                          }}
+                        >
+                          {el.content}
+                        </div>
+                      </>
                     )}
                     {(el.type === "line" || el.type === "arrow") && (
-                      <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label={el.type === "arrow" ? "Arrow" : "Line"}>
-                        <defs>
-                          <marker id={`arrowhead-${el.id}`} markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-                            <path d="M0,0 L8,4 L0,8 z" fill={el.color || "#3b82f6"} />
-                          </marker>
-                        </defs>
-                        <line x1="0" y1="100" x2="100" y2="0" stroke={el.color || "#3b82f6"} stroke-width="3" marker-end={el.type === "arrow" ? `url(#arrowhead-${el.id})` : undefined} />
-                      </svg>
+                      <ShapeBody type={el.type} color={el.color || "#3b82f6"} id={el.id} />
                     )}
                     {el.type === "image" && (
                       <img src={el.content} alt="Slide asset" style={{ width: "100%", height: "100%", "object-fit": "contain", "pointer-events": "none" }} />
                     )}
+                    {el.type === "table" && el.tableData && (
+                      <table style={{ width: "100%", height: "100%", "border-collapse": "collapse", "font-size": "12px", background: "#fff" }}>
+                        <tbody>
+                          <For each={el.tableData}>
+                            {(row, ri) => (
+                              <tr>
+                                <For each={row}>
+                                  {(cell, ci) => (
+                                    <td
+                                      contentEditable
+                                      style={{ border: "1px solid #cbd5e1", padding: "4px", "min-width": "24px" }}
+                                      onInput={(e) => {
+                                        const data = el.tableData!;
+                                        data[ri()][ci()] = e.currentTarget.textContent || "";
+                                        setSlides([...slides()]);
+                                      }}
+                                      onBlur={() => commitChange()}
+                                    >
+                                      {cell}
+                                    </td>
+                                  )}
+                                </For>
+                              </tr>
+                            )}
+                          </For>
+                        </tbody>
+                      </table>
+                    )}
+                    {el.type === "chart" && (
+                      <div style={{ width: "100%", height: "100%", background: "#f8fafc", display: "flex", "flex-direction": "column", padding: "8px", "box-sizing": "border-box" }}>
+                        <input
+                          type="text"
+                          value={el.chartTitle || "Chart"}
+                          onInput={(e) => {
+                            el.chartTitle = e.currentTarget.value;
+                            setSlides([...slides()]);
+                          }}
+                          onBlur={() => commitChange()}
+                          style={{ "font-size": "14px", "font-weight": "600", border: "none", background: "transparent", "margin-bottom": "4px" }}
+                        />
+                        <div style={{ flex: 1, display: "flex", "align-items": "flex-end", gap: "4px" }}>
+                          <For each={el.chartData || [3, 5, 2, 8]}>
+                            {(v, i) => {
+                              const max = Math.max(...(el.chartData || [1]), 1);
+                              return (
+                                <div style={{ flex: 1, display: "flex", "flex-direction": "column", "align-items": "center", gap: "2px" }}>
+                                  <div style={{ width: "100%", height: `${(v / max) * 100}%`, "min-height": "2px", background: `hsl(${(i() * 47) % 360}, 65%, 55%)` }} />
+                                  <span style={{ "font-size": "9px", color: "#64748b" }}>{el.chartLabels?.[i()] || i() + 1}</span>
+                                </div>
+                              );
+                            }}
+                          </For>
+                        </div>
+                      </div>
+                    )}
                     <Show when={isSelected()}>
-                      <div
-                        role="button"
-                        aria-label="Resize element"
-                        onPointerDown={(event) => {
-                          event.stopPropagation();
-                          pushSlideHistory();
-                          event.currentTarget.setPointerCapture(event.pointerId);
-                          setAlignmentGuides([]);
-                          setResizing({ id: el.id, startX: event.clientX, startY: event.clientY, width: el.width, height: el.height });
-                        }}
-                        onPointerMove={(event) => {
-                          const resize = resizing();
-                          if (resize?.id !== el.id) return;
-                          el.width = Math.max(40, Math.min(960 - el.x, resize.width + event.clientX - resize.startX));
-                          el.height = Math.max(30, Math.min(540 - el.y, resize.height + event.clientY - resize.startY));
-                          setAlignmentGuides([]);
-                          setSlides([...slides()]);
-                        }}
-                        onPointerUp={(event) => {
-                          setResizing(null);
-                          setAlignmentGuides([]);
-                          event.currentTarget.releasePointerCapture(event.pointerId);
-                          commitChange();
-                        }}
-                        style={{ position: "absolute", right: "-6px", bottom: "-6px", width: "12px", height: "12px", background: "var(--slide-accent)", border: "2px solid white", "border-radius": "2px", cursor: "nwse-resize", "z-index": 2 }}
-                      />
+                      <For each={["nw", "n", "ne", "e", "se", "s", "sw", "w"] as ResizeHandle[]}>
+                        {(handle) => (
+                          <div
+                            role="button"
+                            aria-label={`Resize ${handle}`}
+                            class={`g-resize-handle g-resize-handle-${handle}`}
+                            onPointerDown={(event) => {
+                              event.stopPropagation();
+                              pushSlideHistory();
+                              event.currentTarget.setPointerCapture(event.pointerId);
+                              setAlignmentGuides([]);
+                              setResizing({
+                                id: el.id,
+                                handle,
+                                startX: event.clientX,
+                                startY: event.clientY,
+                                origX: el.x,
+                                origY: el.y,
+                                width: el.width,
+                                height: el.height,
+                              });
+                            }}
+                          />
+                        )}
+                      </For>
                     </Show>
                   </div>
                 );
               }}
             </For>
+          </div>
           </div>
 
           {/* Notes pane */}

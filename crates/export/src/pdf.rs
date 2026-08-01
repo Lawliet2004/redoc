@@ -1,40 +1,9 @@
+use crate::base64_util::data_uri_bytes;
 use printpdf::*;
 use redoc_sheet_engine::WorkbookModel;
 use redoc_slide_engine::{DeckModel, ElementKind};
 use std::io::BufWriter;
 use thiserror::Error;
-
-fn decode_base64(value: &str) -> Option<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut buffer = 0u32;
-    let mut bits = 0u8;
-    for byte in value.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
-        if byte == b'=' {
-            break;
-        }
-        let value = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        } as u32;
-        buffer = (buffer << 6) | value;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            output.push((buffer >> bits) as u8);
-            buffer &= (1 << bits) - 1;
-        }
-    }
-    Some(output)
-}
-
-fn data_uri_bytes(value: &str) -> Option<Vec<u8>> {
-    let (_, encoded) = value.split_once(',')?;
-    value.starts_with("data:").then(|| decode_base64(encoded))?
-}
 
 #[derive(Error, Debug)]
 pub enum ExportError {
@@ -718,7 +687,153 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
                     );
                     end_element_rotation(&current, rotation);
                 }
-                _ => {}
+                ElementKind::Table { rows, cols, data } => {
+                    let (draw_x, draw_y) =
+                        begin_element_rotation(&current, x, y, width, height, rotation);
+                    current.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+                    current.add_polygon(Polygon {
+                        rings: vec![vec![
+                            (Point::new(Mm(draw_x as f32), Mm(draw_y as f32)), false),
+                            (Point::new(Mm(draw_x as f32), Mm((draw_y + height) as f32)), false),
+                            (
+                                Point::new(Mm((draw_x + width) as f32), Mm((draw_y + height) as f32)),
+                                false,
+                            ),
+                            (Point::new(Mm((draw_x + width) as f32), Mm(draw_y as f32)), false),
+                        ]],
+                        mode: printpdf::path::PaintMode::FillStroke,
+                        winding_order: printpdf::path::WindingOrder::NonZero,
+                    });
+                    current.set_fill_color(Color::Rgb(Rgb::new(0.15, 0.15, 0.15, None)));
+                    current.begin_text_section();
+                    current.set_font(&font, 8.0);
+                    let mut line_y = (draw_y + height - 6.0) as f32;
+                    for (ri, row) in data.iter().take(*rows).enumerate() {
+                        let line = row
+                            .iter()
+                            .take(*cols)
+                            .map(|c| c.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" | ");
+                        let text = if line.is_empty() {
+                            format!("Row {}", ri + 1)
+                        } else {
+                            line
+                        };
+                        current.set_text_cursor(Mm((draw_x + 2.0) as f32), Mm(line_y));
+                        current.write_text(&text, &font);
+                        line_y -= 5.0;
+                        if line_y < draw_y as f32 {
+                            break;
+                        }
+                    }
+                    current.end_text_section();
+                    end_element_rotation(&current, rotation);
+                }
+                ElementKind::Chart { chart_type, data, labels } => {
+                    let (draw_x, draw_y) =
+                        begin_element_rotation(&current, x, y, width, height, rotation);
+                    current.set_fill_color(Color::Rgb(Rgb::new(0.97, 0.98, 0.99, None)));
+                    current.add_polygon(Polygon {
+                        rings: vec![vec![
+                            (Point::new(Mm(draw_x as f32), Mm(draw_y as f32)), false),
+                            (Point::new(Mm(draw_x as f32), Mm((draw_y + height) as f32)), false),
+                            (
+                                Point::new(Mm((draw_x + width) as f32), Mm((draw_y + height) as f32)),
+                                false,
+                            ),
+                            (Point::new(Mm((draw_x + width) as f32), Mm(draw_y as f32)), false),
+                        ]],
+                        mode: printpdf::path::PaintMode::FillStroke,
+                        winding_order: printpdf::path::WindingOrder::NonZero,
+                    });
+                    let max = data.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
+                    let bar_count = data.len().max(1);
+                    let bar_width = (width / bar_count as f64) * 0.7;
+                    let gap = (width / bar_count as f64) * 0.3;
+                    if chart_type == "pie" {
+                        let total = data.iter().sum::<f64>().max(1.0);
+                        let mut angle = -90.0_f64;
+                        let cx = draw_x + width / 2.0;
+                        let cy = draw_y + height / 2.0;
+                        let r = (width.min(height) / 2.2) as f32;
+                        for (i, v) in data.iter().enumerate() {
+                            let slice = (*v / total) * 360.0;
+                            let hue = (i * 47) % 360;
+                            let color = Color::Rgb(Rgb::new(
+                                ((hue as f32) / 360.0).max(0.2),
+                                0.55,
+                                0.75,
+                                None,
+                            ));
+                            current.set_fill_color(color);
+                            let a1 = angle * std::f64::consts::PI / 180.0;
+                            let a2 = (angle + slice) * std::f64::consts::PI / 180.0;
+                            let x1 = cx + (r as f64) * a1.cos();
+                            let y1 = cy + (r as f64) * a1.sin();
+                            let x2 = cx + (r as f64) * a2.cos();
+                            let y2 = cy + (r as f64) * a2.sin();
+                            current.add_polygon(Polygon {
+                                rings: vec![vec![
+                                    (Point::new(Mm(cx as f32), Mm(cy as f32)), false),
+                                    (Point::new(Mm(x1 as f32), Mm(y1 as f32)), false),
+                                    (Point::new(Mm(x2 as f32), Mm(y2 as f32)), false),
+                                ]],
+                                mode: printpdf::path::PaintMode::Fill,
+                                winding_order: printpdf::path::WindingOrder::NonZero,
+                            });
+                            angle += slice;
+                        }
+                    } else {
+                        for (i, v) in data.iter().enumerate() {
+                            let bar_h = (*v / max) * (height - 12.0);
+                            let bx = draw_x + gap / 2.0 + i as f64 * (bar_width + gap);
+                            let hue = (i * 47) % 360;
+                            current.set_fill_color(Color::Rgb(Rgb::new(
+                                ((hue as f32) / 360.0).max(0.2),
+                                0.55,
+                                0.75,
+                                None,
+                            )));
+                            current.add_polygon(Polygon {
+                                rings: vec![vec![
+                                    (
+                                        Point::new(Mm(bx as f32), Mm((draw_y + height - 6.0) as f32)),
+                                        false,
+                                    ),
+                                    (
+                                        Point::new(
+                                            Mm((bx + bar_width) as f32),
+                                            Mm((draw_y + height - 6.0) as f32),
+                                        ),
+                                        false,
+                                    ),
+                                    (
+                                        Point::new(
+                                            Mm((bx + bar_width) as f32),
+                                            Mm((draw_y + height - 6.0 - bar_h) as f32),
+                                        ),
+                                        false,
+                                    ),
+                                    (
+                                        Point::new(Mm(bx as f32), Mm((draw_y + height - 6.0 - bar_h) as f32)),
+                                        false,
+                                    ),
+                                ]],
+                                mode: printpdf::path::PaintMode::Fill,
+                                winding_order: printpdf::path::WindingOrder::NonZero,
+                            });
+                        }
+                    }
+                    let title = labels.first().cloned().unwrap_or_else(|| "Chart".to_string());
+                    current.set_fill_color(Color::Rgb(Rgb::new(0.1, 0.1, 0.1, None)));
+                    current.begin_text_section();
+                    current.set_font(&font, 9.0);
+                    current.set_text_cursor(Mm((draw_x + 2.0) as f32), Mm((draw_y + height - 2.0) as f32));
+                    current.write_text(&title, &font);
+                    current.end_text_section();
+                    end_element_rotation(&current, rotation);
+                }
             }
         }
         if !slide.notes.trim().is_empty() {

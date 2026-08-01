@@ -13,9 +13,10 @@ import {
   ContextMenu, type ContextMenuItem,
   EDITOR_COMMAND, type EditorCommandDetail, emitEditorCommand,
 } from "@redoc/editor-common";
+import type { SheetToolbarProps } from "./sheetTypes";
 
-export function SheetToolbar(props: any) {
-  const { fontFamily, setFontFamily, fontSize, setFontSize, activeStyle, updateActiveStyle, selectedBounds, activeCell, setMerges, pushHistory, makeWorkbook, cellsData, drawGrid, MergeRange } = props;
+export function SheetToolbar(props: SheetToolbarProps) {
+  const { fontFamily, setFontFamily, fontSize, setFontSize, activeStyle, updateActiveStyle, selectedBounds, activeCell, setMerges, pushHistory, makeWorkbook, cellsData, drawGrid } = props;
   return (
     <>
       {/* Formatting toolbar */}
@@ -24,7 +25,10 @@ export function SheetToolbar(props: any) {
           ariaLabel="Font"
           width="120px"
           value={fontFamily()}
-          onChange={setFontFamily}
+          onChange={(v) => {
+            setFontFamily(v);
+            updateActiveStyle({ fontFamily: v });
+          }}
           options={[
             { value: "Liberation Sans", label: "Liberation Sans" },
             { value: "Liberation Serif", label: "Liberation Serif" },
@@ -38,7 +42,10 @@ export function SheetToolbar(props: any) {
           ariaLabel="Font size"
           width="52px"
           value={fontSize()}
-          onChange={setFontSize}
+          onChange={(v) => {
+            setFontSize(v);
+            updateActiveStyle({ fontSize: Number(v) || 12 });
+          }}
           options={["8", "9", "10", "11", "12", "14", "16", "18", "20", "24"].map((s) => ({ value: s, label: s }))}
         />
         <ToolbarSep />
@@ -145,6 +152,9 @@ export function SheetToolbar(props: any) {
         <ToolbarButton title="General number format" active={!activeStyle()?.format || activeStyle()?.format === "general"} onClick={() => updateActiveStyle({ format: "general" })}>123</ToolbarButton>
         <ToolbarButton title="Increase decimals" onClick={() => updateActiveStyle({ decimals: Math.min((activeStyle()?.decimals ?? 2) + 1, 10) })}>.0</ToolbarButton>
         <ToolbarButton title="Decrease decimals" onClick={() => updateActiveStyle({ decimals: Math.max((activeStyle()?.decimals ?? 2) - 1, 0) })}>.00</ToolbarButton>
+        <ToolbarSep />
+        <ToolbarButton title="Number format…" onClick={() => props.onOpenNumberFormat?.()}>Format…</ToolbarButton>
+        <ToolbarButton title="Data validation list…" onClick={() => props.onOpenValidation?.()}>List ▾</ToolbarButton>
       </ToolbarRow>
 
       

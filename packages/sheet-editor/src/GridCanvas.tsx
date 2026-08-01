@@ -13,9 +13,10 @@ import {
   ContextMenu, type ContextMenuItem,
   EDITOR_COMMAND, type EditorCommandDetail, emitEditorCommand,
 } from "@redoc/editor-common";
+import type { GridCanvasProps } from "./sheetTypes";
 
-export function GridCanvas(props: any) {
-  const { containerRef, canvasRef, scrollTop, scrollLeft, setScrollTop, setScrollLeft, rowHeight, columnWidth, drawGrid, activeCell, redo, undo, copySelection, cutSelection, pasteValuesOnly, pasteTsv, selectCell, lastUsedCell, jumpToDataEdge, setEditing, setFormulaValue, formulaInputRef, handleCanvasClick, setContextMenu, emitEditorCommand, isFillHandlePoint, setFillDragStart, setSuppressNextClick, startDimensionDrag, updateDimensionDrag, fillDragStart, finishFillDrag, dimensionDrag, setDimensionDrag, getColName, cellsData, chartType, chartData, chartMax, pieSlices } = props;
+export function GridCanvas(props: GridCanvasProps) {
+  const { containerRef, canvasRef, scrollTop, scrollLeft, setScrollTop, setScrollLeft, rowHeight, columnWidth, drawGrid, markGridDirtyFull, activeCell, redo, undo, copySelection, cutSelection, pasteValuesOnly, pasteTsv, selectCell, lastUsedCell, jumpToDataEdge, setEditing, setFormulaValue, formulaInputRef, handleCanvasClick, setContextMenu, emitEditorCommand, isFillHandlePoint, setFillDragStart, setSuppressNextClick, startDimensionDrag, updateDimensionDrag, fillDragStart, finishFillDrag, dimensionDrag, setDimensionDrag, getColName, cellsData, cellHyperlink, chartType, chartData, chartMax, pieSlices } = props;
   return (
     <>
       {/* Grid Container */}
@@ -24,6 +25,7 @@ export function GridCanvas(props: any) {
           tabindex="0"
           onWheel={(event) => {
             event.preventDefault();
+            markGridDirtyFull?.();
             setScrollTop(Math.max(0, Math.min(100000 * rowHeight(), scrollTop() + event.deltaY)));
             setScrollLeft(Math.max(0, Math.min(1000 * columnWidth(), scrollLeft() + event.deltaX)));
             drawGrid();
@@ -129,7 +131,18 @@ export function GridCanvas(props: any) {
             aria-colcount="1000"
             aria-rowindex={activeCell().row}
             aria-colindex={activeCell().col}
-            onClick={handleCanvasClick}
+            onClick={(event) => {
+              if ((event.ctrlKey || event.metaKey) && cellHyperlink) {
+                const cell = cellsData()[`${activeCell().row}:${activeCell().col}`];
+                const href = cellHyperlink(cell);
+                if (href) {
+                  window.open(href, "_blank", "noopener,noreferrer");
+                  event.preventDefault();
+                  return;
+                }
+              }
+              handleCanvasClick(event);
+            }}
             onContextMenu={(event) => {
               event.preventDefault();
               const items: ContextMenuItem[] = [

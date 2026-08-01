@@ -64,6 +64,10 @@ export interface DocToolbarProps {
   onIncreaseIndent: () => void;
   currentLineSpacing: string;
   onChangeLineSpacing: (spacing: number) => void;
+  spacingBefore: number;
+  spacingAfter: number;
+  onChangeSpacingBefore: (pts: number) => void;
+  onChangeSpacingAfter: (pts: number) => void;
 }
 
 export function DocToolbar(props: DocToolbarProps) {
@@ -111,6 +115,9 @@ export function DocToolbar(props: DocToolbarProps) {
             { value: "heading1", label: "Heading 1" },
             { value: "heading2", label: "Heading 2" },
             { value: "heading3", label: "Heading 3" },
+            { value: "heading4", label: "Heading 4" },
+            { value: "heading5", label: "Heading 5" },
+            { value: "heading6", label: "Heading 6" },
             { value: "blockquote", label: "Block Quote" },
             { value: "code_block", label: "Preformatted Text" },
           ]}
@@ -185,6 +192,30 @@ export function DocToolbar(props: DocToolbarProps) {
             { value: "2", label: "Double" },
           ]}
         />
+        <ToolbarSep />
+        <span style={{ "font-size": "11px", color: "var(--text-secondary)" }}>Space</span>
+        <input
+          type="number"
+          min={0}
+          max={72}
+          aria-label="Spacing before"
+          class="g-toolbar-input"
+          value={props.spacingBefore}
+          onInput={(e) => props.onChangeSpacingBefore(Math.max(0, Number(e.currentTarget.value) || 0))}
+          style={{ width: "44px", height: "24px", padding: "0 4px" }}
+        />
+        <span style={{ "font-size": "10px", color: "var(--text-muted)" }}>before</span>
+        <input
+          type="number"
+          min={0}
+          max={72}
+          aria-label="Spacing after"
+          class="g-toolbar-input"
+          value={props.spacingAfter}
+          onInput={(e) => props.onChangeSpacingAfter(Math.max(0, Number(e.currentTarget.value) || 0))}
+          style={{ width: "44px", height: "24px", padding: "0 4px" }}
+        />
+        <span style={{ "font-size": "10px", color: "var(--text-muted)" }}>after</span>
       </ToolbarRow>
     </>
   );

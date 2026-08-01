@@ -1,3 +1,4 @@
+use crate::base64_util::decode_base64;
 use crate::pdf::ExportError;
 use redoc_slide_engine::{DeckModel, ElementKind};
 use std::fmt::Write;
@@ -40,33 +41,6 @@ fn xfrm_xml(element: &redoc_slide_engine::SlideElement) -> String {
             r#"<a:xfrm rot="{rot}"><a:off x="{x}" y="{y}"/><a:ext cx="{width}" cy="{height}"/></a:xfrm>"#
         )
     }
-}
-
-fn decode_base64(value: &str) -> Option<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut buffer = 0u32;
-    let mut bits = 0u8;
-    for byte in value.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
-        if byte == b'=' {
-            break;
-        }
-        let value = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        } as u32;
-        buffer = (buffer << 6) | value;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            output.push((buffer >> bits) as u8);
-            buffer &= (1 << bits) - 1;
-        }
-    }
-    Some(output)
 }
 
 fn image_bytes(element: &redoc_slide_engine::SlideElement) -> Option<Vec<u8>> {
@@ -231,7 +205,58 @@ fn shape_xml(
                 )
             }
         },
-        _ => String::new(),
+        ElementKind::Table { rows, cols, data } => {
+            let mut lines: Vec<String> = data
+                .iter()
+                .take(*rows)
+                .map(|row| {
+                    row.iter()
+                        .take(*cols)
+                        .map(|c| xml_escape(c))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                })
+                .collect();
+            if lines.is_empty() {
+                lines.push(format!("Table {}×{}", rows, cols));
+            }
+            let body = lines
+                .into_iter()
+                .map(|line| {
+                    format!(
+                        r#"<a:p><a:r><a:rPr sz="1000"/><a:t>{}</a:t></a:r></a:p>"#,
+                        line
+                    )
+                })
+                .collect::<String>();
+            format!(
+                r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Table {id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>{xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="CBD5E1"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>{body}</p:txBody></p:sp>"#
+            )
+        }
+        ElementKind::Chart { chart_type, data, labels } => {
+            let title = labels.first().map(|s| xml_escape(s)).unwrap_or_else(|| "Chart".into());
+            let summary = data
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let label = labels
+                        .get(i + 1)
+                        .or_else(|| labels.get(i))
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    format!("{}: {}", xml_escape(label), v)
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let body = format!(
+                r#"<a:p><a:r><a:rPr sz="1400" b="1"/><a:t>{title}</a:t></a:r></a:p><a:p><a:r><a:rPr sz="1000"/><a:t>{} ({})</a:t></a:r></a:p>"#,
+                xml_escape(&summary),
+                xml_escape(chart_type)
+            );
+            format!(
+                r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Chart {id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>{xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="F8FAFC"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="94A3B8"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>{body}</p:txBody></p:sp>"#
+            )
+        }
     }
 }
 

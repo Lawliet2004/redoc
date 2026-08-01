@@ -13,9 +13,11 @@ import {
   ContextMenu, type ContextMenuItem,
   EDITOR_COMMAND, type EditorCommandDetail, emitEditorCommand,
 } from "@redoc/editor-common";
+import type { FormulaBarProps } from "./sheetTypes";
 
-export function FormulaBar(props: any) {
+export function FormulaBar(props: FormulaBarProps) {
   const { activeCell, formulaValue, setFormulaValue, getColName, insertFormulaPrefix, commitCellEdit, editing, setEditing, cellsData, containerRef, formulaInputRef } = props;
+  const activeValidation = () => cellsData()[`${activeCell().row}:${activeCell().col}`]?.style?.validation;
   return (
     <>
       {/* Formula bar */}
@@ -38,6 +40,22 @@ export function FormulaBar(props: any) {
         <ToolbarButton title="Function wizard" onClick={() => formulaInputRef?.focus()}>fx</ToolbarButton>
         <ToolbarButton title="Sum" onClick={() => insertFormulaPrefix("=SUM()")}><IconSum /></ToolbarButton>
         <ToolbarButton title="Equals" onClick={() => insertFormulaPrefix("=")}><IconEquals /></ToolbarButton>
+        <Show when={activeValidation()?.type === "list" && activeValidation()!.options.length}>
+          <select
+            aria-label="Pick from list"
+            class="g-toolbar-input"
+            style={{ height: "24px", "margin-left": "4px", "max-width": "140px" }}
+            value={formulaValue()}
+            onChange={(e) => {
+              const val = e.currentTarget.value;
+              setFormulaValue(val);
+              void commitCellEdit(val);
+            }}
+          >
+            <option value="">—</option>
+            <For each={activeValidation()!.options}>{(opt) => <option value={opt}>{opt}</option>}</For>
+          </select>
+        </Show>
         <div style={{ width: "1px", background: "var(--border-color)", "align-self": "stretch" }} />
         <input
           ref={formulaInputRef}

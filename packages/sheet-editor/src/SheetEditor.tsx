@@ -16,8 +16,17 @@ import {
 import { Dialog, showToast } from "@redoc/ui";
 import { FormulaBar } from "./FormulaBar";
 import { SheetToolbar } from "./SheetToolbar";
+import { FORMULA_FUNCTION_NAMES } from "./formulaFunctions";
 import { GridCanvas } from "./GridCanvas";
+import { NumberFormatDialog, type NumberFormatValue } from "./NumberFormatDialog";
+import { DataValidationDialog, type ListValidation } from "./DataValidationDialog";
+import { measureTextWidth, clearTextMeasureCache } from "./textMeasureCache";
 import { commands } from "@redoc/api-client";
+import { parseTsv } from "@redoc/utils";
+import { buildWorkbookFromCells, createSheetHistoryHandlers } from "./sheetModel";
+import type { GridCell, MergeRange, SheetSnapshot } from "./sheetTypes";
+import { SortDialog } from "./dialogs/SortDialog";
+import { PrintDialog } from "./dialogs/PrintDialog";
 
 interface SheetEditorProps {
   initialContent?: any;
@@ -30,40 +39,6 @@ interface SheetEditorProps {
   onRequestSave?: () => void;
   onRequestExportPdf?: () => void;
 }
-
-type GridCell = {
-  raw: string;
-  display: string;
-  style?: {
-    bold?: boolean;
-    italic?: boolean;
-    underline?: boolean;
-    fontColor?: string;
-    bgColor?: string;
-    align?: "left" | "center" | "right";
-    vAlign?: "top" | "middle" | "bottom";
-    format?: "general" | "currency" | "percent" | "number";
-    decimals?: number;
-    wrap?: boolean;
-  };
-};
-
-type MergeRange = { startRow: number; endRow: number; startCol: number; endCol: number };
-
-type SheetSnapshot = {
-  cells: Record<string, GridCell>;
-  merges: MergeRange[];
-  autoFilterEnabled: boolean;
-  filterRange: { startRow: number; endRow: number; startCol: number; endCol: number } | null;
-  columnFilters: Record<number, string[]>;
-  columnWidths: Record<number, number>;
-  rowHeights: Record<number, number>;
-  chartType: "bar" | "line" | "pie" | null;
-  chartTitle: string;
-  chartRange: { startRow: number; endRow: number; startCol: number; endCol: number };
-  sheetsMeta: Array<{ id: string; name: string }>;
-  activeSheetIndex: number;
-};
 
 export function SheetEditor(props: SheetEditorProps) {
   let canvasRef!: HTMLCanvasElement;
@@ -86,6 +61,10 @@ export function SheetEditor(props: SheetEditorProps) {
   const [chartType, setChartType] = createSignal<"bar" | "line" | "pie" | null>(null);
   const [filterQuery, setFilterQuery] = createSignal("");
   const [findQuery, setFindQuery] = createSignal("");
+  const [replaceWith, setReplaceWith] = createSignal("");
+  const [findBarOpen, setFindBarOpen] = createSignal(false);
+  const [findReplaceMode, setFindReplaceMode] = createSignal(false);
+  const [namedRanges, setNamedRanges] = createSignal<Array<{ name: string; rangeStr: string; sheet: string | null }>>([]);
   const [matchCase, setMatchCase] = createSignal(false);
   const [filterOpen, setFilterOpen] = createSignal(false);
   const [fontFamily, setFontFamily] = createSignal("Liberation Sans");
@@ -120,6 +99,43 @@ export function SheetEditor(props: SheetEditorProps) {
     size: number;
   } | null>(null);
   const [contextMenu, setContextMenu] = createSignal<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+  const [numberFormatOpen, setNumberFormatOpen] = createSignal(false);
+  const [validationOpen, setValidationOpen] = createSignal(false);
+
+  let gridDirtyFull = true;
+  let gridDirtyRect: { x: number; y: number; w: number; h: number } | null = null;
+
+  const markGridDirtyFull = () => {
+    gridDirtyFull = true;
+    gridDirtyRect = null;
+  };
+
+  const markGridDirtyRect = (rect: { x: number; y: number; w: number; h: number }) => {
+    if (gridDirtyFull) return;
+    if (!gridDirtyRect) {
+      gridDirtyRect = { ...rect };
+      return;
+    }
+    const x1 = Math.min(gridDirtyRect.x, rect.x);
+    const y1 = Math.min(gridDirtyRect.y, rect.y);
+    const x2 = Math.max(gridDirtyRect.x + gridDirtyRect.w, rect.x + rect.w);
+    const y2 = Math.max(gridDirtyRect.y + gridDirtyRect.h, rect.y + rect.h);
+    gridDirtyRect = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+  };
+
+  const markSelectionDirty = () => {
+    const bounds = selectedBounds();
+    const x = headerColWidth - scrollLeft() + offsetForColumn(bounds.startCol);
+    const y = headerRowHeight - scrollTop() + offsetForRow(bounds.startRow);
+    const w = offsetForColumn(bounds.endCol + 1) - offsetForColumn(bounds.startCol);
+    const h = offsetForRow(bounds.endRow + 1) - offsetForRow(bounds.startRow);
+    markGridDirtyRect({
+      x: Math.max(0, x),
+      y: Math.max(0, y),
+      w: Math.max(1, w),
+      h: Math.max(1, h),
+    });
+  };
 
   // Grid constants
   const [columnWidth, setColumnWidth] = createSignal(100);
@@ -195,91 +211,34 @@ export function SheetEditor(props: SheetEditorProps) {
     setMerges(sheet.merges || []);
   };
 
-  const makeWorkbook = (cellMap: Record<string, GridCell>) => {
-    const existing = props.initialContent?.sheets?.length
-      ? structuredClone(props.initialContent)
-      : { sheets: [{ id: "sheet-1", name: "Sheet1", cells: {}, colWidths: {}, rowHeights: {}, freezeRows: 0, freezeCols: 0 }], activeSheetIndex: 0 };
-    const currentMeta = sheets();
-    if (existing.sheets) {
-      existing.sheets = currentMeta.map((s, idx) => {
-        const cached = sheetDataCache()[idx];
-        const found = cached || existing.sheets?.find((es: any) => es.id === s.id) || existing.sheets?.[idx];
-        return {
-          id: s.id,
-          name: s.name,
-          cells: found?.cells || {},
-          colWidths: found?.colWidths || {},
-          rowHeights: found?.rowHeights || {},
-          freezeRows: found?.freezeRows || 0,
-          freezeCols: found?.freezeCols || 0,
-          charts: found?.charts || [],
-          filterQuery: found?.filterQuery || null,
-          merges: found?.merges || [],
-          autoFilter: found?.autoFilter || null,
-        };
-      });
-    }
-    const sheet = existing.sheets[activeSheetIndex()] || existing.sheets[0];
-    sheet.freezeRows = freezeRows();
-    sheet.freezeCols = freezeCols();
-    sheet.colWidths = { 0: columnWidth(), ...columnWidths() };
-    sheet.rowHeights = { 0: rowHeight(), ...rowHeights() };
-    const anchor = selectionAnchor();
-    const active = activeCell();
-    sheet.charts = chartType() ? [{
-      chartType: chartType(),
-      title: chartTitle(),
-      startRow: chartRange().startRow,
-      endRow: chartRange().endRow,
-      startCol: chartRange().startCol,
-      endCol: chartRange().endCol,
-    }] : [];
-    sheet.filterQuery = filterQuery() || null;
-    sheet.merges = merges();
-    const fr = filterRange() || {
-      startRow: Math.min(anchor.row, active.row),
-      endRow: Math.max(anchor.row, active.row),
-      startCol: Math.min(anchor.col, active.col),
-      endCol: Math.max(anchor.col, active.col),
-    };
-    sheet.autoFilter = autoFilterEnabled()
-      ? {
-          enabled: true,
-          startRow: fr.startRow,
-          endRow: fr.endRow,
-          startCol: fr.startCol,
-          endCol: fr.endCol,
-          columnFilters: Object.fromEntries(
-            Object.entries(columnFilters()).map(([k, v]) => [k, v])
-          ),
-        }
-      : null;
-    sheet.cells = Object.fromEntries(Object.entries(cellMap).map(([key, value]) => [key, {
-      rawValue: value.raw,
-      displayValue: value.display,
-      formula: value.raw.startsWith("=") ? value.raw : null,
-      style: value.style
-        ? {
-            bold: value.style.bold,
-            italic: value.style.italic,
-            underline: value.style.underline,
-            fontColor: value.style.fontColor,
-            bgColor: value.style.bgColor,
-            align: value.style.align,
-            format: value.style.format,
-            wrap: value.style.wrap,
-            vAlign: value.style.vAlign,
-          }
-        : null,
-    }]));
-    existing.activeSheetIndex = activeSheetIndex();
-    const cache: Record<number, any> = { ...sheetDataCache() };
-    existing.sheets?.forEach((sheet: any, idx: number) => {
-      cache[idx] = sheet;
-    });
-    setSheetDataCache(cache);
-    return existing;
-  };
+  const makeWorkbook = (cellMap: Record<string, GridCell>) =>
+    buildWorkbookFromCells(
+      {
+        initialContent: props.initialContent,
+        sheets,
+        sheetDataCache,
+        setSheetDataCache,
+        activeSheetIndex,
+        freezeRows,
+        freezeCols,
+        columnWidth,
+        rowHeight,
+        columnWidths,
+        rowHeights,
+        selectionAnchor,
+        activeCell,
+        chartType,
+        chartTitle,
+        chartRange,
+        filterQuery,
+        merges,
+        autoFilterEnabled,
+        filterRange,
+        columnFilters,
+        namedRanges,
+      },
+      cellMap,
+    );
 
   onMount(() => {
     if (props.initialContent?.sheets?.length) {
@@ -321,6 +280,7 @@ export function SheetEditor(props: SheetEditorProps) {
         });
       }
       loadSheet(props.initialContent.sheets[index]);
+      setNamedRanges(props.initialContent.namedRanges || []);
     }
   });
 
@@ -336,12 +296,38 @@ export function SheetEditor(props: SheetEditorProps) {
   };
 
   const formatDisplay = (value: string, format?: NonNullable<GridCell["style"]>["format"], decimals?: number) => {
+    if (!format || format === "general") return value;
+    if (format === "text") return value;
     const number = Number(value);
-    if (!Number.isFinite(number) || !format || format === "general") return value;
+    if (!Number.isFinite(number)) return value;
     const d = typeof decimals === "number" ? decimals : 2;
     if (format === "currency") return `$${number.toFixed(d)}`;
     if (format === "percent") return `${(number * 100).toFixed(d)}%`;
+    if (format === "date") {
+      const parsed = Date.parse(value);
+      if (!Number.isNaN(parsed)) {
+        return new Date(parsed).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+      }
+      const serial = Number(value);
+      if (Number.isFinite(serial) && serial > 0) {
+        const epoch = new Date(Date.UTC(1899, 11, 30));
+        epoch.setUTCDate(epoch.getUTCDate() + Math.floor(serial));
+        return epoch.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+      }
+      return value;
+    }
     return number.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+  };
+
+  const looksLikeUrl = (text: string) => /^https?:\/\//i.test(text) || /^www\./i.test(text);
+
+  const cellHyperlink = (cell: GridCell | undefined): string | null => {
+    if (!cell) return null;
+    if (cell.style?.hyperlink) return cell.style.hyperlink;
+    const raw = (cell.raw || cell.display || "").trim();
+    if (!raw || raw.startsWith("=")) return null;
+    if (looksLikeUrl(raw)) return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    return null;
   };
 
   const chartData = () => {
@@ -529,9 +515,52 @@ export function SheetEditor(props: SheetEditorProps) {
     const ctx = canvasRef.getContext("2d");
     if (!ctx) return;
 
-    const width = canvasRef.width;
-    const height = canvasRef.height;
-    ctx.clearRect(0, 0, width, height);
+    const cellFont = (style: GridCell["style"] | undefined, row?: number) => {
+      const size = style?.fontSize || Number(fontSize()) || 12;
+      const family = style?.fontFamily || fontFamily() || "Inter, sans-serif";
+      const weight = style?.bold || row === 1 ? "bold" : "normal";
+      const italic = style?.italic ? "italic" : "normal";
+      return `${italic} ${weight} ${size}px ${family}`;
+    };
+
+    const drawTextWithUnderline = (
+      text: string,
+      x: number,
+      y: number,
+      style: GridCell["style"] | undefined,
+      align: string,
+      link?: string | null,
+    ) => {
+      ctx.fillText(text, x, y);
+      if ((style?.underline || link) && text) {
+        const font = ctx.font;
+        const w = measureTextWidth(ctx, font, text);
+        let startX = x;
+        if (align === "center") startX = x - w / 2;
+        else if (align === "right") startX = x - w;
+        ctx.beginPath();
+        ctx.moveTo(startX, y + 2);
+        ctx.lineTo(startX + w, y + 2);
+        ctx.strokeStyle = link ? "#2563eb" : style?.fontColor || "#0f172a";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    };
+
+    const cssWidth = containerRef?.clientWidth || canvasRef.clientWidth;
+    const cssHeight = containerRef?.clientHeight || canvasRef.clientHeight;
+    if (gridDirtyFull) {
+      ctx.clearRect(0, 0, cssWidth, cssHeight);
+    } else if (gridDirtyRect) {
+      ctx.clearRect(gridDirtyRect.x, gridDirtyRect.y, gridDirtyRect.w, gridDirtyRect.h);
+    } else {
+      ctx.clearRect(0, 0, cssWidth, cssHeight);
+    }
+    gridDirtyFull = false;
+    gridDirtyRect = null;
+
+    const width = cssWidth;
+    const height = cssHeight;
 
     ctx.font = "12px Inter, sans-serif";
 
@@ -659,14 +688,16 @@ export function SheetEditor(props: SheetEditorProps) {
       ctx.strokeRect(cellX, cellY, cellWidth, cellHeight);
 
       if (cell) {
-        ctx.fillStyle = style?.fontColor || "#0f172a";
-        ctx.font = style?.bold || m.startRow === 1 ? "bold 12px Inter, sans-serif" : "12px Inter, sans-serif";
+        const link = cellHyperlink(cell);
+        ctx.fillStyle = link ? "#2563eb" : style?.fontColor || "#0f172a";
+        ctx.font = cellFont(style, m.startRow);
         ctx.textAlign = style?.align || "left";
         const textX = style?.align === "center" ? cellX + cellWidth / 2 : style?.align === "right" ? cellX + cellWidth - 6 : cellX + 6;
         const text = formatDisplay(cell.display, style?.format, style?.decimals);
         const vAlign = style?.vAlign || "middle";
         const textY = vAlign === "top" ? cellY + 8 : vAlign === "bottom" ? cellY + cellHeight - 8 : cellY + cellHeight / 2;
         ctx.textBaseline = vAlign === "top" ? "top" : vAlign === "bottom" ? "bottom" : "middle";
+        const fontStr = cellFont(style, m.startRow);
         if (style?.wrap) {
           const maxWidth = cellWidth - 10;
           const words = text.split(/\s+/);
@@ -674,7 +705,7 @@ export function SheetEditor(props: SheetEditorProps) {
           let lineY = vAlign === "middle" ? cellY + 12 : textY;
           for (const word of words) {
             const test = line ? `${line} ${word}` : word;
-            if (ctx.measureText(test).width > maxWidth && line) {
+            if (measureTextWidth(ctx, fontStr, test) > maxWidth && line) {
               ctx.fillText(line, textX, lineY);
               line = word;
               lineY += 14;
@@ -683,9 +714,9 @@ export function SheetEditor(props: SheetEditorProps) {
               line = test;
             }
           }
-          if (line && lineY <= cellY + cellHeight - 4) ctx.fillText(line, textX, lineY);
+          if (line && lineY <= cellY + cellHeight - 4) drawTextWithUnderline(line, textX, lineY, style, style?.align || "left", link);
         } else {
-          ctx.fillText(text, textX, textY);
+          drawTextWithUnderline(text, textX, textY, style, style?.align || "left", link);
         }
       }
     };
@@ -710,16 +741,19 @@ export function SheetEditor(props: SheetEditorProps) {
         if (data[key]) {
           const x = column.x + 6;
           const y = row.y + row.height / 2;
-          const style = data[key].style;
+          const cell = data[key];
+          const style = cell.style;
+          const link = cellHyperlink(cell);
           if (style?.bgColor) {
             ctx.fillStyle = style.bgColor;
             ctx.fillRect(column.x, row.y, column.width, row.height);
           }
-          ctx.fillStyle = style?.fontColor || "#0f172a";
-          ctx.font = style?.bold || r === 1 ? "bold 12px Inter, sans-serif" : "12px Inter, sans-serif";
+          ctx.fillStyle = link ? "#2563eb" : style?.fontColor || "#0f172a";
+          const fontStr = cellFont(style, r);
+          ctx.font = fontStr;
           ctx.textAlign = style?.align || "left";
           const textX = style?.align === "center" ? column.x + column.width / 2 : style?.align === "right" ? column.x + column.width - 6 : x;
-          const text = formatDisplay(data[key].display, style?.format, style?.decimals);
+          const text = formatDisplay(cell.display, style?.format, style?.decimals);
           const vAlign = style?.vAlign || "middle";
           const textY =
             vAlign === "top" ? row.y + 8 : vAlign === "bottom" ? row.y + row.height - 8 : y;
@@ -731,7 +765,7 @@ export function SheetEditor(props: SheetEditorProps) {
             let lineY = vAlign === "middle" ? row.y + 12 : textY;
             for (const word of words) {
               const test = line ? `${line} ${word}` : word;
-              if (ctx.measureText(test).width > maxWidth && line) {
+              if (measureTextWidth(ctx, fontStr, test) > maxWidth && line) {
                 ctx.fillText(line, textX, lineY);
                 line = word;
                 lineY += 14;
@@ -740,9 +774,9 @@ export function SheetEditor(props: SheetEditorProps) {
                 line = test;
               }
             }
-            if (line && lineY <= row.y + row.height - 4) ctx.fillText(line, textX, lineY);
+            if (line && lineY <= row.y + row.height - 4) drawTextWithUnderline(line, textX, lineY, style, style?.align || "left", link);
           } else {
-            ctx.fillText(text, textX, textY);
+            drawTextWithUnderline(text, textX, textY, style, style?.align || "left", link);
           }
         }
       }
@@ -799,10 +833,11 @@ export function SheetEditor(props: SheetEditorProps) {
           ctx.lineTo(x + widthForColumn, y);
           ctx.stroke();
           if (value) {
-            ctx.fillStyle = "#0f172a";
-            ctx.font = r === 1 ? "bold 12px Inter, sans-serif" : "12px Inter, sans-serif";
+            const cellStyle = value.style;
+            ctx.fillStyle = cellStyle?.fontColor || "#0f172a";
+            ctx.font = cellFont(cellStyle, r);
             ctx.textAlign = "left";
-            ctx.fillText(value.display, x + 6, y + heightForRow / 2);
+            drawTextWithUnderline(value.display, x + 6, y + heightForRow / 2, cellStyle, "left");
           }
         }
       }
@@ -848,8 +883,17 @@ export function SheetEditor(props: SheetEditorProps) {
   onMount(() => {
     const resizeCanvas = () => {
       if (containerRef && canvasRef) {
-        canvasRef.width = containerRef.clientWidth;
-        canvasRef.height = containerRef.clientHeight;
+        const dpr = window.devicePixelRatio || 1;
+        const cssW = containerRef.clientWidth;
+        const cssH = containerRef.clientHeight;
+        canvasRef.width = Math.round(cssW * dpr);
+        canvasRef.height = Math.round(cssH * dpr);
+        canvasRef.style.width = `${cssW}px`;
+        canvasRef.style.height = `${cssH}px`;
+        const ctx = canvasRef.getContext("2d");
+        if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        clearTextMeasureCache();
+        markGridDirtyFull();
         drawGrid();
       }
     };
@@ -1037,6 +1081,7 @@ export function SheetEditor(props: SheetEditorProps) {
     setCellsData(newMap);
     if (newMap[key]?.style?.wrap) autoHeightForWrappedRows(newMap, [row]);
     setEditing(false);
+    markSelectionDirty();
     drawGrid();
 
     const workbook = makeWorkbook(newMap);
@@ -1082,7 +1127,49 @@ export function SheetEditor(props: SheetEditorProps) {
   const freezeFromSelection = async () => {
     const cell = activeCell();
     await emitFreezeChange(cell.row, cell.col);
+    markGridDirtyFull();
+    drawGrid();
   };
+
+  const unfreezePanes = async () => {
+    await emitFreezeChange(0, 0);
+    markGridDirtyFull();
+    drawGrid();
+  };
+
+  const applyNumberFormat = (value: NumberFormatValue) => {
+    updateActiveStyle({
+      format: value.format,
+      decimals: value.decimals,
+    });
+  };
+
+  const applyValidation = (validation: ListValidation | null) => {
+    const bounds = selectedBounds();
+    const next = { ...cellsData() };
+    for (let row = bounds.startRow; row <= bounds.endRow; row += 1) {
+      for (let col = bounds.startCol; col <= bounds.endCol; col += 1) {
+        const key = `${row}:${col}`;
+        const current = next[key] || { raw: "", display: "" };
+        const style = { ...current.style };
+        if (validation) style.validation = validation;
+        else delete style.validation;
+        next[key] = { ...current, style };
+      }
+    }
+    pushHistory();
+    setCellsData(next);
+    props.onChange?.(makeWorkbook(next));
+    markSelectionDirty();
+    drawGrid();
+  };
+
+  const activeNumberFormat = (): NumberFormatValue => ({
+    format: activeStyle()?.format || "general",
+    decimals: activeStyle()?.decimals ?? 2,
+  });
+
+  const activeValidation = (): ListValidation | null => activeStyle()?.validation ?? null;
 
   const insertRowsAt = async (atRow: number, count = 1) => {
     pushHistory();
@@ -1274,9 +1361,10 @@ export function SheetEditor(props: SheetEditorProps) {
       if (!text) return;
       const origin = activeCell();
       const next = { ...cellsData() };
-      for (const [rowOffset, line] of text.replace(/\r\n/g, "\n").split("\n").entries()) {
-        if (!line && rowOffset === text.split("\n").length - 1) continue;
-        for (const [colOffset, raw] of line.split("\t").entries()) {
+      const rows = parseTsv(text.replace(/\r\n/g, "\n"));
+      for (const [rowOffset, line] of rows.entries()) {
+        if (!line.length && rowOffset === rows.length - 1) continue;
+        for (const [colOffset, raw] of line.entries()) {
           const value = raw.trim();
           const key = `${origin.row + rowOffset}:${origin.col + colOffset}`;
           if (!value) delete next[key];
@@ -1438,11 +1526,6 @@ export function SheetEditor(props: SheetEditorProps) {
     activeSheetIndex: activeSheetIndex(),
   });
 
-  const pushHistory = () => {
-    setHistoryPast([...historyPast(), captureSnapshot()].slice(-200));
-    setHistoryFuture([]);
-  };
-
   const restoreSnapshot = async (snap: SheetSnapshot) => {
     setMerges(snap.merges);
     setAutoFilterEnabled(snap.autoFilterEnabled);
@@ -1462,29 +1545,20 @@ export function SheetEditor(props: SheetEditorProps) {
     drawGrid();
   };
 
+  const { pushHistory, undo, redo } = createSheetHistoryHandlers({
+    historyPast,
+    setHistoryPast,
+    historyFuture,
+    setHistoryFuture,
+    captureSnapshot,
+    restoreSnapshot,
+  });
+
   const restoreHistoryMap = async (next: Record<string, GridCell>) => {
     setCellsData(next);
     const recalculated = await commands.recalculateWorkbook(makeWorkbook(next));
     loadSheet(recalculated.sheets?.[activeSheetIndex()]);
     props.onChange?.(recalculated);
-  };
-
-  const undo = async () => {
-    const past = historyPast();
-    const previous = past.at(-1);
-    if (!previous) return;
-    setHistoryPast(past.slice(0, -1));
-    setHistoryFuture([...historyFuture(), captureSnapshot()].slice(-200));
-    await restoreSnapshot(previous);
-  };
-
-  const redo = async () => {
-    const future = historyFuture();
-    const next = future.at(-1);
-    if (!next) return;
-    setHistoryFuture(future.slice(0, -1));
-    setHistoryPast([...historyPast(), captureSnapshot()].slice(-200));
-    await restoreSnapshot(next);
   };
 
   const updateActiveStyle = (changes: GridCell["style"]) => {
@@ -1504,6 +1578,7 @@ export function SheetEditor(props: SheetEditorProps) {
       autoHeightForWrappedRows(next, rows);
     }
     props.onChange?.(makeWorkbook(next));
+    markSelectionDirty();
     drawGrid();
   };
 
@@ -1513,7 +1588,13 @@ export function SheetEditor(props: SheetEditorProps) {
     const onCommand = (event: Event) => {
       const detail = (event as CustomEvent<EditorCommandDetail>).detail;
       if (!detail?.id) return;
-      if (detail.id === "find" || detail.id === "find-replace") setFilterOpen(true);
+      if (detail.id === "find") {
+        setFindReplaceMode(false);
+        setFindBarOpen(true);
+      } else if (detail.id === "find-replace") {
+        setFindReplaceMode(true);
+        setFindBarOpen(true);
+      }
       else if (detail.id === "undo") void undo();
       else if (detail.id === "redo") void redo();
       else if (detail.id === "cut") void cutSelection();
@@ -1711,6 +1792,83 @@ export function SheetEditor(props: SheetEditorProps) {
     drawGrid();
   };
 
+  const replaceCurrentCell = async () => {
+    const query = findQuery().trim();
+    if (!query) return;
+    const { row, col } = activeCell();
+    const key = `${row}:${col}`;
+    const cell = cellsData()[key];
+    if (!cell) return;
+    const haystack = `${cell.raw}\n${cell.display}`;
+    const matches = matchCase()
+      ? haystack.includes(query)
+      : haystack.toLowerCase().includes(query.toLowerCase());
+    if (!matches) {
+      findNextCell();
+      return;
+    }
+    const replacement = replaceWith();
+    const nextRaw = cell.raw.includes(query)
+      ? (matchCase()
+        ? cell.raw.replace(query, replacement)
+        : cell.raw.replace(new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), replacement))
+      : cell.raw;
+    pushHistory();
+    const next = { ...cellsData(), [key]: { ...cell, raw: nextRaw, display: nextRaw.startsWith("=") ? cell.display : nextRaw } };
+    setCellsData(next);
+    const recalculated = await commands.recalculateWorkbook(makeWorkbook(next));
+    loadSheet(recalculated.sheets?.[activeSheetIndex()]);
+    props.onChange?.(recalculated);
+    setFormulaValue(nextRaw);
+    drawGrid();
+    findNextCell();
+  };
+
+  const replaceAllCells = async () => {
+    const query = findQuery().trim();
+    if (!query) return;
+    pushHistory();
+    const next = { ...cellsData() };
+    const pattern = matchCase() ? query : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    for (const [key, cell] of Object.entries(next)) {
+      const haystack = `${cell.raw}\n${cell.display}`;
+      const hit = matchCase()
+        ? haystack.includes(query)
+        : haystack.toLowerCase().includes(query.toLowerCase());
+      if (!hit) continue;
+      const newRaw = matchCase()
+        ? cell.raw.split(query).join(replaceWith())
+        : cell.raw.replace(pattern as RegExp, replaceWith());
+      next[key] = {
+        ...cell,
+        raw: newRaw,
+        display: newRaw.startsWith("=") ? cell.display : newRaw,
+      };
+    }
+    setCellsData(next);
+    const recalculated = await commands.recalculateWorkbook(makeWorkbook(next));
+    loadSheet(recalculated.sheets?.[activeSheetIndex()]);
+    props.onChange?.(recalculated);
+    drawGrid();
+  };
+
+  const addNamedRange = (name: string, rangeStr: string) => {
+    const trimmed = name.trim();
+    const range = rangeStr.trim();
+    if (!trimmed || !range) return;
+    const sheetName = sheets()[activeSheetIndex()]?.name || "Sheet1";
+    setNamedRanges((prev) => {
+      const filtered = prev.filter((nr) => nr.name !== trimmed);
+      return [...filtered, { name: trimmed, rangeStr: range, sheet: sheetName }];
+    });
+    props.onChange?.(makeWorkbook(cellsData()));
+  };
+
+  const deleteNamedRange = (name: string) => {
+    setNamedRanges((prev) => prev.filter((nr) => nr.name !== name));
+    props.onChange?.(makeWorkbook(cellsData()));
+  };
+
   const selectedBounds = () => {
     const cell = activeCell();
     const anchor = selectionAnchor();
@@ -1816,7 +1974,39 @@ export function SheetEditor(props: SheetEditorProps) {
       id: "styles",
       title: "Styles",
       icon: <IconStyles />,
-      content: <div>Cell styles and named ranges will appear here.</div>,
+      content: (
+        <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
+          <div style={{ "font-weight": "600" }}>Named ranges</div>
+          <For each={namedRanges()}>
+            {(nr) => (
+              <div style={{ display: "flex", gap: "6px", "align-items": "center", "font-size": "12px" }}>
+                <span style={{ flex: 1 }}>{nr.name} → {nr.rangeStr}</span>
+                <button type="button" class="g-toolbar-btn" onClick={() => deleteNamedRange(nr.name)}>✕</button>
+              </div>
+            )}
+          </For>
+          <div style={{ display: "flex", "flex-direction": "column", gap: "4px", "margin-top": "8px" }}>
+            <input class="g-toolbar-input" placeholder="Name" aria-label="Named range name" id="nr-name" style={{ width: "100%" }} />
+            <input class="g-toolbar-input" placeholder="A1:B5" aria-label="Named range" id="nr-range" style={{ width: "100%" }} />
+            <button
+              type="button"
+              class="g-toolbar-btn"
+              style={{ width: "100%" }}
+              onClick={() => {
+                const nameEl = document.getElementById("nr-name") as HTMLInputElement | null;
+                const rangeEl = document.getElementById("nr-range") as HTMLInputElement | null;
+                if (nameEl && rangeEl) {
+                  addNamedRange(nameEl.value, rangeEl.value);
+                  nameEl.value = "";
+                  rangeEl.value = "";
+                }
+              }}
+            >
+              Add named range
+            </button>
+          </div>
+        </div>
+      ),
     },
     {
       id: "gallery",
@@ -1948,7 +2138,7 @@ export function SheetEditor(props: SheetEditorProps) {
       icon: <IconFunctions />,
       content: (
         <div style={{ display: "flex", "flex-direction": "column", gap: "2px" }}>
-          <For each={["SUM", "AVERAGE", "MIN", "MAX", "COUNT", "IF", "CONCAT"]}>
+          <For each={FORMULA_FUNCTION_NAMES}>
             {(name) => (
               <button
                 type="button"
@@ -2009,28 +2199,119 @@ export function SheetEditor(props: SheetEditorProps) {
         />
         <ToolbarButton title="Insert Image" onClick={() => showToast("Image insertion in spreadsheets is planned for a future release.", "info")}><IconImage /></ToolbarButton>
         <ToolbarSep />
-        <ToolbarButton title="Freeze panes" onClick={() => void freezeFromSelection()} active={freezeRows() > 0 || freezeCols() > 0}><IconFreeze /></ToolbarButton>
+        <ToolbarButton title="Insert row" onClick={() => void insertRowsAt(activeCell().row)}>+Row</ToolbarButton>
+        <ToolbarButton title="Delete row" onClick={() => void deleteRowsAt(activeCell().row)}>−Row</ToolbarButton>
+        <ToolbarButton title="Insert column" onClick={() => void insertColsAt(activeCell().col)}>+Col</ToolbarButton>
+        <ToolbarButton title="Delete column" onClick={() => void deleteColsAt(activeCell().col)}>−Col</ToolbarButton>
+        <ToolbarSep />
+        <ToolbarButton title="Freeze panes at selection" onClick={() => void freezeFromSelection()} active={freezeRows() > 0 || freezeCols() > 0}><IconFreeze /></ToolbarButton>
+        <ToolbarButton title="Unfreeze panes" onClick={() => void unfreezePanes()} disabled={freezeRows() === 0 && freezeCols() === 0}>Unfreeze</ToolbarButton>
         <ToolbarButton title="Fill down" onClick={() => void fillDown()}>Fill</ToolbarButton>
         <ToolbarButton title="Import CSV" onClick={() => void importCsv()}>Import</ToolbarButton>
         <ToolbarButton title="Export CSV" onClick={() => props.onExportCsv?.()}>Export</ToolbarButton>
         <ToolbarButton title="Print…" onClick={() => setPrintDialogOpen(true)}><IconPrint /></ToolbarButton>
       </ToolbarRow>
 
-      <SheetToolbar {...{ fontFamily, setFontFamily, fontSize, setFontSize, activeStyle, updateActiveStyle, selectedBounds, activeCell, setMerges, pushHistory, makeWorkbook, cellsData, drawGrid, onChange: props.onChange }} />
-      <FormulaBar {...{ activeCell, formulaValue, setFormulaValue, getColName, insertFormulaPrefix, commitCellEdit, editing, setEditing, cellsData, containerRef, formulaInputRef }} />
+      <SheetToolbar
+        {...{
+          fontFamily,
+          setFontFamily,
+          fontSize,
+          setFontSize,
+          activeStyle,
+          updateActiveStyle,
+          selectedBounds,
+          activeCell,
+          setMerges,
+          pushHistory,
+          makeWorkbook,
+          cellsData,
+          drawGrid,
+          onChange: props.onChange,
+          onOpenNumberFormat: () => setNumberFormatOpen(true),
+          onOpenValidation: () => setValidationOpen(true),
+        }}
+      />
+      <FormulaBar
+        {...{
+          activeCell,
+          formulaValue,
+          setFormulaValue,
+          getColName,
+          insertFormulaPrefix,
+          commitCellEdit,
+          editing,
+          setEditing,
+          cellsData,
+          containerRef,
+          formulaInputRef,
+        }}
+      />
       <div style={{ flex: 1, display: "flex", "min-height": "0", overflow: "hidden" }}>
-        <GridCanvas {...{ containerRef, canvasRef, scrollTop, scrollLeft, setScrollTop, setScrollLeft, rowHeight, columnWidth, drawGrid, activeCell, redo, undo, copySelection, cutSelection, pasteValuesOnly, pasteTsv, selectCell, lastUsedCell, jumpToDataEdge, setEditing, setFormulaValue, formulaInputRef, handleCanvasClick, setContextMenu, emitEditorCommand, isFillHandlePoint, setFillDragStart, setSuppressNextClick, startDimensionDrag, updateDimensionDrag, fillDragStart, finishFillDrag, dimensionDrag, setDimensionDrag, getColName, cellsData, chartType, chartData, chartMax, pieSlices }} />
+        <GridCanvas
+          {...{
+            containerRef,
+            canvasRef,
+            scrollTop,
+            scrollLeft,
+            setScrollTop,
+            setScrollLeft,
+            rowHeight,
+            columnWidth,
+            drawGrid,
+            markGridDirtyFull,
+            activeCell,
+            redo,
+            undo,
+            copySelection,
+            cutSelection,
+            pasteValuesOnly,
+            pasteTsv,
+            selectCell,
+            lastUsedCell,
+            jumpToDataEdge,
+            setEditing,
+            setFormulaValue,
+            formulaInputRef,
+            handleCanvasClick,
+            setContextMenu,
+            emitEditorCommand,
+            isFillHandlePoint,
+            setFillDragStart,
+            setSuppressNextClick,
+            startDimensionDrag,
+            updateDimensionDrag,
+            fillDragStart,
+            finishFillDrag,
+            dimensionDrag,
+            setDimensionDrag,
+            getColName,
+            cellsData,
+            cellHyperlink,
+            chartType,
+            chartData,
+            chartMax,
+            pieSlices,
+          }}
+        />
         <IconSidebar panels={sidebarPanels()} defaultPanel="properties" />
       </div>
 
-      <FindBar
-        query={findQuery()}
-        matchCase={matchCase()}
-        showReplace={false}
-        onQueryChange={setFindQuery}
-        onFindNext={findNextCell}
-        onMatchCaseChange={setMatchCase}
-      />
+      <Show when={findBarOpen()}>
+        <FindBar
+          query={findQuery()}
+          replaceWith={replaceWith()}
+          showReplace={findReplaceMode()}
+          matchCase={matchCase()}
+          onQueryChange={setFindQuery}
+          onReplaceChange={setReplaceWith}
+          onFindNext={findNextCell}
+          onReplace={() => void replaceCurrentCell()}
+          onReplaceAll={() => void replaceAllCells()}
+          onMatchCaseChange={setMatchCase}
+          onClose={() => setFindBarOpen(false)}
+        />
+      </Show>
 
       {/* Sheet Tabs */}
       <footer class="g-sheet-tabs g-no-print">
@@ -2156,87 +2437,40 @@ export function SheetEditor(props: SheetEditorProps) {
         </div>
       </Show>
 
-      <Dialog open={sortDialogOpen()} title="Sort" onClose={() => setSortDialogOpen(false)}>
-        <div style={{ display: "flex", "flex-direction": "column", gap: "10px", "min-width": "280px" }}>
-          <For each={sortKeys()}>
-            {(key, index) => (
-              <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
-                <label style={{ "font-size": "12px" }}>
-                  Column
-                  <input
-                    aria-label={`Sort key ${index() + 1} column`}
-                    class="g-toolbar-input"
-                    value={getColName(key.col)}
-                    onInput={(e) => {
-                      const col = parseColLetter(e.currentTarget.value);
-                      if (!col) return;
-                      const next = [...sortKeys()];
-                      next[index()] = { ...next[index()], col };
-                      setSortKeys(next);
-                    }}
-                    style={{ width: "48px", "margin-left": "6px" }}
-                  />
-                </label>
-                <select
-                  aria-label={`Sort key ${index() + 1} direction`}
-                  value={key.ascending ? "asc" : "desc"}
-                  onChange={(e) => {
-                    const next = [...sortKeys()];
-                    next[index()] = { ...next[index()], ascending: e.currentTarget.value === "asc" };
-                    setSortKeys(next);
-                  }}
-                >
-                  <option value="asc">Ascending</option>
-                  <option value="desc">Descending</option>
-                </select>
-                <Show when={sortKeys().length > 1}>
-                  <button
-                    type="button"
-                    class="g-toolbar-btn"
-                    onClick={() => setSortKeys(sortKeys().filter((_, i) => i !== index()))}
-                  >
-                    Remove
-                  </button>
-                </Show>
-              </div>
-            )}
-          </For>
-          <Show when={sortKeys().length < 3}>
-            <button
-              type="button"
-              class="g-toolbar-btn"
-              onClick={() => setSortKeys([...sortKeys(), { col: activeCell().col, ascending: true }])}
-            >
-              Add level
-            </button>
-          </Show>
-          <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
-            <button type="button" class="g-toolbar-btn" onClick={() => setSortDialogOpen(false)}>Cancel</button>
-            <button type="button" class="g-toolbar-btn" onClick={() => void applyMultiSort()}>Apply</button>
-          </div>
-        </div>
-      </Dialog>
+      <SortDialog
+        open={sortDialogOpen()}
+        sortKeys={sortKeys()}
+        onSortKeysChange={setSortKeys}
+        getColName={getColName}
+        parseColLetter={parseColLetter}
+        activeCol={activeCell().col}
+        onClose={() => setSortDialogOpen(false)}
+        onApply={() => void applyMultiSort()}
+      />
 
-      <Dialog open={printDialogOpen()} title="Print Sheet" onClose={() => setPrintDialogOpen(false)}>
-        <div style={{ display: "flex", "flex-direction": "column", gap: "10px", "min-width": "260px" }}>
-          <label style={{ display: "flex", gap: "8px", "align-items": "center", "font-size": "13px" }}>
-            <input type="radio" name="sheet-print-mode" checked={printMode() === "sheet"} onChange={() => setPrintMode("sheet")} />
-            Active sheet
-          </label>
-          <label style={{ display: "flex", gap: "8px", "align-items": "center", "font-size": "13px" }}>
-            <input type="radio" name="sheet-print-mode" checked={printMode() === "selection"} onChange={() => setPrintMode("selection")} />
-            Selection
-          </label>
-          <label style={{ display: "flex", gap: "8px", "align-items": "center", "font-size": "13px" }}>
-            <input type="checkbox" checked={printFitWidth()} onChange={(e) => setPrintFitWidth(e.currentTarget.checked)} />
-            Fit to width
-          </label>
-          <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
-            <button type="button" class="g-toolbar-btn" onClick={() => setPrintDialogOpen(false)}>Cancel</button>
-            <button type="button" class="g-toolbar-btn" onClick={printSheet}>Print</button>
-          </div>
-        </div>
-      </Dialog>
+      <PrintDialog
+        open={printDialogOpen()}
+        printMode={printMode()}
+        printFitWidth={printFitWidth()}
+        onPrintModeChange={setPrintMode}
+        onPrintFitWidthChange={setPrintFitWidth}
+        onClose={() => setPrintDialogOpen(false)}
+        onPrint={printSheet}
+      />
+
+      <NumberFormatDialog
+        open={numberFormatOpen()}
+        onClose={() => setNumberFormatOpen(false)}
+        value={activeNumberFormat()}
+        onApply={applyNumberFormat}
+      />
+
+      <DataValidationDialog
+        open={validationOpen()}
+        onClose={() => setValidationOpen(false)}
+        value={activeValidation()}
+        onApply={applyValidation}
+      />
 
       <Show when={contextMenu()}>
         {(menu) => (

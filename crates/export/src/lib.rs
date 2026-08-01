@@ -1,3 +1,4 @@
+pub mod base64_util;
 pub mod docx;
 pub mod pdf;
 pub mod pptx;

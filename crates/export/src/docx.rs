@@ -1,3 +1,4 @@
+use crate::base64_util::{decode_base64, encode_base64};
 use crate::pdf::ExportError;
 use docx_rs::*;
 use quick_xml::events::Event;
@@ -961,56 +962,9 @@ pub fn import_docx_to_doc(path: &Path) -> Result<Value, ExportError> {
     Ok(import_docx_to_doc_with_report(path)?.document)
 }
 
-fn encode_base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let first = chunk[0] as usize;
-        let second = chunk.get(1).copied().unwrap_or(0) as usize;
-        let third = chunk.get(2).copied().unwrap_or(0) as usize;
-        output.push(TABLE[first >> 2] as char);
-        output.push(TABLE[((first & 0x03) << 4) | (second >> 4)] as char);
-        output.push(if chunk.len() > 1 {
-            TABLE[((second & 0x0f) << 2) | (third >> 6)] as char
-        } else {
-            '='
-        });
-        output.push(if chunk.len() > 2 {
-            TABLE[third & 0x3f] as char
-        } else {
-            '='
-        });
-    }
-    output
-}
-
 fn decode_data_uri(src: &str) -> Option<Vec<u8>> {
     let encoded = src.strip_prefix("data:")?.split_once(',')?.1;
-    let mut value = 0u32;
-    let mut bits = 0u8;
-    let mut output = Vec::new();
-    for byte in encoded.bytes() {
-        if byte == b'=' {
-            break;
-        }
-        let digit = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'\r' | b'\n' | b' ' => continue,
-            _ => return None,
-        };
-        value = (value << 6) | u32::from(digit);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            output.push((value >> bits) as u8);
-            value &= (1 << bits) - 1;
-        }
-    }
-    Some(output)
+    decode_base64(encoded)
 }
 
 #[cfg(test)]

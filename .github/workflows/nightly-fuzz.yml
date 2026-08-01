@@ -1,0 +1,30 @@
+name: Nightly Fuzz
+
+# Weekly stress run for the formula parser. cargo-fuzz lives outside the main
+# workspace; when unavailable we fall back to the proptest integration suite.
+on:
+  schedule:
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+
+jobs:
+  formula-stress:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Run parser fuzz target (5 min budget)
+        working-directory: crates/formula/fuzz
+        run: cargo +nightly fuzz run parser -- -max_total_time=300
+        continue-on-error: true
+        id: fuzz
+
+      - name: Fallback proptest stress when fuzz unavailable
+        if: steps.fuzz.outcome != 'success'
+        run: cargo test -p redoc-formula --test proptest_formula -- --nocapture

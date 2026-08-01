@@ -11,6 +11,7 @@
     "@redoc/icons": "workspace:*",
     "@redoc/ui": "workspace:*",
     "@redoc/editor-common": "workspace:*",
-    "@redoc/api-client": "workspace:*"
+    "@redoc/api-client": "workspace:*",
+    "@redoc/utils": "workspace:*"
   }
 }
