@@ -1,0 +1,30 @@
+{
+  "name": "@redoc/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@redoc/api-client": "workspace:*",
+    "@redoc/doc-editor": "workspace:*",
+    "@redoc/editor-common": "workspace:*",
+    "@redoc/icons": "workspace:*",
+    "@redoc/sheet-editor": "workspace:*",
+    "@redoc/slide-editor": "workspace:*",
+    "@redoc/ui": "workspace:*",
+    "@redoc/utils": "workspace:*",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@tauri-apps/plugin-updater": "^2.0.0",
+    "solid-js": "^1.9.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vite-plugin-solid": "^2.11.0"
+  }
+}

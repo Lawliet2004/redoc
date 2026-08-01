@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            bundles: appimage,deb
+          - os: windows-2022
+            bundles: nsis,msi
+          - os: macos-14
+            bundles: dmg
+    runs-on: ${{ matrix.os }}
+    env:
+      TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
+      TAURI_UPDATER_ENDPOINT: ${{ secrets.TAURI_UPDATER_ENDPOINT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm generate:bindings
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm lint
+      - run: pnpm build
+      - run: pnpm quality:check
+        env:
+          REDOC_RELEASE_CI: "1"
+      - name: Generate signed updater configuration when configured
+        if: ${{ env.TAURI_UPDATER_PUBLIC_KEY != '' && env.TAURI_UPDATER_ENDPOINT != '' }}
+        run: pnpm create:updater-config
+      - name: Select updater build arguments
+        id: updater_args
+        shell: bash
+        run: |
+          if [[ -n "$TAURI_UPDATER_PUBLIC_KEY" && -n "$TAURI_UPDATER_ENDPOINT" ]]; then
+            echo "args=--bundles ${{ matrix.bundles }} --features updater --config apps/desktop/src-tauri/tauri.generated.release.conf.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=--bundles ${{ matrix.bundles }}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build release bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Redoc ${{ github.ref_name }}
+          releaseBody: See the repository release notes for validation and known limitations.
+          releaseDraft: true
+          prerelease: true
+          args: ${{ steps.updater_args.outputs.args }}
+      - name: Installer size gate
+        run: node scripts/installer-size-gate.mjs
+        # Release-CI-only: fails if any built installer under target/release/bundle exceeds 55 MB.

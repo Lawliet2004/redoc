@@ -1,0 +1,108 @@
+/* Slide Transition Animations */
+.slide-transition-fade,
+.g-slide-anim-fade {
+  animation: slideFadeIn 0.4s ease-in-out;
+}
+
+.slide-transition-slide-left,
+.g-slide-anim-left,
+.g-slide-anim-slide-left {
+  animation: slideInLeft 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.slide-transition-slide-right,
+.g-slide-anim-right,
+.g-slide-anim-slide-right {
+  animation: slideInRight 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slideFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideInLeft {
+  from {
+    transform: translateX(60px);
+    opacity: 0.2;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(-60px);
+    opacity: 0.2;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* 8-handle element resize handles */
+.g-resize-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--slide-accent, #3b82f6);
+  border: 2px solid #ffffff;
+  border-radius: 2px;
+  box-sizing: border-box;
+  z-index: 5;
+}
+
+.g-resize-handle-nw {
+  top: -5px;
+  left: -5px;
+  cursor: nwse-resize;
+}
+
+.g-resize-handle-n {
+  top: -5px;
+  left: calc(50% - 5px);
+  cursor: ns-resize;
+}
+
+.g-resize-handle-ne {
+  top: -5px;
+  right: -5px;
+  cursor: nesw-resize;
+}
+
+.g-resize-handle-e {
+  top: calc(50% - 5px);
+  right: -5px;
+  cursor: ew-resize;
+}
+
+.g-resize-handle-se {
+  bottom: -5px;
+  right: -5px;
+  cursor: nwse-resize;
+}
+
+.g-resize-handle-s {
+  bottom: -5px;
+  left: calc(50% - 5px);
+  cursor: ns-resize;
+}
+
+.g-resize-handle-sw {
+  bottom: -5px;
+  left: -5px;
+  cursor: nesw-resize;
+}
+
+.g-resize-handle-w {
+  top: calc(50% - 5px);
+  left: -5px;
+  cursor: ew-resize;
+}

@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@redoc/ui": ["../../packages/ui/src/index.ts"],
+      "@redoc/ui/*": ["../../packages/ui/src/*"],
+      "@redoc/icons": ["../../packages/icons/src/index.tsx"],
+      "@redoc/api-client": ["../../packages/api-client/src/index.ts"],
+      "@redoc/editor-common": ["../../packages/editor-common/src/index.ts"],
+      "@redoc/doc-editor": ["../../packages/doc-editor/src/index.ts"],
+      "@redoc/sheet-editor": ["../../packages/sheet-editor/src/index.ts"],
+      "@redoc/slide-editor": ["../../packages/slide-editor/src/index.ts"],
+      "@redoc/utils": ["../../packages/utils/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*"]
+}

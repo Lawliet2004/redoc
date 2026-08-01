@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/core",
+  "crates/file-io",
+  "crates/doc-engine",
+  "crates/formula",
+  "crates/sheet-engine",
+  "crates/slide-engine",
+  "crates/export",
+  "apps/desktop/src-tauri"
+]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "unwind"

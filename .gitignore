@@ -1,0 +1,45 @@
+# Node / pnpm
+node_modules/
+.pnpm-store/
+dist/
+build/
+*.tsbuildinfo
+
+# Rust / Cargo
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Tauri
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/tauri.generated.release.conf.json
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+
+# Analysis / local dumps
+graphify-out/
+out*.txt
+*.log
+
+# Scratch one-off scripts at repo root (not part of build)
+/do_refactor.*
+/extract.py
+/fix.js
+/fix_all.py
+/fix_components.py
+/fix_tags.py
+/fix_ts.py
+/gen_files.py
+/patch_ts.py
+/refactor.py
+/rewrite_pdf.py
+/rewrite_slide.py
+/script.py
+/test.py
+/test[0-9].py
+/generate_icons.cjs

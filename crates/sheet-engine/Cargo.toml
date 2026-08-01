@@ -1,0 +1,15 @@
+[package]
+name = "redoc-sheet-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+redoc-formula = { path = "../formula" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+specta = { version = "=2.0.0-rc.20", features = ["derive"] }
+
+[[bench]]
+name = "grid_render"
+harness = false

@@ -1,0 +1,26 @@
+{
+  "name": "@redoc/doc-editor",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@redoc/api-client": "workspace:*",
+    "@redoc/editor-common": "workspace:*",
+    "@redoc/icons": "workspace:*",
+    "@redoc/ui": "workspace:*",
+    "prosemirror-commands": "^1.6.0",
+    "prosemirror-history": "^1.4.1",
+    "prosemirror-inputrules": "^1.5.1",
+    "prosemirror-keymap": "^1.2.2",
+    "prosemirror-model": "^1.22.3",
+    "prosemirror-schema-basic": "^1.2.3",
+    "prosemirror-schema-list": "^1.4.1",
+    "prosemirror-state": "^1.4.3",
+    "prosemirror-tables": "^1.6.4",
+    "prosemirror-view": "^1.33.10",
+    "solid-js": "^1.9.3"
+  }
+}
