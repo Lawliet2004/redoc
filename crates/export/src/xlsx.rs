@@ -1189,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn xlsx_import_warns_when_charts_present() {
+    fn xlsx_imports_chart_anchor_and_metadata() {
         let mut workbook = WorkbookModel::new_default();
         workbook.sheets[0].cells.insert(
             "1:1".to_string(),

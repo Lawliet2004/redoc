@@ -117,7 +117,7 @@
       "area": "spreadsheet",
       "title": "XLSX import/export with formulas, styles, charts, and compatibility reporting",
       "status": "partial",
-      "evidence": ["crates/export/src/xlsx.rs", "crates/export/src/xlsx.rs::xlsx_import_warns_when_charts_present"],
+      "evidence": ["crates/export/src/xlsx.rs", "crates/export/src/xlsx.rs::xlsx_imports_chart_anchor_and_metadata"],
       "targetPhase": "office-sessions"
     },
     {
