@@ -77,7 +77,7 @@
       "area": "document",
       "title": "DOCX import and export with compatibility reporting",
       "status": "partial",
-      "evidence": ["crates/export/src/docx.rs", "crates/export/src/docx.rs::imports_hyperlinks_as_link_marks_without_warning", "crates/export/src/docx.rs::round_trips_docx_page_setup_and_header_footer_fields"],
+      "evidence": ["crates/export/src/docx.rs", "crates/export/src/docx.rs::imports_hyperlinks_as_link_marks_without_warning", "crates/export/src/docx.rs::imports_exported_docx_paragraphs_and_marks", "crates/export/src/docx.rs::round_trips_docx_page_setup_and_header_footer_fields"],
       "targetPhase": "office-sessions"
     },
     {

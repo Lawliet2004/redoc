@@ -1380,6 +1380,9 @@ pub fn export_doc_to_docx(
                 p = p.style(match level {
                     2 => "Heading2",
                     3 => "Heading3",
+                    4 => "Heading4",
+                    5 => "Heading5",
+                    6 => "Heading6",
                     _ => "Heading1",
                 });
             }
@@ -1914,7 +1917,7 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                                 style.trim_start_matches("Heading").parse::<u64>().ok()
                             })
                             .unwrap_or(1);
-                        json!({ "type": "heading", "attrs": { "level": level.clamp(1, 3) }, "content": current_content })
+                        json!({ "type": "heading", "attrs": { "level": level.clamp(1, 6) }, "content": current_content })
                     } else {
                         json!({ "type": "paragraph", "content": current_content })
                     };
@@ -2040,7 +2043,10 @@ mod tests {
     #[test]
     fn imports_exported_docx_paragraphs_and_marks() {
         let path = std::env::temp_dir().join(format!("redoc-docx-{}.docx", std::process::id()));
-        let source = json!({ "type": "doc", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Hello", "marks": [{ "type": "bold" }] }] }] });
+        let source = json!({ "type": "doc", "content": [
+            { "type": "paragraph", "content": [{ "type": "text", "text": "Hello", "marks": [{ "type": "bold" }] }] },
+            { "type": "heading", "attrs": { "level": 6 }, "content": [{ "type": "text", "text": "Deep heading" }] }
+        ] });
         std::fs::write(
             &path,
             export_doc_to_docx(&source, "Test").expect("export docx"),
@@ -2052,6 +2058,8 @@ mod tests {
             imported["content"][0]["content"][0]["marks"][0]["type"],
             "bold"
         );
+        assert_eq!(imported["content"][1]["type"], "heading");
+        assert_eq!(imported["content"][1]["attrs"]["level"], 6);
         std::fs::remove_file(path).expect("cleanup docx");
     }
 
