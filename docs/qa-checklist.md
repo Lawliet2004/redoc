@@ -22,7 +22,7 @@ Run this checklist against a fresh profile and an existing profile before releas
 - [ ] Paragraphs, headings (H1–H6), bold, italic, underline, strike, blockquote, code, and lists round-trip through `.redoc`.
 - [ ] Undo/redo, find/replace, word count, and title editing work without losing content.
 - [ ] Table merge/split and column resize behave as expected.
-- [ ] Page setup (paper size, margins, orientation, headers/footers, and page fields) persists after save/reopen and DOCX round-trip.
+- [ ] Page setup (paper size, margins, orientation, 1–4 text columns, headers/footers, and page fields) persists after save/reopen and DOCX round-trip.
 - [ ] Print preview renders before printing.
 - [ ] Image drop and resize handle update the document.
 - [ ] Pasting from the web is sanitized (no script tags / hostile markup).
@@ -38,6 +38,8 @@ Run this checklist against a fresh profile and an existing profile before releas
 - [ ] Merged cells display and export correctly.
 - [ ] Freeze panes, insert/delete rows/cols, and find/replace work from toolbar or context menu.
 - [ ] Named ranges, number formats, validation lists, and hyperlinks persist.
+- [ ] Financial formulas (`PMT`, `PV`, `FV`, `NPV`, `IRR`) recalculate with valid inputs and show a safe formula error for invalid cash flows.
+- [ ] Conditional-formatting sidebar can author data-bar and color-scale rules and those rules survive XLSX round-trip.
 - [ ] Structured table names, ranges, headers, styles, and totals-row flags persist through XLSX round-trip.
 - [ ] Chart sidebar binds to a range and renders bar/line/pie.
 - [ ] CSV import and export round-trip quoted values and formulas-as-text.
@@ -86,6 +88,9 @@ These have unit or integration coverage in the repo today:
 - [x] Sheet undo/history manager (`packages/sheet-editor/src/sheetHistory.test.ts`).
 - [x] Sheet workbook model builder (`packages/sheet-editor/src/sheetModel.test.ts`).
 - [x] Doc HTML paste sanitizer (`packages/doc-editor/src/pasteSanitizer.test.ts`).
+- [x] Bounded document compare summary (`packages/doc-editor/src/compare.test.ts`).
+- [x] DOCX section-column round-trip (`round_trips_docx_section_columns`).
+- [x] Large-sheet warm recalculation budget (`scripts/perf-budget.mjs`, `grid_render` bench).
 - [x] Shortcut registry / buildMenus (`packages/editor-common/src/ShortcutRegistry.test.ts`).
 - [x] Slide deck normalize/toDeck round-trip (`packages/slide-editor/src/deckNormalize.test.ts`).
 - [x] Slide geometry, align, group helpers (`packages/slide-editor/src/geometry.test.ts`).
