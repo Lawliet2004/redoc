@@ -5,6 +5,8 @@ export interface PageSetupConfig {
   margins: { top: number; bottom: number; left: number; right: number };
   orientation: "portrait" | "landscape";
   paperSize: "letter" | "a4" | "legal" | "executive";
+  /** Number of balanced text columns in the section. */
+  columns?: number;
   header?: string;
   footer?: string;
 }
@@ -26,6 +28,7 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
   
   const [orientation, setOrientation] = createSignal(props.config.orientation);
   const [paperSize, setPaperSize] = createSignal(props.config.paperSize);
+  const [columns, setColumns] = createSignal(Math.max(1, Math.min(4, props.config.columns || 1)));
   const [header, setHeader] = createSignal(props.config.header || "");
   const [footer, setFooter] = createSignal(props.config.footer || "");
 
@@ -37,6 +40,7 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
       setRight(props.config.margins.right);
       setOrientation(props.config.orientation);
       setPaperSize(props.config.paperSize);
+      setColumns(Math.max(1, Math.min(4, props.config.columns || 1)));
       setHeader(props.config.header || "");
       setFooter(props.config.footer || "");
       setTab("margins");
@@ -55,6 +59,7 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
       margins: { top: top(), bottom: bottom(), left: left(), right: right() },
       orientation: orientation(),
       paperSize: paperSize(),
+      columns: columns(),
       header: header(),
       footer: footer()
     });
@@ -165,6 +170,21 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
                 <option value="a4">A4 (8.27" x 11.69")</option>
                 <option value="legal">Legal (8.5" x 14")</option>
                 <option value="executive">Executive (7.25" x 10.5")</option>
+              </select>
+            </label>
+
+            <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+              Text Columns
+              <select
+                class="g-toolbar-select"
+                value={columns()}
+                onChange={(e) => setColumns(Math.max(1, Math.min(4, Number(e.currentTarget.value) || 1)))}
+                style={{ height: "28px", padding: "0 8px" }}
+              >
+                <option value="1">1 (single column)</option>
+                <option value="2">2 columns</option>
+                <option value="3">3 columns</option>
+                <option value="4">4 columns</option>
               </select>
             </label>
           </div>

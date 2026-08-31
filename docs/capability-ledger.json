@@ -61,7 +61,7 @@
       "area": "document",
       "title": "Sections, columns, headers, footers, page numbering, and fields",
       "status": "partial",
-      "evidence": ["packages/doc-editor/src/PageSetupDialog.tsx", "crates/export/src/pdf.rs", "crates/export/src/docx.rs::round_trips_docx_page_setup_and_header_footer_fields"],
+      "evidence": ["packages/doc-editor/src/PageSetupDialog.tsx", "crates/export/src/pdf.rs", "crates/export/src/docx.rs::round_trips_docx_page_setup_and_header_footer_fields", "crates/export/src/docx.rs::round_trips_docx_section_columns"],
       "targetPhase": "document-completion"
     },
     {

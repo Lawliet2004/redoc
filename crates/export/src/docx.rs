@@ -126,6 +126,7 @@ struct DocxPageSetup {
     width: u32,
     height: u32,
     orientation: PageOrientationType,
+    columns: usize,
     top: i32,
     bottom: i32,
     left: i32,
@@ -188,10 +189,16 @@ fn parse_export_page_setup(doc_json: &Value) -> Option<DocxPageSetup> {
         std::mem::swap(&mut width, &mut height);
     }
     let margins = setup.get("margins");
+    let columns = setup
+        .get("columns")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .clamp(1, 8) as usize;
     Some(DocxPageSetup {
         width,
         height,
         orientation,
+        columns,
         top: twips_from_inches(json_number(margins.and_then(|value| value.get("top")), 1.0)),
         bottom: twips_from_inches(json_number(
             margins.and_then(|value| value.get("bottom")),
@@ -253,6 +260,7 @@ fn apply_export_page_setup(mut docx: Docx, doc_json: &Value) -> Docx {
             footer: 720,
             gutter: 0,
         });
+    docx.document = docx.document.columns(setup.columns);
 
     if let Some(header) = page_setup_value(doc_json)
         .and_then(|value| value.get("header"))
@@ -574,6 +582,7 @@ fn parse_docx_page_setup(
     let mut height = None::<u32>;
     let mut orientation = None::<String>;
     let mut margins = serde_json::Map::new();
+    let mut columns = 1u32;
     let mut header_id = None::<String>;
     let mut footer_id = None::<String>;
     loop {
@@ -598,6 +607,12 @@ fn parse_docx_page_setup(
                                 margins.insert(key.to_string(), json!(value));
                             }
                         }
+                    }
+                    b"cols" => {
+                        columns = docx_attr(&event, b"num")
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .unwrap_or(1)
+                            .clamp(1, 8);
                     }
                     b"headerReference" => {
                         if docx_attr(&event, b"type").as_deref().unwrap_or("default") == "default" {
@@ -640,6 +655,7 @@ fn parse_docx_page_setup(
         json!(docx_paper_size(width, height)),
     );
     setup.insert("orientation".to_string(), json!(orientation));
+    setup.insert("columns".to_string(), json!(columns));
     if !margins.is_empty() {
         setup.insert("margins".to_string(), Value::Object(margins));
     }
@@ -2158,6 +2174,40 @@ mod tests {
         );
         assert_eq!(imported["pageSetup"]["footer"], "Confidential {pages}");
         std::fs::remove_file(path).expect("cleanup docx");
+    }
+
+    #[test]
+    fn round_trips_docx_section_columns() {
+        let source = json!({
+            "type": "doc",
+            "pageSetup": {
+                "columns": 3,
+                "margins": { "top": 0.75, "bottom": 0.75, "left": 0.75, "right": 0.75 }
+            },
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Column body" }] }]
+        });
+        let bytes = export_doc_to_docx(&source, "Columns").expect("export columns");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read docx zip");
+        let mut document_xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .expect("document xml")
+            .read_to_string(&mut document_xml)
+            .expect("read document xml");
+        assert!(document_xml.contains("<w:cols") && document_xml.contains("w:num=\"3\""));
+
+        let path = std::env::temp_dir().join(format!(
+            "redoc-docx-columns-{}.docx",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            export_doc_to_docx(&source, "Columns").expect("export columns"),
+        )
+        .expect("write docx");
+        let imported = import_docx_to_doc(&path).expect("import columns");
+        std::fs::remove_file(path).expect("cleanup docx");
+        assert_eq!(imported["pageSetup"]["columns"], 3);
     }
 
     #[test]
