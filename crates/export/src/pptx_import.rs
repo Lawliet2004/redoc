@@ -1381,7 +1381,7 @@ mod tests {
             y: 80.0,
             width: 360.0,
             height: 120.0,
-            rotation: 0.0,
+            rotation: 15.0,
             z_index: 1,
             entrance: "none".to_string(),
             kind: ElementKind::Table {
@@ -1422,14 +1422,16 @@ mod tests {
             .elements
             .iter()
             .find_map(|element| match &element.kind {
-                ElementKind::Table { rows, cols, data } => Some((*rows, *cols, data.clone())),
+                ElementKind::Table { rows, cols, data } =>
+                    Some((element.rotation, *rows, *cols, data.clone())),
                 _ => None,
             })
             .expect("native table element");
-        assert_eq!(imported.0, 2);
+        assert!((imported.0 - 15.0).abs() < 0.01);
         assert_eq!(imported.1, 2);
-        assert_eq!(imported.2[0], vec!["Name", "Value"]);
-        assert_eq!(imported.2[1], vec!["A & B", "42"]);
+        assert_eq!(imported.2, 2);
+        assert_eq!(imported.3[0], vec!["Name", "Value"]);
+        assert_eq!(imported.3[1], vec!["A & B", "42"]);
         assert!(!result
             .warnings
             .iter()

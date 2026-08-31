@@ -298,6 +298,14 @@ fn shape_xml(
                 emu(element.width),
                 emu(element.height)
             );
+            let xfrm = if ooxml_rot(element.rotation) == 0 {
+                format!(r#"<p:xfrm>{xfrm_inner}</p:xfrm>"#)
+            } else {
+                format!(
+                    r#"<p:xfrm rot="{}">{xfrm_inner}</p:xfrm>"#,
+                    ooxml_rot(element.rotation)
+                )
+            };
             let grid = (0..cols)
                 .map(|_| format!(r#"<a:gridCol w="{col_width}"/>"#))
                 .collect::<String>();
@@ -320,7 +328,7 @@ fn shape_xml(
                 })
                 .collect::<String>();
             format!(
-                r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{id}" name="Table {id}"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm>{xfrm_inner}</p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>{{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}}</a:tableStyleId></a:tblPr><a:tblGrid>{grid}</a:tblGrid>{rows_xml}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+                r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{id}" name="Table {id}"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>{xfrm}<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>{{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}}</a:tableStyleId></a:tblPr><a:tblGrid>{grid}</a:tblGrid>{rows_xml}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
             )
         }
         ElementKind::Chart {
