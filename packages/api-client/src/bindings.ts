@@ -23,6 +23,7 @@ export type {
   WorkbookModel,
   SheetData,
   SheetCell,
+  PivotTableModel,
 } from "./generated";
 
 export type AppSettings = Omit<GeneratedAppSettings, "theme"> & {
@@ -81,6 +82,14 @@ export const commands = {
     unwrap(await generatedCommands.autosaveDocument(docId, mode, title, JSON.stringify(body))),
   exportDocument: async (mode: string, format: string, body: unknown, title: string) =>
     unwrap(await generatedCommands.exportDocument(mode, format, JSON.stringify(body), title)),
+  inspectExportCompatibility: async (mode: string, format: string, body: unknown) =>
+    unwrap(
+      await generatedCommands.inspectExportCompatibility(
+        mode,
+        format,
+        JSON.stringify(body),
+      ),
+    ),
   exportDocumentToFile: async (
     path: string,
     mode: string,
@@ -196,7 +205,7 @@ export const commands = {
     keys: [number, boolean][],
   ) =>
     unwrap(
-      await generatedCommands.sortRangeMulti(
+      await generatedCommands.sortWorkbookRangeMulti(
         workbook as WorkbookModel,
         sheetIdx,
         { startRow, endRow, startCol, endCol },
@@ -238,4 +247,7 @@ export const commands = {
   openLogsFolder: async () => unwrap(await generatedCommands.openLogsFolder()),
   logFrontendError: async (level: string, message: string, stack: string | null) =>
     unwrap(await generatedCommands.logFrontendError(level, message, stack)),
+  pathsExist: async (paths: string[]) => await generatedCommands.pathsExist(paths),
+  presenterSync: async (payload: { slide_index: number; deck_version: number; elapsed_ms: number; is_playing: boolean }) =>
+    unwrap(await generatedCommands.presenterSync(payload)),
 };

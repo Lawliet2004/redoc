@@ -1,4 +1,5 @@
 pub mod base64_util;
+pub mod compatibility;
 pub mod docx;
 pub mod pdf;
 pub mod pptx;
@@ -8,6 +9,7 @@ pub mod xlsx;
 pub use docx::{
     export_doc_to_docx, import_docx_to_doc, import_docx_to_doc_with_report, DocxImportResult,
 };
+pub use compatibility::export_compatibility_warnings;
 pub use pdf::{export_deck_to_pdf, export_doc_to_pdf, export_workbook_to_pdf};
 pub use pptx::export_deck_to_pptx;
 pub use pptx_import::{import_deck_from_pptx_with_report, PptxImportResult};
@@ -19,7 +21,7 @@ pub use xlsx::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use redoc_sheet_engine::{WorkbookModel, SheetCell};
+    use redoc_sheet_engine::{SheetCell, WorkbookModel};
     use redoc_slide_engine::{DeckModel, ElementKind, SlideElement};
     use std::io::Read;
 
@@ -35,7 +37,8 @@ mod tests {
                 style: None,
             },
         );
-        let path = std::env::temp_dir().join(format!("redoc_xlsx_test_{}.xlsx", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("redoc_xlsx_test_{}.xlsx", std::process::id()));
         let bytes = export_workbook_to_xlsx(&workbook).expect("Failed to export xlsx");
         std::fs::write(&path, bytes).expect("Failed to write xlsx file");
 
@@ -71,14 +74,23 @@ mod tests {
         });
 
         let bytes = export_deck_to_pptx(&deck).expect("Failed to export pptx");
-        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("Failed to open pptx zip");
-        
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("Failed to open pptx zip");
+
         let mut presentation_xml = String::new();
-        archive.by_name("ppt/presentation.xml").expect("Missing presentation.xml").read_to_string(&mut presentation_xml).expect("Failed to read presentation.xml");
+        archive
+            .by_name("ppt/presentation.xml")
+            .expect("Missing presentation.xml")
+            .read_to_string(&mut presentation_xml)
+            .expect("Failed to read presentation.xml");
         assert!(presentation_xml.contains("<p:presentation"));
 
         let mut slide_xml = String::new();
-        archive.by_name("ppt/slides/slide1.xml").expect("Missing slide1.xml").read_to_string(&mut slide_xml).expect("Failed to read slide1.xml");
+        archive
+            .by_name("ppt/slides/slide1.xml")
+            .expect("Missing slide1.xml")
+            .read_to_string(&mut slide_xml)
+            .expect("Failed to read slide1.xml");
         assert!(slide_xml.contains("Hello PPTX"));
         assert!(slide_xml.contains(r#"b="1""#));
     }

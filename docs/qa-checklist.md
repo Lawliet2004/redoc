@@ -55,6 +55,7 @@ Run this checklist against a fresh profile and an existing profile before releas
 - [ ] Entrance fade animations step through in presenter view.
 - [ ] Handout print (1/2/4/6 per page, optional notes) layouts correctly.
 - [ ] PDF/PPTX export opens or reports a clear error.
+- [ ] Export a document containing a known fallback (for example, a native-pivot gap or unsupported slide animation) and verify the post-export Compatibility report lists the deterministic note.
 
 ## Packaging and OS integration
 

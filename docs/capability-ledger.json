@@ -181,7 +181,7 @@
       "area": "interoperability",
       "title": "Compatibility inspector and explicit loss reports on Office saves",
       "status": "partial",
-      "evidence": ["apps/desktop/src/App.tsx", "crates/export/src/docx.rs"],
+      "evidence": ["apps/desktop/src/App.tsx", "crates/export/src/compatibility.rs", "apps/desktop/src-tauri/src/lib.rs::inspect_export_compatibility"],
       "targetPhase": "office-sessions"
     }
   ]

@@ -1,7 +1,19 @@
 import { createSignal, onMount, onCleanup, Show, For, lazy, Suspense, createEffect } from "solid-js";
 import { Button, ToastContainer, showToast, Dialog, t } from "@redoc/ui";
 import { IconDoc, IconSheet, IconSlide, IconSettings, IconSave } from "@redoc/icons";
-import { CommandPalette, StatusBar, MenuBar, shortcutRegistry, registerShellShortcuts, buildMenus, emitEditorCommand } from "@redoc/editor-common";
+import {
+  CommandPalette,
+  StatusBar,
+  MenuBar,
+  shortcutRegistry,
+  registerShellShortcuts,
+  buildMenus,
+  emitEditorCommand,
+  chooseAdjacentSession,
+  removeDocumentSession,
+  upsertDocumentSession,
+  type DocumentSession,
+} from "@redoc/editor-common";
 import { commands, AppSettings, RecentEntry, RecoveredDoc } from "@redoc/api-client";
 import { HomeScreen } from "./HomeScreen";
 import { SettingsDialog } from "./SettingsDialog";
@@ -68,6 +80,15 @@ export function App() {
     );
   }
   const [activeMode, setActiveMode] = createSignal<"home" | "doc" | "sheet" | "slide">("home");
+  const [docMounted, setDocMounted] = createSignal(false);
+  const [sheetMounted, setSheetMounted] = createSignal(false);
+  const [slideMounted, setSlideMounted] = createSignal(false);
+  createEffect(() => {
+    const mode = activeMode();
+    if (mode === "doc") setDocMounted(true);
+    if (mode === "sheet") setSheetMounted(true);
+    if (mode === "slide") setSlideMounted(true);
+  });
   const [systemTheme, setSystemTheme] = createSignal(window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   const [docTitle, setDocTitle] = createSignal("Untitled document");
   const [currentFilePath, setCurrentFilePath] = createSignal<string | null>(null);
@@ -104,7 +125,19 @@ export function App() {
     sheet: emptyModeBuffer("sheet"),
     slide: emptyModeBuffer("slide"),
   });
+  const [openSessions, setOpenSessions] = createSignal<DocumentSession<any>[]>([]);
+  const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null);
+  let sessionCounter = 0;
   let autosaveTimer: number | undefined;
+
+  const newSessionId = () => {
+    sessionCounter += 1;
+    try {
+      return `session-${crypto.randomUUID()}`;
+    } catch {
+      return `session-${Date.now()}-${sessionCounter}`;
+    }
+  };
 
   const cancelAutosave = () => {
     if (autosaveTimer !== undefined) {
@@ -126,13 +159,24 @@ export function App() {
     }
   };
 
+  let titleRafId: number | undefined;
   createEffect(() => {
     docTitle();
     currentFilePath();
     saveState();
     activeMode();
-    void updateWindowTitle();
+    if (titleRafId !== undefined) cancelAnimationFrame(titleRafId);
+    titleRafId = requestAnimationFrame(() => {
+      titleRafId = undefined;
+      void updateWindowTitle();
+    });
   });
+
+  createEffect(() => {
+    const t = settings().theme === "system" ? systemTheme() : settings().theme;
+    document.documentElement.setAttribute("data-theme", t);
+  });
+
   const telemetryBuildEnabled = import.meta.env.VITE_TELEMETRY === "1";
   const recordTelemetry = (event: string) => {
     if (telemetryBuildEnabled && settings().telemetryEnabled) {
@@ -156,10 +200,81 @@ export function App() {
   };
 
   const confirmDiscardIfDirty = (): boolean => {
-    if (saveState() === "Dirty") {
+    if (activeMode() !== "home" && saveState() === "Dirty") {
       return window.confirm("You have unsaved changes. Do you want to discard them?");
     }
     return true;
+  };
+
+  const hasDirtySession = () => openSessions().some((session) => session.saveState === "Dirty" || session.saveState === "Error");
+
+  const snapshotCurrentSession = (): DocumentSession<any> | undefined => {
+    const mode = activeMode();
+    const id = activeSessionId();
+    if (mode === "home" || !id) return undefined;
+    return {
+      id,
+      mode,
+      content: docContent(),
+      title: docTitle(),
+      filePath: currentFilePath(),
+      docId: currentDocId(),
+      saveState: saveState(),
+    };
+  };
+
+  const syncCurrentSession = () => {
+    const snapshot = snapshotCurrentSession();
+    if (!snapshot) return;
+    setOpenSessions((previous) => upsertDocumentSession(previous, snapshot));
+    setModeBuffers((previous) => ({ ...previous, [snapshot.mode]: snapshot }));
+  };
+
+  const registerSession = (mode: EditorMode, buffer: ModeBuffer, id = newSessionId()) => {
+    const session: DocumentSession<any> = { id, mode, ...buffer };
+    setOpenSessions((previous) => upsertDocumentSession(previous, session));
+    setActiveSessionId(id);
+    setModeBuffers((previous) => ({ ...previous, [mode]: buffer }));
+    return id;
+  };
+
+  const loadSession = (session: DocumentSession<any>) => {
+    setActiveSessionId(session.id);
+    setActiveMode(session.mode);
+    setDocContent(session.content);
+    setDocTitle(session.title);
+    setCurrentFilePath(session.filePath);
+    setCurrentDocId(session.docId);
+    setSaveState(session.saveState);
+    setModeBuffers((previous) => ({ ...previous, [session.mode]: session }));
+  };
+
+  const activateSession = (id: string) => {
+    if (id === activeSessionId()) return;
+    if (!confirmDiscardIfDirty()) return;
+    syncCurrentSession();
+    const target = openSessions().find((session) => session.id === id);
+    if (target) loadSession(target);
+  };
+
+  const closeSession = (id: string) => {
+    const target = openSessions().find((session) => session.id === id);
+    if (!target) return;
+    if (id === activeSessionId() && !confirmDiscardIfDirty()) return;
+    if (id !== activeSessionId() && (target.saveState === "Dirty" || target.saveState === "Error")) {
+      if (!window.confirm(`\"${target.title || "Untitled document"}\" has unsaved changes. Close it anyway?`)) return;
+    }
+    syncCurrentSession();
+    const next = chooseAdjacentSession(openSessions(), id);
+    setOpenSessions((previous) => removeDocumentSession(previous, id));
+    if (id !== activeSessionId()) return;
+    if (next && next.id !== id) {
+      loadSession(next);
+    } else {
+      setActiveSessionId(null);
+      setActiveMode("home");
+      setDocContent(null);
+    }
   };
 
   const saveCurrentModeToBuffer = () => {
@@ -173,6 +288,10 @@ export function App() {
       saveState: saveState(),
     };
     setModeBuffers((prev) => ({ ...prev, [mode]: snapshot }));
+    const id = activeSessionId();
+    if (id) {
+      setOpenSessions((prev) => upsertDocumentSession(prev, { id, mode, ...snapshot }));
+    }
   };
 
   const updateModeBuffer = (mode: EditorMode, buffer: Partial<ModeBuffer>) => {
@@ -207,6 +326,7 @@ export function App() {
       setCurrentDocId(buffer.docId);
       setDocContent(buffer.content);
       setSaveState(buffer.saveState);
+      registerSession(mode, buffer);
     } catch {
       const buffer = emptyModeBuffer(mode);
       updateModeBuffer(mode, buffer);
@@ -215,6 +335,7 @@ export function App() {
       setCurrentDocId(buffer.docId);
       setDocContent(buffer.content);
       setSaveState(buffer.saveState);
+      registerSession(mode, buffer);
     }
   };
 
@@ -225,12 +346,18 @@ export function App() {
     if (current !== "home") {
       saveCurrentModeToBuffer();
     }
+    const target = openSessions().find((session) => session.mode === mode);
+    if (target) {
+      loadSession(target);
+      return;
+    }
     const buf = modeBuffers()[mode];
     setActiveMode(mode);
     if (buf.content === null && buf.docId === null) {
       await seedModeBuffer(mode);
     } else {
-      loadModeFromBuffer(mode);
+      const id = registerSession(mode, buf);
+      loadSession({ id, mode, ...buf });
     }
   };
 
@@ -244,23 +371,25 @@ export function App() {
     cancelAutosave();
     try {
       const opened = await commands.openDocument(path);
+      setImportWarnings([]);
       const mode = opened.meta.mode;
       if (mode === "doc" || mode === "sheet" || mode === "slide") {
-        setActiveMode(mode);
-      }
-      setDocTitle(opened.meta.title);
-      setCurrentFilePath(path);
-      setCurrentDocId(opened.meta.id);
-      setDocContent(opened.body);
-      setSaveState("Saved");
-      if (mode === "doc" || mode === "sheet" || mode === "slide") {
-        updateModeBuffer(mode, {
+        const buffer: ModeBuffer = {
           content: opened.body,
           title: opened.meta.title,
           filePath: path,
           docId: opened.meta.id,
           saveState: "Saved",
-        });
+        };
+        const id = registerSession(mode, buffer);
+        loadSession({ id, mode, ...buffer });
+      }
+      else {
+        setDocTitle(opened.meta.title);
+        setCurrentFilePath(path);
+        setCurrentDocId(opened.meta.id);
+        setDocContent(opened.body);
+        setSaveState("Saved");
       }
       setRecents(await commands.getRecents());
       showToast(`Opened ${opened.meta.title}`, "success");
@@ -293,21 +422,22 @@ export function App() {
       const opened = await commands.openRecoveredDocument(snapshotPath);
       const mode = opened.meta.mode;
       if (mode === "doc" || mode === "sheet" || mode === "slide") {
-        setActiveMode(mode);
-      }
-      setDocTitle(opened.meta.title);
-      setCurrentFilePath(null);
-      setCurrentDocId(opened.meta.id);
-      setDocContent(opened.body);
-      setSaveState("Dirty");
-      if (mode === "doc" || mode === "sheet" || mode === "slide") {
-        updateModeBuffer(mode, {
+        const buffer: ModeBuffer = {
           content: opened.body,
           title: opened.meta.title,
           filePath: null,
           docId: opened.meta.id,
           saveState: "Dirty",
-        });
+        };
+        const id = registerSession(mode, buffer);
+        loadSession({ id, mode, ...buffer });
+      } else {
+        setActiveMode(mode as any);
+        setDocTitle(opened.meta.title);
+        setCurrentFilePath(null);
+        setCurrentDocId(opened.meta.id);
+        setDocContent(opened.body);
+        setSaveState("Dirty");
       }
       setRecoveryOpen(false);
       showToast(`Restored ${opened.meta.title}`, "success");
@@ -348,7 +478,7 @@ export function App() {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
       const win = getCurrentWindow();
       unlistenClose = await win.onCloseRequested(async (event) => {
-        if (saveState() === "Dirty") {
+        if (hasDirtySession() || (activeMode() !== "home" && saveState() === "Dirty")) {
           const discard = window.confirm("You have unsaved changes. Quit without saving?");
           if (!discard) {
             event.preventDefault();
@@ -410,7 +540,7 @@ export function App() {
       if (!files || files.length === 0) return;
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        const path = (file as any).path || file.name;
+        const path = (file as File & { path?: string }).path || file.name;
         const ext = path.split(".").pop()?.toLowerCase();
         if (ext && ["redoc", "csv", "docx", "xlsx", "pptx"].includes(ext)) {
           void openFilePath(path);
@@ -425,16 +555,18 @@ export function App() {
 
     let unlistenDragDrop: (() => void) | undefined;
     try {
-      import("@tauri-apps/api/event").then((mod) => {
-        mod.listen<{ paths: string[] }>("tauri://drag-drop", (event) => {
-          const paths = event.payload?.paths || (Array.isArray(event.payload) ? event.payload : []);
-          for (const path of paths) {
-            const ext = path.split(".").pop()?.toLowerCase();
-            if (ext && ["redoc", "csv", "docx", "xlsx"].includes(ext)) {
-              void openFilePath(path);
-              break;
-            } else if (ext) {
-              showToast(`Unsupported file format: .${ext}. Redoc supports .redoc, .csv, .docx, and .xlsx`, "error");
+      import("@tauri-apps/api/webviewWindow").then((mod) => {
+        mod.getCurrentWebviewWindow().onDragDropEvent((event) => {
+          if (event.payload.type === "drop") {
+            const paths = event.payload.paths || [];
+            for (const path of paths) {
+              const ext = path.split(".").pop()?.toLowerCase();
+              if (ext && ["redoc", "csv", "docx", "xlsx", "pptx"].includes(ext)) {
+                void openFilePath(path);
+                break;
+              } else if (ext) {
+                showToast(`Unsupported file format: .${ext}. Redoc supports .redoc, .csv, .docx, .xlsx, and .pptx`, "error");
+              }
             }
           }
         }).then((fn) => { unlistenDragDrop = fn; });
@@ -450,7 +582,11 @@ export function App() {
         return;
       }
       const mode = activeMode();
-      shortcutRegistry.handleKeyDown(e, mode === "home" ? "doc" : mode);
+      if (mode === "home") {
+        shortcutRegistry.handleKeyDown(e, "home" as any);
+      } else {
+        shortcutRegistry.handleKeyDown(e, mode);
+      }
     };
     window.addEventListener("keydown", handleGlobalKeyDown);
 
@@ -515,8 +651,10 @@ export function App() {
     const initialBody = templateId ? getTemplateBody(templateId) : null;
 
     setActiveMode(mode);
+    setImportWarnings([]);
     setDocTitle(title);
     setCurrentFilePath(null);
+    setCurrentDocId(null);
     setSaveState("Saved");
 
     let content: any = initialBody;
@@ -530,13 +668,15 @@ export function App() {
     } catch {
       setDocContent(initialBody || null);
     }
-    updateModeBuffer(mode, {
+    const buffer: ModeBuffer = {
       content,
       title,
       filePath: null,
       docId,
       saveState: "Saved",
-    });
+    };
+    const id = registerSession(mode, buffer);
+    loadSession({ id, mode, ...buffer });
     showToast(`Created ${title}`, "success");
   };
 
@@ -556,20 +696,10 @@ export function App() {
       if (extension === "pptx") {
         const imported = await commands.importPptxFile(path);
         const title = path.split(/[\\/]/).pop()?.replace(/\.pptx$/i, "") || "Imported presentation";
-        setActiveMode("slide");
-        setDocTitle(title);
-        setCurrentFilePath(null);
-        setCurrentDocId(null);
-        setDocContent(imported.deck);
+        const buffer: ModeBuffer = { content: imported.deck, title, filePath: null, docId: null, saveState: "Dirty" };
+        const id = registerSession("slide", buffer);
+        loadSession({ id, mode: "slide", ...buffer });
         setImportWarnings(imported.warnings);
-        setSaveState("Dirty");
-        updateModeBuffer("slide", {
-          content: imported.deck,
-          title,
-          filePath: null,
-          docId: null,
-          saveState: "Dirty",
-        });
         recordTelemetry("pptx_imported");
         showToast("Imported PPTX file; save as .redoc to continue editing", "success");
         return;
@@ -578,39 +708,20 @@ export function App() {
         if (extension === "csv") {
           const workbook = await requestCsvImport(path);
           if (!workbook) return;
-          setActiveMode("sheet");
-          setDocTitle(path.split(/[\\/]/).pop()?.replace(/\.csv$/i, "") || "Imported spreadsheet");
-          setCurrentFilePath(null);
-          setCurrentDocId(null);
-          setDocContent(workbook);
-          setSaveState("Dirty");
-          updateModeBuffer("sheet", {
-            content: workbook,
-            title: path.split(/[\\/]/).pop()?.replace(/\.csv$/i, "") || "Imported spreadsheet",
-            filePath: null,
-            docId: null,
-            saveState: "Dirty",
-          });
+          const title = path.split(/[\\/]/).pop()?.replace(/\.csv$/i, "") || "Imported spreadsheet";
+          const buffer: ModeBuffer = { content: workbook, title, filePath: null, docId: null, saveState: "Dirty" };
+          const id = registerSession("sheet", buffer);
+          loadSession({ id, mode: "sheet", ...buffer });
           recordTelemetry("csv_imported");
           showToast("Imported CSV file", "success");
           return;
         }
         const imported = await commands.importXlsxFile(path);
         const title = path.split(/[\\/]/).pop()?.replace(/\.xlsx$/i, "") || "Imported spreadsheet";
-        setActiveMode("sheet");
-        setDocTitle(title);
-        setCurrentFilePath(null);
-        setCurrentDocId(null);
-        setDocContent(imported.workbook);
+        const buffer: ModeBuffer = { content: imported.workbook, title, filePath: null, docId: null, saveState: "Dirty" };
+        const id = registerSession("sheet", buffer);
+        loadSession({ id, mode: "sheet", ...buffer });
         setImportWarnings(imported.warnings);
-        setSaveState("Dirty");
-        updateModeBuffer("sheet", {
-          content: imported.workbook,
-          title,
-          filePath: null,
-          docId: null,
-          saveState: "Dirty",
-        });
         recordTelemetry("xlsx_imported");
         showToast("Imported XLSX file", "success");
         return;
@@ -618,20 +729,10 @@ export function App() {
       if (extension === "docx") {
         const imported = await commands.importDocxFile(path);
         const title = path.split(/[\\/]/).pop()?.replace(/\.docx$/i, "") || "Imported document";
-        setActiveMode("doc");
-        setDocTitle(title);
-        setCurrentFilePath(null);
-        setCurrentDocId(null);
-        setDocContent(imported.document);
+        const buffer: ModeBuffer = { content: imported.document, title, filePath: null, docId: null, saveState: "Dirty" };
+        const id = registerSession("doc", buffer);
+        loadSession({ id, mode: "doc", ...buffer });
         setImportWarnings(imported.warnings);
-        setSaveState("Dirty");
-        updateModeBuffer("doc", {
-          content: imported.document,
-          title,
-          filePath: null,
-          docId: null,
-          saveState: "Dirty",
-        });
         recordTelemetry("docx_imported");
         showToast("Imported DOCX file", "success");
         return;
@@ -663,11 +764,12 @@ export function App() {
     if (!path) return;
     setSaveState("Saving");
     try {
-      const saved = await commands.saveDocument(path, activeMode() as any, docTitle(), docContent(), currentDocId());
+      const saved = await commands.saveDocument(path, activeMode() as EditorMode, docTitle(), docContent(), currentDocId());
       setCurrentDocId(saved.id);
       setCurrentFilePath(path);
       setRecents(await commands.getRecents());
       setSaveState("Saved");
+      syncCurrentSession();
       showToast("Document saved", "success");
     } catch {
       setSaveState("Error");
@@ -684,11 +786,12 @@ export function App() {
     if (!path) return;
     setSaveState("Saving");
     try {
-      const saved = await commands.saveDocument(path, activeMode() as any, docTitle(), docContent(), currentDocId());
+      const saved = await commands.saveDocument(path, activeMode() as EditorMode, docTitle(), docContent(), currentDocId());
       setCurrentDocId(saved.id);
       setCurrentFilePath(path);
       setRecents(await commands.getRecents());
       setSaveState("Saved");
+      syncCurrentSession();
       showToast("Document saved", "success");
     } catch {
       setSaveState("Error");
@@ -703,8 +806,21 @@ export function App() {
         filters: [{ name: format.toUpperCase(), extensions: [format] }],
       });
       if (!path) return;
+      const compatibilityWarnings = await commands.inspectExportCompatibility(
+        activeMode(),
+        format,
+        docContent() || {},
+      );
       await commands.exportDocumentToFile(path, activeMode(), format, docContent() || {}, docTitle());
-      showToast(`Exported to ${format.toUpperCase()}`, "success");
+      if (compatibilityWarnings.length > 0) {
+        setImportWarnings(compatibilityWarnings);
+        showToast(
+          `Exported to ${format.toUpperCase()} with ${compatibilityWarnings.length} compatibility note${compatibilityWarnings.length === 1 ? "" : "s"}`,
+          "success",
+        );
+      } else {
+        showToast(`Exported to ${format.toUpperCase()}`, "success");
+      }
       setExportOpen(false);
     } catch (err) {
       showToast(`Export failed: ${err}`, "error");
@@ -773,7 +889,7 @@ export function App() {
             : activeMode() === "slide"
               ? "var(--g-yellow-light)"
               : "var(--g-blue-light)",
-      } as any}
+      } as import("solid-js").JSX.CSSProperties}
     >
       <Show when={activeMode() === "home"}>
         <HomeScreen
@@ -791,10 +907,10 @@ export function App() {
           onDropFile={(file) => {
             const path = (file as any).path || file.name;
             const ext = path.split(".").pop()?.toLowerCase();
-            if (ext && ["redoc", "csv", "docx", "xlsx"].includes(ext)) {
+            if (ext && ["redoc", "csv", "docx", "xlsx", "pptx"].includes(ext)) {
               void openFilePath(path);
             } else if (ext) {
-              showToast(`Unsupported file format: .${ext}. Redoc supports .redoc, .csv, .docx, and .xlsx`, "error");
+              showToast(`Unsupported file format: .${ext}. Redoc supports .redoc, .csv, .docx, .xlsx, and .pptx`, "error");
             }
           }}
         />
@@ -857,6 +973,7 @@ export function App() {
                 onInput={(e) => {
                   setDocTitle(e.currentTarget.value);
                   setSaveState("Dirty");
+                  syncCurrentSession();
                 }}
                 aria-label="Document title"
               />
@@ -870,6 +987,8 @@ export function App() {
                 <button
                   type="button"
                   role="tab"
+                  id="mode-tab-doc"
+                  aria-controls="editor-pane-doc"
                   class={activeMode() === "doc" ? "active" : ""}
                   aria-selected={activeMode() === "doc"}
                   onClick={() => {
@@ -882,6 +1001,8 @@ export function App() {
                 <button
                   type="button"
                   role="tab"
+                  id="mode-tab-sheet"
+                  aria-controls="editor-pane-sheet"
                   class={activeMode() === "sheet" ? "active" : ""}
                   aria-selected={activeMode() === "sheet"}
                   onClick={() => {
@@ -894,6 +1015,8 @@ export function App() {
                 <button
                   type="button"
                   role="tab"
+                  id="mode-tab-slide"
+                  aria-controls="editor-pane-slide"
                   class={activeMode() === "slide" ? "active" : ""}
                   aria-selected={activeMode() === "slide"}
                   onClick={() => {
@@ -913,6 +1036,83 @@ export function App() {
             </div>
           </div>
           <MenuBar menus={menus()} />
+          <Show when={openSessions().length > 0}>
+            <div
+              role="tablist"
+              aria-label="Open documents"
+              style={{
+                display: "flex",
+                "align-items": "center",
+                gap: "3px",
+                padding: "3px 8px 0",
+                overflow: "auto",
+                "border-top": "1px solid var(--border-color)",
+              }}
+            >
+              <For each={openSessions()}>
+                {(session) => (
+                  <div
+                    role="presentation"
+                    style={{ display: "flex", "align-items": "center", "flex-shrink": 0, "max-width": "240px" }}
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={activeSessionId() === session.id}
+                      title={session.filePath || session.title}
+                      onClick={() => activateSession(session.id)}
+                      style={{
+                        display: "flex",
+                        "align-items": "center",
+                        gap: "5px",
+                        padding: "4px 7px",
+                        "border-radius": "5px 5px 0 0",
+                        background: activeSessionId() === session.id ? "var(--bg-primary)" : "transparent",
+                        color: activeSessionId() === session.id ? "var(--text-primary)" : "var(--text-muted)",
+                        "border-bottom": activeSessionId() === session.id ? `2px solid ${session.mode === "sheet" ? "var(--sheet-accent)" : session.mode === "slide" ? "var(--slide-accent)" : "var(--doc-accent)"}` : "2px solid transparent",
+                        "max-width": "210px",
+                        overflow: "hidden",
+                        "white-space": "nowrap",
+                        "text-overflow": "ellipsis",
+                      }}
+                    >
+                      <ModeIcon mode={session.mode} size={14} />
+                      <span style={{ overflow: "hidden", "text-overflow": "ellipsis" }}>{session.title || "Untitled"}</span>
+                      <Show when={session.saveState === "Dirty" || session.saveState === "Error"}>
+                        <span aria-label={session.saveState === "Error" ? "Save error" : "Unsaved changes"}>•</span>
+                      </Show>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Close ${session.title || "document"}`}
+                      title="Close document"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        closeSession(session.id);
+                      }}
+                      style={{
+                        padding: "3px 5px",
+                        "border-radius": "4px",
+                        color: "var(--text-muted)",
+                        background: "transparent",
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
+              </For>
+              <button
+                type="button"
+                aria-label="New document"
+                title="New document"
+                onClick={() => void handleNewDoc(activeMode() as EditorMode)}
+                style={{ padding: "3px 8px", "border-radius": "4px", color: "var(--text-muted)", background: "transparent" }}
+              >
+                +
+              </button>
+            </div>
+          </Show>
         </header>
 
         <main style={{ flex: 1, position: "relative", overflow: "hidden", "min-height": "0" }}>
@@ -923,53 +1123,65 @@ export function App() {
               </div>
             }
           >
-            <Show when={activeMode() === "doc"}>
-              <DocEditor
-                initialContent={docContent()}
-                zoomLevel={zoomLevel()}
-                onRequestNew={() => void handleNewDoc("doc")}
-                onRequestOpen={() => void handleOpenFile()}
-                onRequestSave={() => void handleSave()}
-                onRequestExportPdf={() => void handleExport("pdf")}
-                onChange={(json) => {
-                  setDocContent(json);
-                  setSaveState("Dirty");
-                  scheduleAutosave(json);
-                }}
-                onWordCountChange={setStatusInfo}
-              />
+            <Show keyed when={docMounted() && activeMode() === "doc" ? activeSessionId() : null}>
+                <div id="editor-pane-doc" role="tabpanel" aria-labelledby="mode-tab-doc" style={{ height: "100%", width: "100%" }}>
+                  <DocEditor
+                    initialContent={docContent()}
+                    zoomLevel={zoomLevel()}
+                    onRequestNew={() => void handleNewDoc("doc")}
+                    onRequestOpen={() => void handleOpenFile()}
+                    onRequestSave={() => void handleSave()}
+                    onRequestExportPdf={() => void handleExport("pdf")}
+                    onChange={(json) => {
+                      setDocContent(json);
+                      setSaveState("Dirty");
+                      syncCurrentSession();
+                      scheduleAutosave(json);
+                    }}
+                    onWordCountChange={setStatusInfo}
+                  />
+                </div>
             </Show>
-            <Show when={activeMode() === "sheet"}>
-              <SheetEditor
-                initialContent={docContent()}
-                onImportCsv={handleImportCsv}
-                onExportCsv={handleExportCsv}
-                onRequestNew={() => void handleNewDoc("sheet")}
-                onRequestOpen={() => void handleOpenFile()}
-                onRequestSave={() => void handleSave()}
-                onRequestExportPdf={() => void handleExport("pdf")}
-                onChange={(data) => {
-                  setDocContent(data);
-                  setSaveState("Dirty");
-                  scheduleAutosave(data);
-                }}
-                onCellInfoChange={setStatusInfo}
-              />
+            <Show keyed when={sheetMounted() && activeMode() === "sheet" ? activeSessionId() : null}>
+                <div id="editor-pane-sheet" role="tabpanel" aria-labelledby="mode-tab-sheet" style={{ height: "100%", width: "100%" }}>
+                  <SheetEditor
+                    initialContent={docContent()}
+                    zoomLevel={zoomLevel()}
+                    onImportCsv={handleImportCsv}
+                    onExportCsv={handleExportCsv}
+                    onRequestNew={() => void handleNewDoc("sheet")}
+                    onRequestOpen={() => void handleOpenFile()}
+                    onRequestSave={() => void handleSave()}
+                    onRequestExportPdf={() => void handleExport("pdf")}
+                    onChange={(data) => {
+                      setDocContent(data);
+                      setSaveState("Dirty");
+                      syncCurrentSession();
+                      scheduleAutosave(data);
+                    }}
+                    onCellInfoChange={setStatusInfo}
+                  />
+                </div>
             </Show>
-            <Show when={activeMode() === "slide"}>
-              <SlideEditor
-                initialContent={docContent()}
-                onRequestNew={() => void handleNewDoc("slide")}
-                onRequestOpen={() => void handleOpenFile()}
-                onRequestSave={() => void handleSave()}
-                onRequestExportPdf={() => void handleExport("pdf")}
-                onChange={(deck) => {
-                  setDocContent(deck);
-                  setSaveState("Dirty");
-                  scheduleAutosave(deck);
-                }}
-                onSlideInfoChange={setStatusInfo}
-              />
+            <Show keyed when={slideMounted() && activeMode() === "slide" ? activeSessionId() : null}>
+                <div id="editor-pane-slide" role="tabpanel" aria-labelledby="mode-tab-slide" style={{ height: "100%", width: "100%" }}>
+                  <SlideEditor
+                    initialContent={docContent()}
+                    zoomLevel={zoomLevel()}
+                    onZoomChange={setZoomLevel}
+                    onRequestNew={() => void handleNewDoc("slide")}
+                    onRequestOpen={() => void handleOpenFile()}
+                    onRequestSave={() => void handleSave()}
+                    onRequestExportPdf={() => void handleExport("pdf")}
+                    onChange={(deck) => {
+                      setDocContent(deck);
+                      setSaveState("Dirty");
+                      syncCurrentSession();
+                      scheduleAutosave(deck);
+                    }}
+                    onSlideInfoChange={setStatusInfo}
+                  />
+                </div>
             </Show>
           </Suspense>
         </main>
@@ -985,7 +1197,7 @@ export function App() {
         />
       </Show>
 
-      <CommandPalette open={paletteOpen()} onClose={() => setPaletteOpen(false)} />
+      <CommandPalette open={paletteOpen()} onClose={() => setPaletteOpen(false)} activeMode={activeMode()} />
       <Dialog open={helpOpen()} title="Keyboard shortcuts" onClose={() => setHelpOpen(false)}>
         <div
           style={{
@@ -1068,10 +1280,10 @@ export function App() {
         </div>
       </Dialog>
 
-      <Dialog open={importWarnings().length > 0} title="Import report" onClose={() => setImportWarnings([])}>
+      <Dialog open={importWarnings().length > 0} title="Compatibility report" onClose={() => setImportWarnings([])}>
         <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
           <p style={{ "font-size": "13px", color: "var(--text-secondary)" }}>
-            The document was imported, but some unsupported constructs were simplified:
+            Some Office constructs were simplified or may not round-trip natively:
           </p>
           <ul style={{ margin: 0, padding: "0 0 0 20px", color: "var(--text-primary)" }}>
             <For each={importWarnings()}>{(warning) => <li>{warning}</li>}</For>

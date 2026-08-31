@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_closure_call)]
+
 use redoc_core::{AppSettings, AppState, RecentEntry, RecoveredDoc};
 use redoc_doc_engine::{DocWordCount, SearchMatch};
 use redoc_file_io::{RedocContainer, RedocMeta};
@@ -21,7 +23,7 @@ macro_rules! handle_panic {
             } else {
                 "Unknown panic".to_string()
             };
-            Err(msg)
+            Err(format!("Command panicked: {}", msg))
         })
     };
 }
@@ -414,6 +416,22 @@ fn export_document(
 
 #[tauri::command]
 #[specta::specta]
+fn inspect_export_compatibility(
+    mode: String,
+    format: String,
+    body_json: String,
+) -> Result<Vec<String>, String> {
+    handle_panic!({
+        let body: serde_json::Value =
+            serde_json::from_str(&body_json).map_err(|e| e.to_string())?;
+        Ok(redoc_export::export_compatibility_warnings(
+            &mode, &format, &body,
+        ))
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
 fn export_document_to_file(
     path: String,
     mode: String,
@@ -490,17 +508,10 @@ fn import_csv_file(path: String) -> Result<WorkbookModel, String> {
             .file_stem()
             .and_then(|name| name.to_str())
             .unwrap_or("Imported CSV");
-        Ok(WorkbookModel {
-            sheets: vec![redoc_sheet_engine::import_csv_bytes_to_sheet(&csv, name)],
-            active_sheet_index: 0,
-            formula_cache: std::collections::HashMap::new(),
-            cell_value_cache: Vec::new(),
-            cell_value_cache_valid: Vec::new(),
-            recalc_plans: Vec::new(),
-            named_ranges: Vec::new(),
-            cross_sheet_dependents: std::collections::HashMap::new(),
-            cross_sheet_index_valid: false,
-        })
+        let sheet = redoc_sheet_engine::import_csv_bytes_to_sheet(&csv, name);
+        let mut workbook = redoc_sheet_engine::WorkbookModel::new_default();
+        workbook.sheets = vec![sheet];
+        Ok(workbook)
     })
 }
 
@@ -519,19 +530,12 @@ fn import_csv_file_with_options(
             .and_then(|name| name.to_str())
             .unwrap_or("Imported CSV");
         let delimiter = delimiter.and_then(|value| value.chars().next());
-        Ok(WorkbookModel {
-            sheets: vec![redoc_sheet_engine::import_csv_bytes_to_sheet_with_options(
-                &csv, name, delimiter, &encoding,
-            )],
-            active_sheet_index: 0,
-            formula_cache: std::collections::HashMap::new(),
-            cell_value_cache: Vec::new(),
-            cell_value_cache_valid: Vec::new(),
-            recalc_plans: Vec::new(),
-            named_ranges: Vec::new(),
-            cross_sheet_dependents: std::collections::HashMap::new(),
-            cross_sheet_index_valid: false,
-        })
+        let sheet = redoc_sheet_engine::import_csv_bytes_to_sheet_with_options(
+            &csv, name, delimiter, &encoding,
+        );
+        let mut workbook = redoc_sheet_engine::WorkbookModel::new_default();
+        workbook.sheets = vec![sheet];
+        Ok(workbook)
     })
 }
 
@@ -651,23 +655,6 @@ fn sort_workbook_range(
 #[tauri::command]
 #[specta::specta]
 fn sort_workbook_range_multi(
-    mut workbook: WorkbookModel,
-    sheet_idx: usize,
-    range: redoc_sheet_engine::CellRange,
-    keys: Vec<(u32, bool)>,
-) -> Result<WorkbookModel, String> {
-    handle_panic!({
-        let res = (|| {
-            workbook.sort_range_multi(sheet_idx, range, &keys);
-            workbook
-        })();
-        Ok(res)
-    })
-}
-
-#[tauri::command]
-#[specta::specta]
-fn sort_range_multi(
     mut workbook: WorkbookModel,
     sheet_idx: usize,
     range: redoc_sheet_engine::CellRange,
@@ -849,6 +836,29 @@ fn log_frontend_error(level: String, message: String, stack: Option<String>) -> 
     })
 }
 
+#[tauri::command]
+#[specta::specta]
+fn paths_exist(paths: Vec<String>) -> Vec<bool> {
+    paths.iter().map(|p| std::path::Path::new(p).is_file()).collect()
+}
+
+#[derive(serde::Serialize, serde::Deserialize, specta::Type, Debug, Clone)]
+pub struct PresenterSyncPayload {
+    pub slide_index: u32,
+    pub deck_version: u64,
+    pub elapsed_ms: u64,
+    pub is_playing: bool,
+}
+
+#[tauri::command]
+#[specta::specta]
+fn presenter_sync(app: tauri::AppHandle, payload: PresenterSyncPayload) -> Result<(), String> {
+    handle_panic!({
+        let _ = app.emit("presenter-sync", payload);
+        Ok(())
+    })
+}
+
 fn specta_builder() -> SpectaBuilder<tauri::Wry> {
     SpectaBuilder::<tauri::Wry>::new().commands(collect_commands![
         take_pending_open_paths,
@@ -866,6 +876,7 @@ fn specta_builder() -> SpectaBuilder<tauri::Wry> {
         save_document,
         autosave_document,
         export_document,
+        inspect_export_compatibility,
         export_document_to_file,
         compute_doc_word_count,
         search_doc_text,
@@ -881,7 +892,6 @@ fn specta_builder() -> SpectaBuilder<tauri::Wry> {
         fill_workbook_series,
         sort_workbook_range,
         sort_workbook_range_multi,
-        sort_range_multi,
         open_presenter_window,
         presenter_nav,
         open_logs_folder,
@@ -891,6 +901,8 @@ fn specta_builder() -> SpectaBuilder<tauri::Wry> {
         delete_cols_cmd,
         set_freeze_cmd,
         log_frontend_error,
+        paths_exist,
+        presenter_sync,
     ])
 }
 
