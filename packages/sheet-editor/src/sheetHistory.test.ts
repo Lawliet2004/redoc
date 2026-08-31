@@ -18,6 +18,7 @@ function emptySnapshot(cells: Record<string, GridCell> = {}): SheetSnapshot {
     chartType: null,
     chartTitle: "",
     chartRange: { startRow: 0, endRow: 0, startCol: 0, endCol: 0 },
+    conditionalFormatting: [],
     sheetsMeta: [{ id: "sheet-1", name: "Sheet1" }],
     activeSheetIndex: 0,
   };
