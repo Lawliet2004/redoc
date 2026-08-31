@@ -141,7 +141,7 @@
       "area": "presentation",
       "title": "Transitions, animation timeline, and presenter playback",
       "status": "partial",
-      "evidence": ["packages/slide-editor/src/PresenterView.tsx"],
+      "evidence": ["packages/slide-editor/src/SlideEditor.tsx", "packages/slide-editor/src/deckNormalize.ts", "packages/slide-editor/src/PresenterView.tsx", "packages/slide-editor/src/animation.test.ts"],
       "targetPhase": "presentation-completion"
     },
     {
