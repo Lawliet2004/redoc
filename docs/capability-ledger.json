@@ -1,0 +1,188 @@
+{
+  "schemaVersion": 1,
+  "statusDefinitions": {
+    "absent": "No implementation or user-facing entry point exists.",
+    "partial": "Some behavior exists, but important paths are missing or unreliable.",
+    "implemented": "The behavior is present and covered by focused automated tests.",
+    "verified": "Implemented behavior has passed a repeatable end-to-end or fixture-based check.",
+    "interoperable": "Verified behavior also round-trips through the relevant Office format."
+  },
+  "features": [
+    {
+      "id": "shell.new-open-save",
+      "area": "shared",
+      "title": "Create, open, save, and recover Redoc documents",
+      "status": "verified",
+      "evidence": ["apps/desktop/src/App.tsx", "crates/file-io/tests/roundtrip.rs"],
+      "targetPhase": "maintain"
+    },
+    {
+      "id": "shell.office-file-routing",
+      "area": "shared",
+      "title": "Route DOCX, XLSX, and PPTX files to the matching editor",
+      "status": "partial",
+      "evidence": ["apps/desktop/src/App.tsx"],
+      "targetPhase": "office-sessions"
+    },
+    {
+      "id": "shell.command-system",
+      "area": "shared",
+      "title": "Unified commands, menus, shortcuts, and command palette",
+      "status": "verified",
+      "evidence": ["apps/desktop/src/shell/registerCommands.ts", "packages/editor-common/src/ShortcutRegistry.test.ts"],
+      "targetPhase": "shared-shell"
+    },
+    {
+      "id": "shell.accessibility",
+      "area": "shared",
+      "title": "Keyboard and screen-reader accessible shell controls",
+      "status": "implemented",
+      "evidence": ["tests/a11y/shell.a11y.test.tsx"],
+      "targetPhase": "cross-platform-certification"
+    },
+    {
+      "id": "shell.multi-document",
+      "area": "shared",
+      "title": "Multiple open documents with independent dirty state",
+      "status": "absent",
+      "evidence": [],
+      "targetPhase": "shared-shell"
+    },
+    {
+      "id": "doc.core-editing",
+      "area": "document",
+      "title": "Paragraphs, headings, marks, lists, tables, links, and images",
+      "status": "verified",
+      "evidence": ["packages/doc-editor/src/DocEditor.tsx", "crates/doc-engine/src/schema.rs"],
+      "targetPhase": "maintain"
+    },
+    {
+      "id": "doc.page-layout",
+      "area": "document",
+      "title": "Sections, columns, headers, footers, page numbering, and fields",
+      "status": "partial",
+      "evidence": ["packages/doc-editor/src/PageSetupDialog.tsx", "crates/export/src/pdf.rs"],
+      "targetPhase": "document-completion"
+    },
+    {
+      "id": "doc.review",
+      "area": "document",
+      "title": "Comments, tracked changes, compare, and accept/reject",
+      "status": "absent",
+      "evidence": [],
+      "targetPhase": "document-completion"
+    },
+    {
+      "id": "doc.office-roundtrip",
+      "area": "document",
+      "title": "DOCX import and export with compatibility reporting",
+      "status": "partial",
+      "evidence": ["crates/export/src/docx.rs"],
+      "targetPhase": "office-sessions"
+    },
+    {
+      "id": "sheet.grid-editing",
+      "area": "spreadsheet",
+      "title": "Virtualized grid, cell editing, selection, clipboard, and history",
+      "status": "verified",
+      "evidence": ["packages/sheet-editor/src/SheetEditor.tsx", "packages/sheet-editor/src/sheetHistory.test.ts"],
+      "targetPhase": "maintain"
+    },
+    {
+      "id": "sheet.formulas",
+      "area": "spreadsheet",
+      "title": "Formula parsing, evaluation, dependencies, and recalculation",
+      "status": "implemented",
+      "evidence": ["crates/formula/src/eval.rs", "crates/formula/tests/proptest_formula.rs"],
+      "targetPhase": "spreadsheet-completion"
+    },
+    {
+      "id": "sheet.formula-catalog",
+      "area": "spreadsheet",
+      "title": "One generated formula catalog shared by engine and UI",
+      "status": "partial",
+      "evidence": ["crates/formula/src/functions.rs", "packages/sheet-editor/src/formulaFunctions.ts"],
+      "targetPhase": "spreadsheet-completion"
+    },
+    {
+      "id": "sheet.analysis",
+      "area": "spreadsheet",
+      "title": "Tables, conditional formatting, pivot tables, slicers, and scenarios",
+      "status": "partial",
+      "evidence": ["packages/sheet-editor/src/SheetEditor.tsx"],
+      "targetPhase": "spreadsheet-completion"
+    },
+    {
+      "id": "sheet.office-roundtrip",
+      "area": "spreadsheet",
+      "title": "XLSX import/export with formulas, styles, charts, and compatibility reporting",
+      "status": "partial",
+      "evidence": ["crates/export/src/xlsx.rs"],
+      "targetPhase": "office-sessions"
+    },
+    {
+      "id": "slide.core-editing",
+      "area": "presentation",
+      "title": "Slides, text, shapes, images, tables, charts, resize, align, and group",
+      "status": "verified",
+      "evidence": ["packages/slide-editor/src/SlideEditor.tsx", "packages/slide-editor/src/geometry.test.ts"],
+      "targetPhase": "maintain"
+    },
+    {
+      "id": "slide.masters-and-themes",
+      "area": "presentation",
+      "title": "Slide masters, layouts, placeholders, and themes",
+      "status": "implemented",
+      "evidence": ["packages/slide-editor/src/SlideEditor.tsx", "crates/slide-engine/src/deck.rs"],
+      "targetPhase": "presentation-completion"
+    },
+    {
+      "id": "slide.animation",
+      "area": "presentation",
+      "title": "Transitions, animation timeline, and presenter playback",
+      "status": "partial",
+      "evidence": ["packages/slide-editor/src/PresenterView.tsx"],
+      "targetPhase": "presentation-completion"
+    },
+    {
+      "id": "slide.office-roundtrip",
+      "area": "presentation",
+      "title": "PPTX import/export with masters, media, notes, and animations",
+      "status": "partial",
+      "evidence": ["crates/export/src/pptx.rs", "apps/desktop/src/App.tsx"],
+      "targetPhase": "office-sessions"
+    },
+    {
+      "id": "reliability.atomic-save",
+      "area": "reliability",
+      "title": "Atomic, validated saves that preserve the original on failure",
+      "status": "implemented",
+      "evidence": ["crates/file-io/src/container.rs", "crates/file-io/tests/roundtrip.rs"],
+      "targetPhase": "office-sessions"
+    },
+    {
+      "id": "reliability.recovery",
+      "area": "reliability",
+      "title": "Autosave, crash recovery, corruption handling, and typed errors",
+      "status": "implemented",
+      "evidence": ["crates/core/src/recovery.rs", "crates/core/src/autosave.rs"],
+      "targetPhase": "reliability-hardening"
+    },
+    {
+      "id": "performance.scale",
+      "area": "performance",
+      "title": "Measured performance for large documents, workbooks, and decks",
+      "status": "partial",
+      "evidence": ["crates/sheet-engine/benches/grid_render.rs", "scripts/perf-budget.mjs"],
+      "targetPhase": "cross-platform-certification"
+    },
+    {
+      "id": "interop.loss-report",
+      "area": "interoperability",
+      "title": "Compatibility inspector and explicit loss reports on Office saves",
+      "status": "partial",
+      "evidence": ["apps/desktop/src/App.tsx", "crates/export/src/docx.rs"],
+      "targetPhase": "office-sessions"
+    }
+  ]
+}
