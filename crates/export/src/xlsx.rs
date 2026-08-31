@@ -528,6 +528,306 @@ fn archive_has_charts(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -
     false
 }
 
+const MAX_XLSX_XML_BYTES: u64 = 16 * 1024 * 1024;
+
+fn xml_local_name(name: &[u8]) -> &[u8] {
+    name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
+}
+
+fn xml_attr_local(element: &BytesStart<'_>, name: &[u8]) -> Option<String> {
+    element.attributes().flatten().find_map(|attribute| {
+        (xml_local_name(attribute.key.as_ref()) == name)
+            .then(|| String::from_utf8_lossy(attribute.value.as_ref()).into_owned())
+    })
+}
+
+fn read_xlsx_entry(
+    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+    path: &str,
+) -> Option<Vec<u8>> {
+    let mut file = archive.by_name(path).ok()?;
+    if file.size() > MAX_XLSX_XML_BYTES {
+        return None;
+    }
+    let mut xml = Vec::new();
+    file.read_to_end(&mut xml).ok()?;
+    Some(xml)
+}
+
+fn normalize_xlsx_target(base_dir: &str, target: &str) -> Option<String> {
+    if target.contains("://") {
+        return None;
+    }
+    let mut parts = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        base_dir
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    for part in target.trim_start_matches('/').split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            value => parts.push(value.to_string()),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+fn relationship_part_path(part_path: &str) -> Option<String> {
+    let (directory, file_name) = part_path.rsplit_once('/')?;
+    Some(format!("{directory}/_rels/{file_name}.rels"))
+}
+
+fn parse_relationships(xml: &[u8]) -> HashMap<String, String> {
+    let mut reader = XmlReader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut relationships = HashMap::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Empty(element)) | Ok(Event::Start(element))
+                if xml_local_name(element.name().as_ref()) == b"Relationship" =>
+            {
+                if let (Some(id), Some(target)) = (
+                    xml_attr_local(&element, b"Id"),
+                    xml_attr_local(&element, b"Target"),
+                ) {
+                    relationships.insert(id, target);
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    relationships
+}
+
+fn parse_sheet_drawing_id(xml: &[u8]) -> Option<String> {
+    let mut reader = XmlReader::from_reader(xml);
+    let mut buffer = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Empty(element)) | Ok(Event::Start(element))
+                if xml_local_name(element.name().as_ref()) == b"drawing" =>
+            {
+                return xml_attr_local(&element, b"id");
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
+#[derive(Default)]
+struct ChartAnchor {
+    relationship: String,
+    start_row: u32,
+    end_row: u32,
+    start_col: u32,
+    end_col: u32,
+}
+
+#[derive(Clone, Copy)]
+enum AnchorSection {
+    From,
+    To,
+}
+
+fn parse_drawing_anchors(xml: &[u8]) -> Vec<ChartAnchor> {
+    let mut reader = XmlReader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut anchor: Option<ChartAnchor> = None;
+    let mut section = None;
+    let mut capture = None::<Vec<u8>>;
+    let mut captured_text = String::new();
+    let mut anchors = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element)) => {
+                let name = xml_local_name(element.name().as_ref()).to_vec();
+                match name.as_slice() {
+                    b"twoCellAnchor" | b"oneCellAnchor" => anchor = Some(ChartAnchor::default()),
+                    b"from" => section = Some(AnchorSection::From),
+                    b"to" => section = Some(AnchorSection::To),
+                    b"row" | b"col" if anchor.is_some() => {
+                        capture = Some(name);
+                        captured_text.clear();
+                    }
+                    b"chart" if anchor.is_some() => {
+                        if let Some(anchor) = anchor.as_mut() {
+                            anchor.relationship =
+                                xml_attr_local(&element, b"id").unwrap_or_default();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(element)) => {
+                let name = xml_local_name(element.name().as_ref()).to_vec();
+                if name.as_slice() == b"chart" {
+                    if let Some(anchor) = anchor.as_mut() {
+                        anchor.relationship = xml_attr_local(&element, b"id").unwrap_or_default();
+                    }
+                }
+            }
+            Ok(Event::Text(text)) if capture.is_some() => {
+                if let Ok(value) = text.unescape() {
+                    captured_text.push_str(&value);
+                }
+            }
+            Ok(Event::End(element)) => {
+                let name = xml_local_name(element.name().as_ref()).to_vec();
+                if matches!(name.as_slice(), b"row" | b"col")
+                    && capture.as_deref() == Some(name.as_slice())
+                {
+                    if let (Some(anchor), Some(section)) = (anchor.as_mut(), section) {
+                        let value = captured_text.parse::<u32>().unwrap_or_default();
+                        match (section, name.as_slice()) {
+                            (AnchorSection::From, b"row") => anchor.start_row = value,
+                            (AnchorSection::From, b"col") => anchor.start_col = value,
+                            (AnchorSection::To, b"row") => anchor.end_row = value,
+                            (AnchorSection::To, b"col") => anchor.end_col = value,
+                            _ => {}
+                        }
+                    }
+                    capture = None;
+                    captured_text.clear();
+                } else if name.as_slice() == b"from" || name.as_slice() == b"to" {
+                    section = None;
+                } else if matches!(name.as_slice(), b"twoCellAnchor" | b"oneCellAnchor") {
+                    if let Some(mut anchor) = anchor.take() {
+                        if anchor.end_row == 0 && anchor.end_col == 0 {
+                            anchor.end_row = anchor.start_row.saturating_add(5);
+                            anchor.end_col = anchor.start_col.saturating_add(8);
+                        }
+                        if !anchor.relationship.is_empty() {
+                            anchors.push(anchor);
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    anchors
+}
+
+fn parse_chart_metadata(xml: &[u8]) -> (String, Option<String>) {
+    let chart_type = if xml
+        .windows(b"lineChart".len())
+        .any(|window| window == b"lineChart")
+    {
+        "line"
+    } else if xml
+        .windows(b"pieChart".len())
+        .any(|window| window == b"pieChart")
+    {
+        "pie"
+    } else {
+        "bar"
+    }
+    .to_string();
+    let mut reader = XmlReader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut in_text = false;
+    let mut title = None;
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element)) => in_text = xml_local_name(element.name().as_ref()) == b"t",
+            Ok(Event::Text(text)) if in_text && title.is_none() => {
+                title = text.unescape().ok().map(|value| value.into_owned());
+            }
+            Ok(Event::End(element)) if xml_local_name(element.name().as_ref()) == b"t" => {
+                in_text = false;
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    (chart_type, title.filter(|value| !value.trim().is_empty()))
+}
+
+fn import_sheet_charts(
+    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+    sheet_index: usize,
+    warnings: &mut Vec<String>,
+) -> Vec<ChartModel> {
+    let sheet_path = format!("xl/worksheets/sheet{}.xml", sheet_index + 1);
+    let Some(sheet_xml) = read_xlsx_entry(archive, &sheet_path) else {
+        return Vec::new();
+    };
+    let Some(drawing_id) = parse_sheet_drawing_id(&sheet_xml) else {
+        return Vec::new();
+    };
+    let Some(sheet_rels_xml) =
+        relationship_part_path(&sheet_path).and_then(|path| read_xlsx_entry(archive, &path))
+    else {
+        return Vec::new();
+    };
+    let sheet_rels = parse_relationships(&sheet_rels_xml);
+    let Some(drawing_target) = sheet_rels.get(&drawing_id) else {
+        return Vec::new();
+    };
+    let Some(drawing_path) = normalize_xlsx_target("xl/worksheets", drawing_target) else {
+        return Vec::new();
+    };
+    let Some(drawing_xml) = read_xlsx_entry(archive, &drawing_path) else {
+        warnings.push(format!("sheet {}: drawing was unreadable", sheet_index + 1));
+        return Vec::new();
+    };
+    let Some(drawing_rels_xml) =
+        relationship_part_path(&drawing_path).and_then(|path| read_xlsx_entry(archive, &path))
+    else {
+        return Vec::new();
+    };
+    let drawing_rels = parse_relationships(&drawing_rels_xml);
+    let mut charts = Vec::new();
+    for anchor in parse_drawing_anchors(&drawing_xml) {
+        let Some(chart_target) = drawing_rels.get(&anchor.relationship) else {
+            warnings.push(format!(
+                "sheet {}: chart relationship {} was missing",
+                sheet_index + 1,
+                anchor.relationship
+            ));
+            continue;
+        };
+        let Some(chart_path) = normalize_xlsx_target("xl/drawings", chart_target) else {
+            continue;
+        };
+        let Some(chart_xml) = read_xlsx_entry(archive, &chart_path) else {
+            warnings.push(format!(
+                "sheet {}: chart {chart_path} was unreadable",
+                sheet_index + 1
+            ));
+            continue;
+        };
+        let (chart_type, title) = parse_chart_metadata(&chart_xml);
+        charts.push(ChartModel {
+            chart_type,
+            title,
+            start_row: anchor.start_row.saturating_add(1),
+            end_row: anchor.end_row.saturating_add(1),
+            start_col: anchor.start_col.saturating_add(1),
+            end_col: anchor.end_col.saturating_add(1),
+        });
+    }
+    charts
+}
+
 pub fn import_workbook_from_xlsx(path: &Path) -> Result<WorkbookModel, ExportError> {
     Ok(import_workbook_from_xlsx_with_report(path)?.workbook)
 }
@@ -539,14 +839,7 @@ pub fn import_workbook_from_xlsx_with_report(path: &Path) -> Result<XlsxImportRe
         .ok()
         .and_then(|bytes| zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok());
     let mut warnings = Vec::new();
-    if let Some(archive) = archive.as_mut() {
-        if archive_has_charts(archive) {
-            warnings.push(
-                "Charts were skipped on import; chart objects are not loaded into Redoc."
-                    .to_string(),
-            );
-        }
-    }
+    let has_chart_parts = archive.as_mut().map(archive_has_charts).unwrap_or(false);
     let mut sheets = Vec::new();
     for (sheet_index, name) in source.sheet_names().to_owned().into_iter().enumerate() {
         let range = source
@@ -602,8 +895,15 @@ pub fn import_workbook_from_xlsx_with_report(path: &Path) -> Result<XlsxImportRe
                     cell.style = imported_style(&metadata, &excel_reference(row, column));
                 }
             }
+            sheet.charts = import_sheet_charts(archive, sheet_index, &mut warnings);
         }
         sheets.push(sheet);
+    }
+    if has_chart_parts && sheets.iter().all(|sheet| sheet.charts.is_empty()) {
+        warnings.push(
+            "Charts were present but could not be mapped to worksheet anchors; chart objects were skipped."
+                .to_string(),
+        );
     }
     Ok(XlsxImportResult {
         workbook: WorkbookModel {
@@ -935,11 +1235,17 @@ mod tests {
             imported
                 .warnings
                 .iter()
-                .any(|warning| warning.to_lowercase().contains("chart")),
-            "expected chart skip warning, got {:?}",
+                .all(|warning| !warning.to_lowercase().contains("skipped")),
+            "chart import unexpectedly warned: {:?}",
             imported.warnings
         );
-        assert!(imported.workbook.sheets[0].charts.is_empty());
+        assert_eq!(imported.workbook.sheets[0].charts.len(), 1);
+        let chart = &imported.workbook.sheets[0].charts[0];
+        assert_eq!(chart.chart_type, "bar");
+        assert_eq!(chart.start_row, 3);
+        assert_eq!(chart.end_row, 17);
+        assert_eq!(chart.start_col, 1);
+        assert_eq!(chart.end_col, 8);
         std::fs::remove_file(path).expect("cleanup xlsx");
     }
 }
