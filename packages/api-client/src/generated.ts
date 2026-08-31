@@ -197,6 +197,14 @@ async importDocxFile(path: string) : Promise<Result<DocxImportResponse, string>>
     else return { status: "error", error: e  as any };
 }
 },
+async importPptxFile(path: string) : Promise<Result<PptxImportResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_pptx_file", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async recalculateWorkbook(workbook: WorkbookModel) : Promise<Result<WorkbookModel, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("recalculate_workbook", { workbook }) };
@@ -339,19 +347,34 @@ columnFilters: { [key in number]: string[] } }
 export type CellRange = { startRow: number; endRow: number; startCol: number; endCol: number }
 export type CellStyle = { bold: boolean | null; italic: boolean | null; underline: boolean | null; fontColor: string | null; bgColor: string | null; align: string | null; format: string | null; wrap?: boolean | null; vAlign?: string | null }
 export type ChartModel = { chartType: string; title?: string | null; startRow: number; endRow: number; startCol: number; endCol: number }
+export type DeckModel = { slides: Slide[]; theme: SlideTheme; canvasWidth: number; canvasHeight: number; activeSlideIndex: number; fadeBetweenSlides?: boolean }
 export type DocWordCount = { words: number; characters: number; paragraphs: number }
 export type DocxImportResponse = { document: any; warnings: string[] }
-export type XlsxImportResponse = { workbook: WorkbookModel; warnings: string[] }
+export type ElementKind = { Text: { text: string; fontSize: number; fontFamily: string; color: string; align: string; bold?: boolean; italic?: boolean; underline?: boolean; bullets?: boolean } } | { Shape: { shapeType: string; fillColor: string; strokeColor: string; strokeWidth: number; text?: string } } | { Image: { assetHash: string; mime: string } } | { Table: { rows: number; cols: number; data: string[][] } } | { Chart: { chartType: string; data: number[]; labels: string[] } }
 export type MergeRange = { startRow: number; endRow: number; startCol: number; endCol: number }
 export type NamedRange = { name: string; rangeStr: string; sheet: string | null }
 export type OpenedDocument = { meta: RedocMeta; body: any }
+export type PptxImportResponse = { deck: DeckModel; warnings: string[] }
+export type PresenterSyncPayload = { slide_index: number; deck_version: number; elapsed_ms: number; is_playing: boolean }
 export type RecentEntry = { id: string; path: string; title: string; mode: string; lastOpenedAt: number; pinned: boolean }
 export type RecoveredDoc = { id: string; title: string; mode: string; path: string | null; snapshotPath: string; timestamp: number }
 export type RedocMeta = { formatVersion: number; id: string; mode: string; title: string; createdAt: number; updatedAt: number; author: string | null; appVersion: string; assets: AssetInfo[]; dirtyOnCrash: boolean | null; readOnly?: boolean | null; warning?: string | null }
 export type SearchMatch = { text: string; index: number; lineNumber: number }
 export type SheetCell = { rawValue: string; displayValue: string; formula: string | null; style: CellStyle | null }
 export type SheetData = { id: string; name: string; cells: { [key in string]: SheetCell }; colWidths: { [key in number]: number }; rowHeights: { [key in number]: number }; freezeRows: number; freezeCols: number; charts?: ChartModel[]; filterQuery?: string | null; merges?: MergeRange[]; autoFilter?: AutoFilterState | null }
+export type Slide = { id: string; layout: string; elements: SlideElement[]; notes: string; bgOverride: string | null; 
+/**
+ * Per-slide transition: "none" | "fade" | "slide-left" | "slide-right"
+ */
+transition?: string }
+export type SlideElement = { id: string; x: number; y: number; width: number; height: number; rotation: number; zIndex: number; 
+/**
+ * Per-element entrance animation: "none" | "fade"
+ */
+entrance?: string; kind: ElementKind }
+export type SlideTheme = { id: string; name: string; bgColor: string; textColor: string; accentColor: string; fontFamily: string }
 export type WorkbookModel = { sheets: SheetData[]; activeSheetIndex: number; namedRanges?: NamedRange[] }
+export type XlsxImportResponse = { workbook: WorkbookModel; warnings: string[] }
 
 /** tauri-specta globals **/
 

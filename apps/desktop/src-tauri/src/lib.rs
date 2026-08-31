@@ -214,6 +214,13 @@ struct XlsxImportResponse {
     warnings: Vec<String>,
 }
 
+#[derive(serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+struct PptxImportResponse {
+    deck: DeckModel,
+    warnings: Vec<String>,
+}
+
 #[derive(serde::Serialize)]
 #[serde(transparent)]
 struct UntypedJson(serde_json::Value);
@@ -558,6 +565,20 @@ fn import_docx_file(path: String) -> Result<DocxImportResponse, String> {
 
 #[tauri::command]
 #[specta::specta]
+fn import_pptx_file(path: String) -> Result<PptxImportResponse, String> {
+    handle_panic!({
+        let normalized = normalize_file_path(&path);
+        redoc_export::import_deck_from_pptx_with_report(&normalized)
+            .map(|result| PptxImportResponse {
+                deck: result.deck,
+                warnings: result.warnings,
+            })
+            .map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
 fn recalculate_workbook(mut workbook: WorkbookModel) -> Result<WorkbookModel, String> {
     handle_panic!({
         let res = (|| {
@@ -854,6 +875,7 @@ fn specta_builder() -> SpectaBuilder<tauri::Wry> {
         import_csv_file_with_options,
         import_xlsx_file,
         import_docx_file,
+        import_pptx_file,
         recalculate_workbook,
         set_workbook_cell_value,
         fill_workbook_series,

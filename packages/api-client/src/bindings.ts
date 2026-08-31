@@ -3,6 +3,7 @@ import type {
   AppSettings as GeneratedAppSettings,
   DocWordCount,
   OpenedDocument as GeneratedOpenedDocument,
+  PptxImportResponse,
   RecentEntry as GeneratedRecentEntry,
   RecoveredDoc,
   RedocMeta as GeneratedRedocMeta,
@@ -15,6 +16,7 @@ export type {
   CellRange,
   DocWordCount,
   DocxImportResponse,
+  PptxImportResponse,
   XlsxImportResponse,
   RecoveredDoc,
   SearchMatch,
@@ -111,6 +113,7 @@ export const commands = {
   ) => unwrap(await generatedCommands.importCsvFileWithOptions(path, delimiter, encoding)),
   importXlsxFile: async (path: string) => unwrap(await generatedCommands.importXlsxFile(path)),
   importDocxFile: async (path: string) => unwrap(await generatedCommands.importDocxFile(path)),
+  importPptxFile: async (path: string) => unwrap(await generatedCommands.importPptxFile(path)) as PptxImportResponse,
   recalculateWorkbook: async (workbook: unknown) =>
     unwrap(await generatedCommands.recalculateWorkbook(workbook as WorkbookModel)),
   setWorkbookCellValue: async (

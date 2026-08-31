@@ -386,7 +386,7 @@ export function App() {
     try {
       const pending = await commands.takePendingOpenPaths();
       for (const path of pending) {
-        await openRedocAtPath(path);
+        await openFilePath(path);
       }
     } catch {
       // Non-Tauri / older bindings: ignore OS open queue.
@@ -396,7 +396,7 @@ export function App() {
     try {
       unlistenOpen = await listenOpenFiles((paths) => {
         for (const path of paths) {
-          void openRedocAtPath(path);
+          void openFilePath(path);
         }
       });
     } catch {
@@ -412,11 +412,11 @@ export function App() {
         const file = files[i];
         const path = (file as any).path || file.name;
         const ext = path.split(".").pop()?.toLowerCase();
-        if (ext && ["redoc", "csv", "docx", "xlsx"].includes(ext)) {
+        if (ext && ["redoc", "csv", "docx", "xlsx", "pptx"].includes(ext)) {
           void openFilePath(path);
           break;
         } else if (ext) {
-          showToast(`Unsupported file format: .${ext}. Redoc supports .redoc, .csv, .docx, and .xlsx`, "error");
+          showToast(`Unsupported file format: .${ext}. Redoc supports .redoc, .csv, .docx, .xlsx, and .pptx`, "error");
         }
       }
     };
@@ -554,7 +554,24 @@ export function App() {
     try {
       const extension = path.split(".").pop()?.toLowerCase();
       if (extension === "pptx") {
-        showToast("PPTX import is not yet supported", "info");
+        const imported = await commands.importPptxFile(path);
+        const title = path.split(/[\\/]/).pop()?.replace(/\.pptx$/i, "") || "Imported presentation";
+        setActiveMode("slide");
+        setDocTitle(title);
+        setCurrentFilePath(null);
+        setCurrentDocId(null);
+        setDocContent(imported.deck);
+        setImportWarnings(imported.warnings);
+        setSaveState("Dirty");
+        updateModeBuffer("slide", {
+          content: imported.deck,
+          title,
+          filePath: null,
+          docId: null,
+          saveState: "Dirty",
+        });
+        recordTelemetry("pptx_imported");
+        showToast("Imported PPTX file; save as .redoc to continue editing", "success");
         return;
       }
       if (extension === "csv" || extension === "xlsx") {
