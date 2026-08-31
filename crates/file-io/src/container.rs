@@ -523,7 +523,7 @@ mod tests {
         let leftovers = std::fs::read_dir(&dir)
             .expect("read temp directory")
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
             .count();
         assert_eq!(leftovers, 0, "atomic writes left temporary files behind");
         std::fs::remove_dir_all(dir).expect("cleanup atomic output");
