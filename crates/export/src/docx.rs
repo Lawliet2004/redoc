@@ -1,7 +1,7 @@
 use crate::base64_util::{decode_base64, encode_base64};
 use crate::pdf::ExportError;
 use docx_rs::*;
-use quick_xml::events::Event;
+use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -255,12 +255,106 @@ fn record_unsupported_docx_construct(warnings: &mut Vec<String>, name: &[u8]) {
         b"w:br" => "Manual line breaks were simplified.",
         b"w:sectPr" => "Section/page layout settings were skipped.",
         b"w:bookmarkStart" | b"w:bookmarkEnd" => "Bookmarks were skipped.",
-        b"w:commentRangeStart" | b"w:commentRangeEnd" => "Comments were skipped.",
         _ => return,
     };
     if !warnings.iter().any(|existing| existing == warning) {
         warnings.push(warning.to_string());
     }
+}
+
+#[derive(Clone, Default)]
+struct ImportedDocxComment {
+    author: String,
+    date: String,
+    text: String,
+}
+
+fn docx_local_name(name: &[u8]) -> &[u8] {
+    name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
+}
+
+fn docx_attr(element: &BytesStart<'_>, name: &[u8]) -> Option<String> {
+    element.attributes().flatten().find_map(|attribute| {
+        (docx_local_name(attribute.key.as_ref()) == name)
+            .then(|| String::from_utf8_lossy(attribute.value.as_ref()).into_owned())
+    })
+}
+
+fn read_docx_comments(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+) -> Result<HashMap<usize, ImportedDocxComment>, ExportError> {
+    let Ok(mut entry) = archive.by_name("word/comments.xml") else {
+        return Ok(HashMap::new());
+    };
+    if entry.size() > MAX_DOCX_XML_BYTES {
+        return Err(ExportError::Docx(format!(
+            "DOCX comments entry exceeds the {MAX_DOCX_XML_BYTES}-byte safety limit"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut bytes)?;
+    let mut reader = Reader::from_reader(bytes.as_slice());
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut current = None::<(usize, ImportedDocxComment)>;
+    let mut in_text = false;
+    let mut comments = HashMap::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element)) if docx_local_name(element.name().as_ref()) == b"comment" => {
+                let Some(id) = docx_attr(&element, b"id").and_then(|value| value.parse().ok())
+                else {
+                    continue;
+                };
+                current = Some((
+                    id,
+                    ImportedDocxComment {
+                        author: docx_attr(&element, b"author").unwrap_or_else(|| "Unknown".into()),
+                        date: docx_attr(&element, b"date")
+                            .unwrap_or_else(|| "1970-01-01T00:00:00Z".into()),
+                        text: String::new(),
+                    },
+                ));
+            }
+            Ok(Event::Start(element))
+                if current.is_some() && docx_local_name(element.name().as_ref()) == b"t" =>
+            {
+                in_text = true;
+            }
+            Ok(Event::Text(text)) if in_text => {
+                if let Some((_, comment)) = current.as_mut() {
+                    comment.text.push_str(
+                        &text
+                            .unescape()
+                            .map_err(|error| ExportError::Docx(error.to_string()))?,
+                    );
+                }
+            }
+            Ok(Event::End(element)) if docx_local_name(element.name().as_ref()) == b"t" => {
+                in_text = false;
+            }
+            Ok(Event::End(element)) if docx_local_name(element.name().as_ref()) == b"p" => {
+                if let Some((_, comment)) = current.as_mut() {
+                    if !comment.text.is_empty() {
+                        comment.text.push('\n');
+                    }
+                }
+            }
+            Ok(Event::End(element)) if docx_local_name(element.name().as_ref()) == b"comment" => {
+                if let Some((id, mut comment)) = current.take() {
+                    while comment.text.ends_with('\n') {
+                        comment.text.pop();
+                    }
+                    comments.insert(id, comment);
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(ExportError::Docx(error.to_string())),
+        }
+        buffer.clear();
+    }
+    Ok(comments)
 }
 
 fn build_run(child: &serde_json::Value, override_font: Option<&str>) -> (Run, Option<String>) {
@@ -569,6 +663,7 @@ fn add_runs_to_paragraph_with_comments(
     child_start: usize,
     anchors: &[ExportCommentAnchor],
     started: &mut std::collections::HashSet<usize>,
+    ended: &mut std::collections::HashSet<usize>,
     override_font: Option<&str>,
 ) -> Paragraph {
     let Some(text) = child.get("text").and_then(Value::as_str) else {
@@ -616,6 +711,7 @@ fn add_runs_to_paragraph_with_comments(
         for anchor in anchors {
             if anchor.to == segment_end && started.contains(&anchor.id) {
                 paragraph = paragraph.add_comment_end(anchor.id);
+                ended.insert(anchor.id);
             }
         }
     }
@@ -692,6 +788,7 @@ pub fn export_doc_to_docx(
                                         .unwrap_or_default();
                                     *paragraph_index = (*paragraph_index).saturating_add(1);
                                     let mut started = std::collections::HashSet::new();
+                                    let mut ended = std::collections::HashSet::new();
                                     let mut child_start = layout.start.saturating_add(1);
                                     if let Some(p_content) =
                                         p_node.get("content").and_then(|c| c.as_array())
@@ -703,6 +800,7 @@ pub fn export_doc_to_docx(
                                                 child_start,
                                                 &layout.anchors,
                                                 &mut started,
+                                                &mut ended,
                                                 None,
                                             );
                                             child_start =
@@ -710,7 +808,9 @@ pub fn export_doc_to_docx(
                                         }
                                     }
                                     for anchor in &layout.anchors {
-                                        if started.contains(&anchor.id) {
+                                        if started.contains(&anchor.id)
+                                            && !ended.contains(&anchor.id)
+                                        {
                                             cell_p = cell_p.add_comment_end(anchor.id);
                                         }
                                     }
@@ -748,6 +848,7 @@ pub fn export_doc_to_docx(
                 .unwrap_or_default();
             *paragraph_index = (*paragraph_index).saturating_add(1);
             let mut started = std::collections::HashSet::new();
+            let mut ended = std::collections::HashSet::new();
             let mut child_start = layout.start.saturating_add(1);
             p.property = p.property.shading(Shading::new().fill("F4F4F4"));
             if let Some(content) = node.get("content").and_then(|c| c.as_array()) {
@@ -758,13 +859,14 @@ pub fn export_doc_to_docx(
                         child_start,
                         &layout.anchors,
                         &mut started,
+                        &mut ended,
                         Some("Courier New"),
                     );
                     child_start = child_start.saturating_add(doc_node_size(child));
                 }
             }
             for anchor in &layout.anchors {
-                if started.contains(&anchor.id) {
+                if started.contains(&anchor.id) && !ended.contains(&anchor.id) {
                     p = p.add_comment_end(anchor.id);
                 }
             }
@@ -821,6 +923,7 @@ pub fn export_doc_to_docx(
                 .unwrap_or_default();
             *paragraph_index = (*paragraph_index).saturating_add(1);
             let mut started = std::collections::HashSet::new();
+            let mut ended = std::collections::HashSet::new();
             let mut child_start = layout.start.saturating_add(1);
 
             if let Some((num_id, level)) = list_info {
@@ -871,13 +974,14 @@ pub fn export_doc_to_docx(
                         child_start,
                         &layout.anchors,
                         &mut started,
+                        &mut ended,
                         None,
                     );
                     child_start = child_start.saturating_add(doc_node_size(child));
                 }
             }
             for anchor in &layout.anchors {
-                if started.contains(&anchor.id) {
+                if started.contains(&anchor.id) && !ended.contains(&anchor.id) {
                     p = p.add_comment_end(anchor.id);
                 }
             }
@@ -922,6 +1026,7 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
         )));
     }
     let document = read_docx_xml(&mut archive, "word/document.xml")?;
+    let imported_comments = read_docx_comments(&mut archive)?;
 
     let mut image_data: HashMap<String, String> = HashMap::new();
     let mut hyperlink_data: HashMap<String, String> = HashMap::new();
@@ -1067,6 +1172,10 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
     let mut pending_image: Option<Value> = None;
     let mut active_hyperlink: Option<String> = None;
     let mut active_tracked_change: Option<TrackedChangeContext> = None;
+    let mut document_position = 0usize;
+    let mut paragraph_start = 0usize;
+    let mut paragraph_text_units = 0usize;
+    let mut comment_ranges: HashMap<usize, (usize, usize)> = HashMap::new();
     let mut open_list: Option<OpenList> = None;
     let mut buffer = Vec::new();
 
@@ -1077,9 +1186,23 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                 b"w:tr" => row_cells = Some(Vec::new()),
                 b"w:tc" => cell_content = Some(Vec::new()),
                 b"w:p" => {
+                    paragraph_start = document_position;
+                    paragraph_text_units = 0;
                     current_content = Vec::new();
                     paragraph_style = None;
                     paragraph_num_id = None;
+                }
+                b"w:commentRangeStart" => {
+                    if let Some(id) = docx_attr(&event, b"id").and_then(|value| value.parse().ok())
+                    {
+                        eprintln!(
+                            "comment range start {id} pos {paragraph_start} {paragraph_text_units}"
+                        );
+                        let position = paragraph_start
+                            .saturating_add(1)
+                            .saturating_add(paragraph_text_units);
+                        comment_ranges.insert(id, (position, position));
+                    }
                 }
                 b"w:ins" | b"w:del" => {
                     let kind = if event.name().as_ref() == b"w:ins" {
@@ -1199,6 +1322,27 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                 );
             }
             Ok(Event::Empty(event)) => match event.name().as_ref() {
+                b"w:commentRangeStart" => {
+                    if let Some(id) = docx_attr(&event, b"id").and_then(|value| value.parse().ok())
+                    {
+                        let position = paragraph_start
+                            .saturating_add(1)
+                            .saturating_add(paragraph_text_units);
+                        comment_ranges.insert(id, (position, position));
+                    }
+                }
+                b"w:commentRangeEnd" => {
+                    if let Some(id) = docx_attr(&event, b"id").and_then(|value| value.parse().ok())
+                    {
+                        let position = paragraph_start
+                            .saturating_add(1)
+                            .saturating_add(paragraph_text_units);
+                        if let Some(range) = comment_ranges.get_mut(&id) {
+                            range.1 = position;
+                        }
+                    }
+                }
+                b"w:commentReference" => {}
                 b"w:b" => run_state.bold = true,
                 b"w:i" => run_state.italic = true,
                 b"w:u" => run_state.underline = true,
@@ -1284,6 +1428,8 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
             Ok(Event::End(event)) => match event.name().as_ref() {
                 b"w:t" | b"w:delText" => in_text = false,
                 b"w:r" => {
+                    paragraph_text_units =
+                        paragraph_text_units.saturating_add(utf16_len(&current_text));
                     if !current_text.is_empty() {
                         let marks = run_state
                             .to_marks(active_hyperlink.as_deref(), active_tracked_change.as_ref());
@@ -1303,6 +1449,9 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                     active_tracked_change = None;
                 }
                 b"w:p" => {
+                    document_position = paragraph_start
+                        .saturating_add(paragraph_text_units)
+                        .saturating_add(2);
                     let is_heading = paragraph_style
                         .as_deref()
                         .is_some_and(|style| style.starts_with("Heading"));
@@ -1386,7 +1535,27 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
 
     flush_open_list(&mut open_list, &mut paragraphs);
 
-    let raw_document = json!({ "type": "doc", "content": paragraphs });
+    let mut raw_document = json!({ "type": "doc", "content": paragraphs });
+    let comments = imported_comments
+        .into_iter()
+        .filter_map(|(id, comment)| {
+            let (from, to) = comment_ranges.get(&id).copied()?;
+            (from < to).then(|| {
+                json!({
+                    "id": format!("comment-{id}"),
+                    "author": comment.author,
+                    "text": comment.text,
+                    "from": from,
+                    "to": to,
+                    "resolved": false,
+                    "createdAt": comment.date,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    if !comments.is_empty() {
+        raw_document["comments"] = Value::Array(comments);
+    }
     let document = redoc_doc_engine::prune_doc(&raw_document);
 
     Ok(DocxImportResult { document, warnings })
@@ -1460,6 +1629,46 @@ mod tests {
             .expect("read document xml");
         assert!(document_xml.contains("commentRangeStart"));
         assert!(document_xml.contains("commentRangeEnd"));
+    }
+
+    #[test]
+    fn imports_native_docx_comments_into_review_metadata() {
+        let source = json!({
+            "type": "doc",
+            "content": [{
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Hello world" }]
+            }],
+            "comments": [{
+                "id": "comment-1",
+                "author": "Reviewer",
+                "text": "Check this greeting",
+                "from": 1,
+                "to": 6,
+                "resolved": false,
+                "createdAt": "2026-08-31T00:00:00Z"
+            }]
+        });
+        let path = std::env::temp_dir().join(format!(
+            "redoc-docx-comments-{}-{}.docx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            export_doc_to_docx(&source, "Commented").expect("export docx"),
+        )
+        .expect("write docx");
+        let imported = import_docx_to_doc_with_report(&path).expect("import docx");
+        let comment = imported.document["comments"][0].clone();
+        assert_eq!(comment["author"], "Reviewer");
+        assert_eq!(comment["text"], "Check this greeting");
+        assert_eq!(comment["from"], 1);
+        assert_eq!(comment["to"], 6);
+        std::fs::remove_file(path).expect("cleanup docx");
     }
 
     #[test]
