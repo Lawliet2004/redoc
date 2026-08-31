@@ -7,6 +7,10 @@ use std::path::Path;
 use thiserror::Error;
 
 pub const CURRENT_FORMAT_VERSION: u32 = 1;
+const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+const MAX_JSON_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_ASSET_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_TOTAL_ASSET_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Error, Debug)]
 pub enum FileIoError {
@@ -22,6 +26,20 @@ pub enum FileIoError {
     UnsupportedVersion(u32),
     #[error("Migration error: {0}")]
     Migration(String),
+    #[error("Archive has too many entries (maximum {0})")]
+    TooManyEntries(usize),
+    #[error("Archive entry {name} exceeds the {limit} byte limit")]
+    EntryTooLarge { name: String, limit: u64 },
+    #[error("Invalid asset reference: {0}")]
+    InvalidAsset(String),
+    #[error("Asset {hash} declares {declared} bytes but contains {actual}")]
+    AssetSizeMismatch {
+        hash: String,
+        declared: u64,
+        actual: u64,
+    },
+    #[error("Asset hash mismatch for {hash}")]
+    AssetHashMismatch { hash: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -145,12 +163,21 @@ impl RedocContainer {
     pub fn read_from_file<P: AsRef<Path>>(path: P) -> Result<Self, FileIoError> {
         let file = File::open(path)?;
         let mut archive = zip::ZipArchive::new(file)?;
+        if archive.len() > MAX_ARCHIVE_ENTRIES {
+            return Err(FileIoError::TooManyEntries(MAX_ARCHIVE_ENTRIES));
+        }
 
         // Read meta.json
         let mut meta: RedocMeta = {
             let mut meta_file = archive
                 .by_name("meta.json")
                 .map_err(|_| FileIoError::InvalidContainer("meta.json"))?;
+            if meta_file.size() > MAX_JSON_ENTRY_BYTES {
+                return Err(FileIoError::EntryTooLarge {
+                    name: "meta.json".to_string(),
+                    limit: MAX_JSON_ENTRY_BYTES,
+                });
+            }
             let mut content = String::new();
             meta_file.read_to_string(&mut content)?;
             serde_json::from_str(&content)?
@@ -161,6 +188,12 @@ impl RedocContainer {
             let mut body_file = archive
                 .by_name("body.json")
                 .map_err(|_| FileIoError::InvalidContainer("body.json"))?;
+            if body_file.size() > MAX_JSON_ENTRY_BYTES {
+                return Err(FileIoError::EntryTooLarge {
+                    name: "body.json".to_string(),
+                    limit: MAX_JSON_ENTRY_BYTES,
+                });
+            }
             let mut content = String::new();
             body_file.read_to_string(&mut content)?;
             serde_json::from_str(&content)?
@@ -184,11 +217,63 @@ impl RedocContainer {
 
         // Read assets
         let mut assets_data = std::collections::HashMap::new();
+        let mut total_asset_bytes = 0u64;
         for asset in &meta.assets {
+            if asset.hash.is_empty()
+                || asset.hash.contains('/')
+                || asset.hash.contains('\\')
+                || asset.hash.contains("..")
+                || asset.hash.bytes().any(|byte| byte == 0)
+            {
+                return Err(FileIoError::InvalidAsset(asset.hash.clone()));
+            }
+            if asset.size > MAX_ASSET_BYTES {
+                return Err(FileIoError::EntryTooLarge {
+                    name: format!("assets/{}", asset.hash),
+                    limit: MAX_ASSET_BYTES,
+                });
+            }
+            total_asset_bytes = total_asset_bytes
+                .checked_add(asset.size)
+                .ok_or(FileIoError::EntryTooLarge {
+                    name: "assets/*".to_string(),
+                    limit: MAX_TOTAL_ASSET_BYTES,
+                })?;
+            if total_asset_bytes > MAX_TOTAL_ASSET_BYTES {
+                return Err(FileIoError::EntryTooLarge {
+                    name: "assets/*".to_string(),
+                    limit: MAX_TOTAL_ASSET_BYTES,
+                });
+            }
             let asset_path = format!("assets/{}", asset.hash);
             if let Ok(mut asset_file) = archive.by_name(&asset_path) {
+                if asset.hash.len() != 64
+                    || !asset.hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(FileIoError::InvalidAsset(asset.hash.clone()));
+                }
+                if asset_file.size() > MAX_ASSET_BYTES {
+                    return Err(FileIoError::EntryTooLarge {
+                        name: asset_path,
+                        limit: MAX_ASSET_BYTES,
+                    });
+                }
                 let mut data = Vec::new();
                 asset_file.read_to_end(&mut data)?;
+                if data.len() as u64 != asset.size {
+                    return Err(FileIoError::AssetSizeMismatch {
+                        hash: asset.hash.clone(),
+                        declared: asset.size,
+                        actual: data.len() as u64,
+                    });
+                }
+                let mut hasher = Sha256::new();
+                hasher.update(&data);
+                if format!("{:x}", hasher.finalize()) != asset.hash {
+                    return Err(FileIoError::AssetHashMismatch {
+                        hash: asset.hash.clone(),
+                    });
+                }
                 assets_data.insert(asset.hash.clone(), data);
             }
         }
