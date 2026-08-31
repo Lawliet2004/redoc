@@ -915,7 +915,7 @@ fn parse_slide(
         layout: "blank".to_string(),
         elements,
         notes: String::new(),
-        bg_override: None,
+        bg_override: parse_slide_background(xml),
         transition: transition.to_string(),
     })
 }
@@ -965,6 +965,59 @@ fn parse_canvas_size(xml: &[u8]) -> (f64, f64) {
         buffer.clear();
     }
     (960.0, 540.0)
+}
+
+fn parse_slide_background(xml: &[u8]) -> Option<String> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut in_background = false;
+    let mut background_depth = 0usize;
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => {
+                let name = local_name(event.name().as_ref()).to_vec();
+                if name.as_slice() == b"bg" {
+                    in_background = true;
+                    background_depth = 1;
+                } else if in_background {
+                    background_depth = background_depth.saturating_add(1);
+                    if name.as_slice() == b"srgbClr" {
+                        if let Some(value) = attribute(&event, b"val") {
+                            let value = value.trim();
+                            if value.len() == 6
+                                && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            {
+                                return Some(format!("#{value}"));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Event::Empty(event)) => {
+                if in_background && local_name(event.name().as_ref()) == b"srgbClr" {
+                    if let Some(value) = attribute(&event, b"val") {
+                        let value = value.trim();
+                        if value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                            return Some(format!("#{value}"));
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(event)) => {
+                if in_background {
+                    background_depth = background_depth.saturating_sub(1);
+                    if local_name(event.name().as_ref()) == b"bg" || background_depth == 0 {
+                        in_background = false;
+                    }
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+        buffer.clear();
+    }
+    None
 }
 
 fn normalize_presentation_target(target: &str) -> Option<String> {
@@ -1383,6 +1436,7 @@ mod tests {
         source.theme.text_color = "#f0f0f0".to_string();
         source.theme.accent_color = "#c06020".to_string();
         source.theme.font_family = "Aptos".to_string();
+        source.slides[0].bg_override = Some("#334455".to_string());
         source.slides[0].elements.clear();
         source.slides[0].elements.push(SlideElement {
             id: "chart".to_string(),
@@ -1433,6 +1487,7 @@ mod tests {
         assert_eq!(result.deck.theme.text_color, "#f0f0f0");
         assert_eq!(result.deck.theme.accent_color, "#c06020");
         assert_eq!(result.deck.theme.font_family, "Aptos");
+        assert_eq!(result.deck.slides[0].bg_override.as_deref(), Some("#334455"));
         assert!(!result
             .warnings
             .iter()
