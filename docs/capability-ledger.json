@@ -149,7 +149,7 @@
       "area": "presentation",
       "title": "PPTX import/export with masters, media, notes, and animations",
       "status": "partial",
-      "evidence": ["crates/export/src/pptx.rs", "apps/desktop/src/App.tsx"],
+      "evidence": ["crates/export/src/pptx.rs", "crates/export/src/pptx_import.rs", "apps/desktop/src/App.tsx", "apps/desktop/src-tauri/src/lib.rs"],
       "targetPhase": "office-sessions"
     },
     {
