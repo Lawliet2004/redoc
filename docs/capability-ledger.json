@@ -69,7 +69,7 @@
       "area": "document",
       "title": "Comments, tracked changes, compare, and accept/reject",
       "status": "partial",
-      "evidence": ["packages/doc-editor/src/DocEditor.tsx", "packages/doc-editor/src/schema.ts", "packages/doc-editor/src/review.ts", "packages/doc-editor/src/review.test.ts", "packages/doc-editor/src/trackedChanges.ts", "packages/doc-editor/src/trackedChanges.test.ts"],
+      "evidence": ["packages/doc-editor/src/DocEditor.tsx", "packages/doc-editor/src/schema.ts", "packages/doc-editor/src/review.ts", "packages/doc-editor/src/review.test.ts", "packages/doc-editor/src/compare.ts", "packages/doc-editor/src/compare.test.ts", "packages/doc-editor/src/trackedChanges.ts", "packages/doc-editor/src/trackedChanges.test.ts"],
       "targetPhase": "document-completion"
     },
     {
