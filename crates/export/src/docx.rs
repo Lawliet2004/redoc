@@ -132,6 +132,14 @@ struct RunImportState {
     link_href: Option<String>,
 }
 
+#[derive(Clone)]
+struct TrackedChangeContext {
+    kind: &'static str,
+    author: String,
+    change_id: String,
+    created_at: String,
+}
+
 impl RunImportState {
     fn new() -> Self {
         Self {
@@ -153,7 +161,11 @@ impl RunImportState {
         *self = RunImportState::new();
     }
 
-    fn to_marks(&self, hyperlink: Option<&str>) -> Vec<Value> {
+    fn to_marks(
+        &self,
+        hyperlink: Option<&str>,
+        tracked_change: Option<&TrackedChangeContext>,
+    ) -> Vec<Value> {
         let mut marks = Vec::new();
         if self.bold {
             marks.push(json!({ "type": "bold" }));
@@ -188,6 +200,21 @@ impl RunImportState {
         if let Some(href) = hyperlink.or(self.link_href.as_deref()) {
             marks.push(json!({ "type": "link", "attrs": { "href": href, "title": null } }));
         }
+        if let Some(change) = tracked_change {
+            let mark_type = if change.kind == "insert" {
+                "trackInsert"
+            } else {
+                "trackDelete"
+            };
+            marks.push(json!({
+                "type": mark_type,
+                "attrs": {
+                    "author": change.author,
+                    "changeId": change.change_id,
+                    "createdAt": change.created_at,
+                }
+            }));
+        }
         marks
     }
 }
@@ -221,7 +248,6 @@ fn list_type_for_num_id(num_id: u32, formats: &HashMap<u32, String>) -> String {
 fn record_unsupported_docx_construct(warnings: &mut Vec<String>, name: &[u8]) {
     let warning = match name {
         b"w:hyperlink" => "Hyperlinks were not imported.",
-        b"w:ins" | b"w:del" => "Tracked changes were skipped.",
         b"w:fldSimple" | b"w:instrText" => "Word fields were skipped.",
         b"w:br" => "Manual line breaks were simplified.",
         b"w:sectPr" => "Section/page layout settings were skipped.",
@@ -308,6 +334,14 @@ fn build_run(child: &serde_json::Value, override_font: Option<&str>) -> (Run, Op
                         .unwrap_or("#");
                     link_url = Some(href.to_string());
                     run = run.color("0563C1").underline("single");
+                }
+                // Native w:ins/w:del parts are not emitted yet, but retaining
+                // review state as visible markup keeps the export auditable.
+                Some("trackInsert") => {
+                    run = run.color("008000").underline("single");
+                }
+                Some("trackDelete") => {
+                    run = run.color("C00000").strike();
                 }
                 _ => {}
             }
@@ -706,6 +740,7 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
     let mut in_text = false;
     let mut pending_image: Option<Value> = None;
     let mut active_hyperlink: Option<String> = None;
+    let mut active_tracked_change: Option<TrackedChangeContext> = None;
     let mut open_list: Option<OpenList> = None;
     let mut buffer = Vec::new();
 
@@ -719,6 +754,36 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                     current_content = Vec::new();
                     paragraph_style = None;
                     paragraph_num_id = None;
+                }
+                b"w:ins" | b"w:del" => {
+                    let kind = if event.name().as_ref() == b"w:ins" {
+                        "insert"
+                    } else {
+                        "delete"
+                    };
+                    let mut author = String::from("Unknown");
+                    let mut change_id = String::new();
+                    let mut created_at = String::new();
+                    for attribute in event.attributes().flatten() {
+                        match attribute.key.as_ref() {
+                            b"w:author" => {
+                                author = String::from_utf8_lossy(&attribute.value).into_owned()
+                            }
+                            b"w:id" => {
+                                change_id = String::from_utf8_lossy(&attribute.value).into_owned()
+                            }
+                            b"w:date" => {
+                                created_at = String::from_utf8_lossy(&attribute.value).into_owned()
+                            }
+                            _ => {}
+                        }
+                    }
+                    active_tracked_change = Some(TrackedChangeContext {
+                        kind,
+                        author,
+                        change_id,
+                        created_at,
+                    });
                 }
                 b"w:hyperlink" => {
                     for attribute in event.attributes().flatten() {
@@ -789,13 +854,12 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                 b"w:numId" => {
                     for attribute in event.attributes().flatten() {
                         if attribute.key.as_ref() == b"w:val" {
-                            paragraph_num_id = String::from_utf8_lossy(&attribute.value)
-                                .parse()
-                                .ok();
+                            paragraph_num_id =
+                                String::from_utf8_lossy(&attribute.value).parse().ok();
                         }
                     }
                 }
-                b"w:t" => {
+                b"w:t" | b"w:delText" => {
                     current_text.clear();
                     in_text = true;
                 }
@@ -893,10 +957,11 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                 _ => record_unsupported_docx_construct(&mut warnings, event.name().as_ref()),
             },
             Ok(Event::End(event)) => match event.name().as_ref() {
-                b"w:t" => in_text = false,
+                b"w:t" | b"w:delText" => in_text = false,
                 b"w:r" => {
                     if !current_text.is_empty() {
-                        let marks = run_state.to_marks(active_hyperlink.as_deref());
+                        let marks = run_state
+                            .to_marks(active_hyperlink.as_deref(), active_tracked_change.as_ref());
                         let mut run = json!({ "type": "text", "text": current_text });
                         if !marks.is_empty() {
                             run["marks"] = Value::Array(marks);
@@ -908,6 +973,9 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                 }
                 b"w:hyperlink" => {
                     active_hyperlink = None;
+                }
+                b"w:ins" | b"w:del" => {
+                    active_tracked_change = None;
                 }
                 b"w:p" => {
                     let is_heading = paragraph_style
@@ -1050,12 +1118,61 @@ mod tests {
         std::fs::write(&path, bytes).expect("write docx");
         let report = import_docx_to_doc_with_report(&path).expect("import docx");
         assert_eq!(report.document["content"][0]["content"][0]["text"], "Link");
-        assert!(
-            !report
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("Hyperlinks"))
-        );
+        assert!(!report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Hyperlinks")));
+        std::fs::remove_file(path).expect("cleanup docx");
+    }
+
+    #[test]
+    fn imports_native_tracked_changes_as_review_marks() {
+        let path =
+            std::env::temp_dir().join(format!("redoc-docx-tracked-{}.docx", std::process::id()));
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(cursor);
+        archive
+            .start_file("word/document.xml", zip::write::FileOptions::default())
+            .expect("start document");
+        archive
+            .write_all(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Keep </w:t></w:r><w:ins w:id="7" w:author="Alice" w:date="2026-08-31T10:00:00Z"><w:r><w:t>new</w:t></w:r></w:ins><w:del w:id="8" w:author="Bob"><w:r><w:delText>old</w:delText></w:r></w:del></w:p></w:body></w:document>"#)
+            .expect("write document");
+        let bytes = archive.finish().expect("finish docx").into_inner();
+        std::fs::write(&path, bytes).expect("write docx");
+
+        let report = import_docx_to_doc_with_report(&path).expect("import docx");
+        let runs = report.document["content"][0]["content"].as_array().unwrap();
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[1]["marks"][0]["type"], "trackInsert");
+        assert_eq!(runs[1]["marks"][0]["attrs"]["author"], "Alice");
+        assert_eq!(runs[2]["marks"][0]["type"], "trackDelete");
+        assert_eq!(runs[2]["marks"][0]["attrs"]["author"], "Bob");
+        assert!(!report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Tracked changes were skipped")));
+        std::fs::remove_file(path).expect("cleanup docx");
+    }
+
+    #[test]
+    fn rejects_docx_archives_with_too_many_entries() {
+        let path = std::env::temp_dir().join(format!(
+            "redoc-docx-entry-limit-{}.docx",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).expect("create fixture");
+        let mut archive = zip::ZipWriter::new(file);
+        for index in 0..=MAX_DOCX_ARCHIVE_ENTRIES {
+            archive
+                .start_file(
+                    format!("word/extra-{index}.xml"),
+                    zip::write::FileOptions::default(),
+                )
+                .expect("start entry");
+        }
+        archive.finish().expect("finish fixture");
+        let error = import_docx_to_doc_with_report(&path).expect_err("entry limit should fail");
+        assert!(error.to_string().contains("too many entries"));
         std::fs::remove_file(path).expect("cleanup docx");
     }
 
