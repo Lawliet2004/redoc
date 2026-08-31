@@ -77,6 +77,9 @@ fn parse_xlsx_styles(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) ->
     let Ok(mut file) = archive.by_name("xl/styles.xml") else {
         return Vec::new();
     };
+    if file.size() > MAX_XLSX_XML_BYTES {
+        return Vec::new();
+    }
     let mut xml = Vec::new();
     if file.read_to_end(&mut xml).is_err() {
         return Vec::new();
@@ -242,6 +245,83 @@ fn parse_xlsx_styles(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) ->
     styles
 }
 
+fn parse_xlsx_dxf_styles(
+    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+) -> Vec<ConditionalFormattingStyle> {
+    let Ok(mut file) = archive.by_name("xl/styles.xml") else {
+        return Vec::new();
+    };
+    if file.size() > MAX_XLSX_XML_BYTES {
+        return Vec::new();
+    }
+    let mut xml = Vec::new();
+    if file.read_to_end(&mut xml).is_err() {
+        return Vec::new();
+    }
+    let mut reader = XmlReader::from_reader(xml.as_slice());
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut in_dxfs = false;
+    let mut in_dxf = false;
+    let mut in_font = false;
+    let mut in_fill = false;
+    let mut current = None::<ConditionalFormattingStyle>;
+    let mut styles = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element)) => match xml_local_name(element.name().as_ref()) {
+                b"dxfs" => in_dxfs = true,
+                b"dxf" if in_dxfs => {
+                    in_dxf = true;
+                    current = Some(ConditionalFormattingStyle {
+                        font_color: None,
+                        bg_color: None,
+                        bold: None,
+                        italic: None,
+                    });
+                }
+                b"font" if in_dxf => in_font = true,
+                b"fill" if in_dxf => in_fill = true,
+                _ => {}
+            },
+            Ok(Event::Empty(element)) => {
+                let name = xml_local_name(element.name().as_ref()).to_vec();
+                if let Some(style) = current.as_mut() {
+                    match name.as_slice() {
+                        b"b" if in_font => style.bold = Some(true),
+                        b"i" if in_font => style.italic = Some(true),
+                        b"color" if in_font => {
+                            style.font_color = xml_attr_local(&element, b"rgb")
+                                .and_then(|value| normalize_rgb(&value));
+                        }
+                        b"fgColor" | b"bgColor" if in_fill => {
+                            style.bg_color = xml_attr_local(&element, b"rgb")
+                                .and_then(|value| normalize_rgb(&value));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Event::End(element)) => match xml_local_name(element.name().as_ref()) {
+                b"font" => in_font = false,
+                b"fill" => in_fill = false,
+                b"dxf" if in_dxf => {
+                    if let Some(style) = current.take() {
+                        styles.push(style);
+                    }
+                    in_dxf = false;
+                }
+                b"dxfs" => in_dxfs = false,
+                _ => {}
+            },
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    styles
+}
+
 fn parse_xlsx_sheet_metadata(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
     sheet_index: usize,
@@ -250,6 +330,7 @@ fn parse_xlsx_sheet_metadata(
         styles: parse_xlsx_styles(archive),
         ..Default::default()
     };
+    let dxf_styles = parse_xlsx_dxf_styles(archive);
     let path = format!("xl/worksheets/sheet{}.xml", sheet_index + 1);
     let Ok(mut file) = archive.by_name(&path) else {
         return metadata;
@@ -278,8 +359,11 @@ fn parse_xlsx_sheet_metadata(
                     range: conditional_range,
                     rule_type: xml_attr_local(&element, b"type").unwrap_or_default(),
                     operator: xml_attr_local(&element, b"operator"),
+                    dxf_id: xml_attr_local(&element, b"dxfId")
+                        .and_then(|value| value.parse::<usize>().ok()),
                     formula: xml_attr_local(&element, b"text"),
                     scale_colors: Vec::new(),
+                    style: None,
                 });
             }
             Ok(Event::Start(element))
@@ -316,7 +400,8 @@ fn parse_xlsx_sheet_metadata(
                 }
             }
             Ok(Event::End(element)) if xml_local_name(element.name().as_ref()) == b"cfRule" => {
-                if let Some(rule) = current_conditional.take() {
+                if let Some(mut rule) = current_conditional.take() {
+                    rule.style = rule.dxf_id.and_then(|id| dxf_styles.get(id).cloned());
                     if let Some(rule) = imported_conditional_rule(rule) {
                         metadata.conditional_formatting.push(rule);
                     }
@@ -468,8 +553,10 @@ struct ImportedConditionalRule {
     range: Option<redoc_sheet_engine::CellRange>,
     rule_type: String,
     operator: Option<String>,
+    dxf_id: Option<usize>,
     formula: Option<String>,
     scale_colors: Vec<String>,
+    style: Option<ConditionalFormattingStyle>,
 }
 
 fn imported_conditional_rule(rule: ImportedConditionalRule) -> Option<ConditionalFormattingRule> {
@@ -496,7 +583,7 @@ fn imported_conditional_rule(rule: ImportedConditionalRule) -> Option<Conditiona
         rule_type: rule_type.to_string(),
         value: rule.formula,
         value2: None,
-        style: None,
+        style: rule.style,
         scale_colors: rule.scale_colors,
     })
 }
@@ -1648,7 +1735,12 @@ mod tests {
                 rule_type: "textContains".to_string(),
                 value: Some("urgent".to_string()),
                 value2: None,
-                style: None,
+                style: Some(ConditionalFormattingStyle {
+                    font_color: Some("#9C0006".to_string()),
+                    bg_color: Some("#FFC7CE".to_string()),
+                    bold: Some(true),
+                    italic: Some(true),
+                }),
                 scale_colors: Vec::new(),
             });
         let path = std::env::temp_dir().join(format!(
@@ -1671,6 +1763,20 @@ mod tests {
         assert_eq!(rules[0].value.as_deref(), Some("urgent"));
         assert_eq!(rules[0].range.start_row, 2);
         assert_eq!(rules[0].range.end_col, 3);
+        assert_eq!(
+            rules[0]
+                .style
+                .as_ref()
+                .and_then(|style| style.font_color.as_deref()),
+            Some("#9C0006")
+        );
+        assert_eq!(
+            rules[0]
+                .style
+                .as_ref()
+                .and_then(|style| style.bg_color.as_deref()),
+            Some("#FFC7CE")
+        );
         std::fs::remove_file(path).expect("cleanup xlsx");
     }
 }
