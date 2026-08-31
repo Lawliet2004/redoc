@@ -10,3 +10,5 @@ Redoc can open `.pptx` files through the desktop open dialog, operating-system o
 - fade and directional push transitions.
 
 Unsupported graphic frames (including tables and charts) are skipped with warnings. Imported presentations are intentionally marked dirty and should be saved as `.redoc` before editing; native PPTX write-back remains a later interoperability milestone.
+
+The importer bounds each XML part (16 MiB), each media part (32 MiB), total media (256 MiB), and archive entries (10,000) so malformed or hostile packages fail or degrade with a bounded warning instead of exhausting memory.
