@@ -2,8 +2,15 @@ use crate::pdf::ExportError;
 use calamine::{open_workbook_auto, Data, Reader};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader as XmlReader;
-use redoc_sheet_engine::{CellStyle, ChartModel, SheetCell, SheetData, WorkbookModel};
-use rust_xlsxwriter::{Chart, ChartType, Color, Format, FormatAlign, Workbook};
+use redoc_sheet_engine::{
+    CellStyle, ChartModel, ConditionalFormattingRule, ConditionalFormattingStyle, SheetCell,
+    SheetData, WorkbookModel,
+};
+use rust_xlsxwriter::{
+    Chart, ChartType, Color, ConditionalFormat2ColorScale, ConditionalFormat3ColorScale,
+    ConditionalFormatCell, ConditionalFormatCellRule, ConditionalFormatDataBar,
+    ConditionalFormatText, ConditionalFormatTextRule, Format, FormatAlign, Workbook,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::path::Path;
@@ -22,6 +29,7 @@ struct ImportedXlsxMetadata {
     freeze_rows: u32,
     freeze_cols: u32,
     styles: Vec<ImportedXf>,
+    conditional_formatting: Vec<ConditionalFormattingRule>,
 }
 
 #[derive(Default)]
@@ -253,8 +261,72 @@ fn parse_xlsx_sheet_metadata(
     let mut reader = XmlReader::from_reader(xml.as_slice());
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
+    let mut conditional_range = None;
+    let mut current_conditional = None::<ImportedConditionalRule>;
+    let mut capturing_formula = false;
+    let mut formula_text = String::new();
     loop {
         match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element))
+                if xml_local_name(element.name().as_ref()) == b"conditionalFormatting" =>
+            {
+                conditional_range =
+                    xml_attr_local(&element, b"sqref").and_then(|value| parse_excel_range(&value));
+            }
+            Ok(Event::Start(element)) if xml_local_name(element.name().as_ref()) == b"cfRule" => {
+                current_conditional = Some(ImportedConditionalRule {
+                    range: conditional_range,
+                    rule_type: xml_attr_local(&element, b"type").unwrap_or_default(),
+                    operator: xml_attr_local(&element, b"operator"),
+                    formula: xml_attr_local(&element, b"text"),
+                    scale_colors: Vec::new(),
+                });
+            }
+            Ok(Event::Start(element))
+                if current_conditional.is_some()
+                    && xml_local_name(element.name().as_ref()) == b"formula" =>
+            {
+                capturing_formula = true;
+                formula_text.clear();
+            }
+            Ok(Event::Text(text)) if capturing_formula => {
+                if let Ok(value) = text.unescape() {
+                    formula_text.push_str(&value);
+                }
+            }
+            Ok(Event::End(element))
+                if capturing_formula && xml_local_name(element.name().as_ref()) == b"formula" =>
+            {
+                if let Some(rule) = current_conditional.as_mut() {
+                    if rule.rule_type != "containsText" || rule.formula.is_none() {
+                        rule.formula = Some(formula_text.trim().to_string());
+                    }
+                }
+                capturing_formula = false;
+                formula_text.clear();
+            }
+            Ok(Event::Empty(element))
+                if current_conditional.is_some()
+                    && xml_local_name(element.name().as_ref()) == b"color" =>
+            {
+                if let Some(color) = xml_attr_local(&element, b"rgb") {
+                    if let Some(rule) = current_conditional.as_mut() {
+                        rule.scale_colors.push(color);
+                    }
+                }
+            }
+            Ok(Event::End(element)) if xml_local_name(element.name().as_ref()) == b"cfRule" => {
+                if let Some(rule) = current_conditional.take() {
+                    if let Some(rule) = imported_conditional_rule(rule) {
+                        metadata.conditional_formatting.push(rule);
+                    }
+                }
+            }
+            Ok(Event::End(element))
+                if xml_local_name(element.name().as_ref()) == b"conditionalFormatting" =>
+            {
+                conditional_range = None;
+            }
             Ok(Event::Empty(element)) | Ok(Event::Start(element)) => {
                 match element.name().as_ref() {
                     b"c" => {
@@ -357,6 +429,78 @@ fn excel_reference(row: u32, mut column: u32) -> String {
     format!("{letters}{row}")
 }
 
+fn parse_excel_cell_reference(reference: &str) -> Option<(u32, u32)> {
+    let reference = reference.trim().trim_start_matches('$');
+    let split = reference
+        .find(|character: char| character.is_ascii_digit())
+        .unwrap_or(reference.len());
+    if split == 0 || split == reference.len() {
+        return None;
+    }
+    let mut column = 0u32;
+    for character in reference[..split].chars() {
+        if !character.is_ascii_alphabetic() {
+            return None;
+        }
+        column = column
+            .checked_mul(26)?
+            .checked_add(character.to_ascii_uppercase() as u32 - 'A' as u32 + 1)?;
+    }
+    let row = reference[split..].parse::<u32>().ok()?;
+    (row > 0 && column > 0).then_some((row, column))
+}
+
+fn parse_excel_range(reference: &str) -> Option<redoc_sheet_engine::CellRange> {
+    let first = reference.split_whitespace().next()?;
+    let (start, end) = first.split_once(':').unwrap_or((first, first));
+    let (start_row, start_col) = parse_excel_cell_reference(start)?;
+    let (end_row, end_col) = parse_excel_cell_reference(end)?;
+    (end_row >= start_row && end_col >= start_col).then_some(redoc_sheet_engine::CellRange {
+        start_row,
+        end_row,
+        start_col,
+        end_col,
+    })
+}
+
+#[derive(Default)]
+struct ImportedConditionalRule {
+    range: Option<redoc_sheet_engine::CellRange>,
+    rule_type: String,
+    operator: Option<String>,
+    formula: Option<String>,
+    scale_colors: Vec<String>,
+}
+
+fn imported_conditional_rule(rule: ImportedConditionalRule) -> Option<ConditionalFormattingRule> {
+    let range = rule.range?;
+    let rule_type = match rule.rule_type.as_str() {
+        "containsText" => "textContains",
+        "dataBar" => "dataBar",
+        "colorScale" => "colorScale",
+        "cellIs" => match rule.operator.as_deref() {
+            Some("greaterThan") => "greaterThan",
+            Some("lessThan") => "lessThan",
+            Some("equal") => "equalTo",
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(ConditionalFormattingRule {
+        range: redoc_sheet_engine::ConditionalFormattingRange {
+            start_row: range.start_row,
+            end_row: range.end_row,
+            start_col: range.start_col,
+            end_col: range.end_col,
+        },
+        rule_type: rule_type.to_string(),
+        value: rule.formula,
+        value2: None,
+        style: None,
+        scale_colors: rule.scale_colors,
+    })
+}
+
 fn color(value: &str) -> Option<Color> {
     let value = value.trim().trim_start_matches('#');
     (value.len() == 6)
@@ -417,6 +561,184 @@ fn chart_type_for(model: &ChartModel) -> ChartType {
         "pie" => ChartType::Pie,
         _ => ChartType::Bar,
     }
+}
+
+fn format_for_conditional_style(style: Option<&ConditionalFormattingStyle>) -> Format {
+    let mut format = Format::new();
+    let Some(style) = style else {
+        return format;
+    };
+    if style.bold == Some(true) {
+        format = format.set_bold();
+    }
+    if style.italic == Some(true) {
+        format = format.set_italic();
+    }
+    if let Some(font_color) = style.font_color.as_deref().and_then(color) {
+        format = format.set_font_color(font_color);
+    }
+    if let Some(bg_color) = style.bg_color.as_deref().and_then(color) {
+        format = format.set_background_color(bg_color);
+    }
+    format
+}
+
+fn insert_sheet_conditional_formats(
+    worksheet: &mut rust_xlsxwriter::Worksheet,
+    rules: &[ConditionalFormattingRule],
+) -> Result<(), ExportError> {
+    for rule in rules {
+        let range = &rule.range;
+        if range.start_row == 0
+            || range.start_col == 0
+            || range.end_row < range.start_row
+            || range.end_col < range.start_col
+            || range.end_col > u32::from(u16::MAX)
+        {
+            continue;
+        }
+        let first_row = range.start_row - 1;
+        let last_row = range.end_row - 1;
+        let first_col = (range.start_col - 1) as u16;
+        let last_col = (range.end_col - 1) as u16;
+        let style = format_for_conditional_style(rule.style.as_ref());
+
+        match rule.rule_type.as_str() {
+            "greaterThan" => {
+                let Some(value) = rule
+                    .value
+                    .as_deref()
+                    .and_then(|value| value.parse::<f64>().ok())
+                else {
+                    continue;
+                };
+                let conditional = ConditionalFormatCell::new()
+                    .set_rule(ConditionalFormatCellRule::GreaterThan(value))
+                    .set_format(style);
+                worksheet
+                    .add_conditional_format(first_row, first_col, last_row, last_col, &conditional)
+                    .map_err(|error| ExportError::Xlsx(format!("{:?}", error)))?;
+            }
+            "lessThan" => {
+                let Some(value) = rule
+                    .value
+                    .as_deref()
+                    .and_then(|value| value.parse::<f64>().ok())
+                else {
+                    continue;
+                };
+                let conditional = ConditionalFormatCell::new()
+                    .set_rule(ConditionalFormatCellRule::LessThan(value))
+                    .set_format(style);
+                worksheet
+                    .add_conditional_format(first_row, first_col, last_row, last_col, &conditional)
+                    .map_err(|error| ExportError::Xlsx(format!("{:?}", error)))?;
+            }
+            "equalTo" => {
+                let Some(value) = rule.value.as_deref() else {
+                    continue;
+                };
+                if let Ok(value) = value.parse::<f64>() {
+                    let conditional = ConditionalFormatCell::new()
+                        .set_rule(ConditionalFormatCellRule::EqualTo(value))
+                        .set_format(style);
+                    worksheet
+                        .add_conditional_format(
+                            first_row,
+                            first_col,
+                            last_row,
+                            last_col,
+                            &conditional,
+                        )
+                        .map_err(|error| ExportError::Xlsx(format!("{:?}", error)))?;
+                } else {
+                    let conditional = ConditionalFormatCell::new()
+                        .set_rule(ConditionalFormatCellRule::EqualTo(value.to_string()))
+                        .set_format(style);
+                    worksheet
+                        .add_conditional_format(
+                            first_row,
+                            first_col,
+                            last_row,
+                            last_col,
+                            &conditional,
+                        )
+                        .map_err(|error| ExportError::Xlsx(format!("{:?}", error)))?;
+                }
+            }
+            "textContains" => {
+                let Some(value) = rule.value.as_deref() else {
+                    continue;
+                };
+                let conditional = ConditionalFormatText::new()
+                    .set_rule(ConditionalFormatTextRule::Contains(value.to_string()))
+                    .set_format(style);
+                worksheet
+                    .add_conditional_format(first_row, first_col, last_row, last_col, &conditional)
+                    .map_err(|error| ExportError::Xlsx(format!("{:?}", error)))?;
+            }
+            "dataBar" => {
+                let conditional = if let Some(fill) = rule
+                    .style
+                    .as_ref()
+                    .and_then(|style| style.bg_color.as_deref())
+                    .and_then(color)
+                {
+                    ConditionalFormatDataBar::new().set_fill_color(fill)
+                } else {
+                    ConditionalFormatDataBar::new()
+                };
+                worksheet
+                    .add_conditional_format(first_row, first_col, last_row, last_col, &conditional)
+                    .map_err(|error| ExportError::Xlsx(format!("{:?}", error)))?;
+            }
+            "colorScale" => {
+                let colors = rule
+                    .scale_colors
+                    .iter()
+                    .filter_map(|value| color(value))
+                    .collect::<Vec<_>>();
+                if colors.len() >= 3 {
+                    let conditional = ConditionalFormat3ColorScale::new()
+                        .set_minimum_color(colors[0])
+                        .set_midpoint_color(colors[1])
+                        .set_maximum_color(colors[2]);
+                    worksheet
+                        .add_conditional_format(
+                            first_row,
+                            first_col,
+                            last_row,
+                            last_col,
+                            &conditional,
+                        )
+                        .map_err(|error| ExportError::Xlsx(format!("{:?}", error)))?;
+                } else {
+                    let conditional = colors
+                        .first()
+                        .copied()
+                        .map(|minimum| {
+                            ConditionalFormat2ColorScale::new()
+                                .set_minimum_color(minimum)
+                                .set_maximum_color(
+                                    colors.get(1).copied().unwrap_or(Color::RGB(0x63BE7B)),
+                                )
+                        })
+                        .unwrap_or_else(ConditionalFormat2ColorScale::new);
+                    worksheet
+                        .add_conditional_format(
+                            first_row,
+                            first_col,
+                            last_row,
+                            last_col,
+                            &conditional,
+                        )
+                        .map_err(|error| ExportError::Xlsx(format!("{:?}", error)))?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn insert_sheet_charts(
@@ -508,6 +830,7 @@ pub fn export_workbook_to_xlsx(workbook: &WorkbookModel) -> Result<Vec<u8>, Expo
             }
         }
 
+        insert_sheet_conditional_formats(ws, &sheet_data.conditional_formatting)?;
         insert_sheet_charts(ws, &sheet_data.name, &sheet_data.charts)?;
     }
 
@@ -906,6 +1229,7 @@ pub fn import_workbook_from_xlsx_with_report(path: &Path) -> Result<XlsxImportRe
             sheet.row_heights = metadata.row_heights.clone();
             sheet.freeze_rows = metadata.freeze_rows;
             sheet.freeze_cols = metadata.freeze_cols;
+            sheet.conditional_formatting = metadata.conditional_formatting.clone();
             for (key, cell) in &mut sheet.cells {
                 if let Ok((row, column)) = redoc_sheet_engine::parse_key(key) {
                     cell.style = imported_style(&metadata, &excel_reference(row, column));
@@ -940,6 +1264,7 @@ pub fn import_workbook_from_xlsx_with_report(path: &Path) -> Result<XlsxImportRe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redoc_sheet_engine::ConditionalFormattingRange;
     use std::io::Read;
 
     #[test]
@@ -1205,6 +1530,49 @@ mod tests {
     }
 
     #[test]
+    fn xlsx_export_writes_conditional_format_rules() {
+        let mut workbook = WorkbookModel::new_default();
+        workbook.sheets[0]
+            .conditional_formatting
+            .push(ConditionalFormattingRule {
+                range: ConditionalFormattingRange {
+                    start_row: 1,
+                    end_row: 10,
+                    start_col: 1,
+                    end_col: 2,
+                },
+                rule_type: "greaterThan".to_string(),
+                value: Some("10".to_string()),
+                value2: None,
+                style: Some(ConditionalFormattingStyle {
+                    font_color: Some("#006100".to_string()),
+                    bg_color: Some("#C6EFCE".to_string()),
+                    bold: Some(true),
+                    italic: None,
+                }),
+                scale_colors: Vec::new(),
+            });
+        let bytes =
+            export_workbook_to_xlsx(&workbook).expect("export xlsx with conditional format");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read xlsx zip");
+        let mut sheet_xml = String::new();
+        archive
+            .by_name("xl/worksheets/sheet1.xml")
+            .expect("sheet xml")
+            .read_to_string(&mut sheet_xml)
+            .expect("read sheet xml");
+        assert!(sheet_xml.contains("conditionalFormatting"));
+        assert!(sheet_xml.contains("greaterThan"));
+        let mut styles_xml = String::new();
+        archive
+            .by_name("xl/styles.xml")
+            .expect("styles xml")
+            .read_to_string(&mut styles_xml)
+            .expect("read styles xml");
+        assert!(styles_xml.contains("006100"));
+    }
+
+    #[test]
     fn xlsx_imports_chart_anchor_and_metadata() {
         let mut workbook = WorkbookModel::new_default();
         workbook.sheets[0].cells.insert(
@@ -1262,6 +1630,47 @@ mod tests {
         assert_eq!(chart.end_row, 17);
         assert_eq!(chart.start_col, 1);
         assert_eq!(chart.end_col, 8);
+        std::fs::remove_file(path).expect("cleanup xlsx");
+    }
+
+    #[test]
+    fn xlsx_round_trip_imports_conditional_format_rules() {
+        let mut workbook = WorkbookModel::new_default();
+        workbook.sheets[0]
+            .conditional_formatting
+            .push(ConditionalFormattingRule {
+                range: ConditionalFormattingRange {
+                    start_row: 2,
+                    end_row: 5,
+                    start_col: 2,
+                    end_col: 3,
+                },
+                rule_type: "textContains".to_string(),
+                value: Some("urgent".to_string()),
+                value2: None,
+                style: None,
+                scale_colors: Vec::new(),
+            });
+        let path = std::env::temp_dir().join(format!(
+            "redoc-xlsx-cf-{}-{}.xlsx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            export_workbook_to_xlsx(&workbook).expect("export xlsx"),
+        )
+        .expect("write xlsx");
+        let imported = import_workbook_from_xlsx_with_report(&path).expect("import xlsx");
+        let rules = &imported.workbook.sheets[0].conditional_formatting;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rule_type, "textContains");
+        assert_eq!(rules[0].value.as_deref(), Some("urgent"));
+        assert_eq!(rules[0].range.start_row, 2);
+        assert_eq!(rules[0].range.end_col, 3);
         std::fs::remove_file(path).expect("cleanup xlsx");
     }
 }
