@@ -47,7 +47,7 @@ Run this checklist against a fresh profile and an existing profile before releas
 ## Presentation
 
 - [ ] Slides can be added, selected, moved, and reordered.
-- [ ] Text, shapes (rect/ellipse/star/arrow/etc.), images, tables, and charts survive save/reopen.
+- [ ] Text, shapes (rect/ellipse/star/arrow/etc.), images, tables, and charts survive save/reopen; native PPTX table parts reopen as editable tables.
 - [ ] 8-handle resize and zoom behave predictably.
 - [ ] Layout masters apply placeholder elements.
 - [ ] Align, distribute, group, and ungroup work on multi-selection.

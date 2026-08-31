@@ -4,7 +4,7 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use redoc_slide_engine::{DeckModel, ElementKind, SlideElement};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Error, ErrorKind, Read};
 use std::path::Path;
 
@@ -42,6 +42,10 @@ struct ElementBuilder {
     stroke_color: String,
     stroke_width: f64,
     image_rel: Option<String>,
+    shape_id: Option<u32>,
+    table_data: Vec<Vec<String>>,
+    table_row: Option<Vec<String>>,
+    table_cell: Option<String>,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -50,6 +54,7 @@ enum BuilderKind {
     TextOrShape,
     Connector,
     Image,
+    Table,
     UnsupportedGraphic,
 }
 
@@ -176,6 +181,54 @@ fn read_relationships(
     Ok(relationships)
 }
 
+/// Return shape ids targeted by the supported native fade entrance effect.
+///
+/// PresentationML timing trees are intentionally parsed independently from the
+/// drawing tree.  This keeps malformed/unknown timeline nodes non-fatal while
+/// preserving the one animation primitive the editor can represent.
+fn animated_shape_ids(xml: &[u8]) -> HashSet<u32> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buffer = Vec::new();
+    let mut fade_effect_depth = 0usize;
+    let mut ids = HashSet::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => {
+                let name = local_name(event.name().as_ref()).to_vec();
+                if name.as_slice() == b"animEffect"
+                    && attribute(&event, b"transition").as_deref() == Some("in")
+                    && attribute(&event, b"filter").as_deref() == Some("fade")
+                {
+                    fade_effect_depth = fade_effect_depth.saturating_add(1);
+                } else if name.as_slice() == b"spTgt" && fade_effect_depth > 0 {
+                    if let Some(id) = attribute(&event, b"spid").and_then(|value| value.parse().ok())
+                    {
+                        ids.insert(id);
+                    }
+                }
+            }
+            Ok(Event::Empty(event)) => {
+                let name = local_name(event.name().as_ref()).to_vec();
+                if name.as_slice() == b"spTgt" && fade_effect_depth > 0 {
+                    if let Some(id) = attribute(&event, b"spid").and_then(|value| value.parse().ok())
+                    {
+                        ids.insert(id);
+                    }
+                }
+            }
+            Ok(Event::End(event)) => {
+                if local_name(event.name().as_ref()) == b"animEffect" && fade_effect_depth > 0 {
+                    fade_effect_depth -= 1;
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+        buffer.clear();
+    }
+    ids
+}
+
 fn parse_slide(
     xml: &[u8],
     slide_number: usize,
@@ -193,6 +246,7 @@ fn parse_slide(
     let mut color_context = None::<&'static str>;
     let mut elements = Vec::new();
     let mut z_index = 0i32;
+    let animated_ids = animated_shape_ids(xml);
 
     loop {
         match reader.read_event_into(&mut buffer) {
@@ -222,14 +276,47 @@ fn parse_slide(
                             stroke_width: 1.0,
                             ..Default::default()
                         });
-                        warnings.push(format!(
-                            "slide {slide_number}: unsupported table or chart preserved as a placeholder"
-                        ));
+                    }
+                    b"graphicData" => {
+                        if let Some(element) = current.as_mut() {
+                            if attribute(&event, b"uri").as_deref()
+                                == Some("http://schemas.openxmlformats.org/drawingml/2006/table")
+                            {
+                                element.kind = BuilderKind::Table;
+                            }
+                        }
+                    }
+                    b"tbl" => {
+                        if let Some(element) = current.as_mut() {
+                            if element.kind == BuilderKind::Table {
+                                element.table_data.clear();
+                            }
+                        }
+                    }
+                    b"tr" => {
+                        if let Some(element) = current.as_mut() {
+                            if element.kind == BuilderKind::Table {
+                                element.table_row = Some(Vec::new());
+                            }
+                        }
+                    }
+                    b"tc" => {
+                        if let Some(element) = current.as_mut() {
+                            if element.kind == BuilderKind::Table {
+                                element.table_cell = Some(String::new());
+                            }
+                        }
                     }
                     b"off" => {
                         if let Some(element) = current.as_mut() {
                             element.x = parse_emu(attribute(&event, b"x").as_deref());
                             element.y = parse_emu(attribute(&event, b"y").as_deref());
+                        }
+                    }
+                    b"cNvPr" => {
+                        if let Some(element) = current.as_mut() {
+                            element.shape_id = attribute(&event, b"id")
+                                .and_then(|value| value.parse::<u32>().ok());
                         }
                     }
                     b"ext" => {
@@ -317,7 +404,12 @@ fn parse_slide(
             }
             Ok(Event::Empty(event)) => {
                 let name = local_name(event.name().as_ref()).to_vec();
-                if name.as_slice() == b"off" {
+                if name.as_slice() == b"cNvPr" {
+                    if let Some(element) = current.as_mut() {
+                        element.shape_id = attribute(&event, b"id")
+                            .and_then(|value| value.parse::<u32>().ok());
+                    }
+                } else if name.as_slice() == b"off" {
                     if let Some(element) = current.as_mut() {
                         element.x = parse_emu(attribute(&event, b"x").as_deref());
                         element.y = parse_emu(attribute(&event, b"y").as_deref());
@@ -357,7 +449,13 @@ fn parse_slide(
                     let text = event
                         .unescape()
                         .map_err(|error| invalid_data(format!("invalid slide text: {error}")))?;
-                    element.text.push_str(&text);
+                    if element.kind == BuilderKind::Table && element.table_cell.is_some() {
+                        if let Some(cell) = element.table_cell.as_mut() {
+                            cell.push_str(&text);
+                        }
+                    } else {
+                        element.text.push_str(&text);
+                    }
                 }
             }
             Ok(Event::End(event)) => {
@@ -365,9 +463,29 @@ fn parse_slide(
                 if name.as_slice() == b"t" {
                     in_text = false;
                 }
+                if name.as_slice() == b"tc" {
+                    if let Some(element) = current.as_mut() {
+                        if element.kind == BuilderKind::Table {
+                            if let Some(cell) = element.table_cell.take() {
+                                if let Some(row) = element.table_row.as_mut() {
+                                    row.push(cell);
+                                }
+                            }
+                        }
+                    }
+                }
+                if name.as_slice() == b"tr" {
+                    if let Some(element) = current.as_mut() {
+                        if element.kind == BuilderKind::Table {
+                            if let Some(row) = element.table_row.take() {
+                                element.table_data.push(row);
+                            }
+                        }
+                    }
+                }
                 if name.as_slice() == b"p" {
                     if let Some(element) = current.as_mut() {
-                        if !element.text.ends_with('\n') {
+                        if element.kind != BuilderKind::Table && !element.text.ends_with('\n') {
                             element.text.push('\n');
                         }
                     }
@@ -398,7 +516,14 @@ fn parse_slide(
                                                     height: element.height,
                                                     rotation: element.rotation,
                                                     z_index,
-                                                    entrance: "none".to_string(),
+                                                    entrance: if element
+                                                        .shape_id
+                                                        .is_some_and(|id| animated_ids.contains(&id))
+                                                    {
+                                                        "fade".to_string()
+                                                    } else {
+                                                        "none".to_string()
+                                                    },
                                                     kind: ElementKind::Image {
                                                         asset_hash: format!(
                                                             "data:{mime};base64,{}",
@@ -432,7 +557,14 @@ fn parse_slide(
                                 height: element.height,
                                 rotation: element.rotation,
                                 z_index,
-                                entrance: "none".to_string(),
+                                entrance: if element
+                                    .shape_id
+                                    .is_some_and(|id| animated_ids.contains(&id))
+                                {
+                                    "fade".to_string()
+                                } else {
+                                    "none".to_string()
+                                },
                                 kind: ElementKind::Shape {
                                     shape_type: shape_type.to_string(),
                                     fill_color: element.fill_color,
@@ -442,7 +574,33 @@ fn parse_slide(
                                 },
                             });
                             z_index += 1;
+                        } else if element.kind == BuilderKind::Table {
+                            let data = element.table_data;
+                            let rows = data.len();
+                            let cols = data.iter().map(Vec::len).max().unwrap_or(0);
+                            elements.push(SlideElement {
+                                id: format!("pptx-{slide_number}-{z_index}"),
+                                x: element.x,
+                                y: element.y,
+                                width: element.width,
+                                height: element.height,
+                                rotation: element.rotation,
+                                z_index,
+                                entrance: if element
+                                    .shape_id
+                                    .is_some_and(|id| animated_ids.contains(&id))
+                                {
+                                    "fade".to_string()
+                                } else {
+                                    "none".to_string()
+                                },
+                                kind: ElementKind::Table { rows, cols, data },
+                            });
+                            z_index += 1;
                         } else if element.kind == BuilderKind::UnsupportedGraphic {
+                            warnings.push(format!(
+                                "slide {slide_number}: unsupported table or chart preserved as a placeholder"
+                            ));
                             let text = element.text.trim().to_string();
                             elements.push(SlideElement {
                                 id: format!("pptx-{slide_number}-{z_index}"),
@@ -452,7 +610,14 @@ fn parse_slide(
                                 height: element.height.max(80.0),
                                 rotation: element.rotation,
                                 z_index,
-                                entrance: "none".to_string(),
+                                entrance: if element
+                                    .shape_id
+                                    .is_some_and(|id| animated_ids.contains(&id))
+                                {
+                                    "fade".to_string()
+                                } else {
+                                    "none".to_string()
+                                },
                                 kind: ElementKind::Shape {
                                     shape_type: "rect".to_string(),
                                     fill_color: element.fill_color,
@@ -483,7 +648,14 @@ fn parse_slide(
                                     height: element.height,
                                     rotation: element.rotation,
                                     z_index,
-                                    entrance: "none".to_string(),
+                                    entrance: if element
+                                        .shape_id
+                                        .is_some_and(|id| animated_ids.contains(&id))
+                                    {
+                                        "fade".to_string()
+                                    } else {
+                                        "none".to_string()
+                                    },
                                     kind: ElementKind::Text {
                                         text,
                                         font_size: element.font_size.max(1.0),
@@ -517,7 +689,14 @@ fn parse_slide(
                                     height: element.height,
                                     rotation: element.rotation,
                                     z_index,
-                                    entrance: "none".to_string(),
+                                    entrance: if element
+                                        .shape_id
+                                        .is_some_and(|id| animated_ids.contains(&id))
+                                    {
+                                        "fade".to_string()
+                                    } else {
+                                        "none".to_string()
+                                    },
                                     kind: ElementKind::Shape {
                                         shape_type: element.shape_type,
                                         fill_color: if element.fill_color.is_empty() {
@@ -715,6 +894,7 @@ mod tests {
                 bullets: false,
             },
         });
+        source.slides[0].elements[0].entrance = "fade".to_string();
         source.slides[0].elements.push(SlideElement {
             id: "shape".to_string(),
             x: 40.0,
@@ -759,6 +939,10 @@ mod tests {
         assert!(result.deck.slides[0]
             .elements
             .iter()
+            .any(|element| element.entrance == "fade"));
+        assert!(result.deck.slides[0]
+            .elements
+            .iter()
             .any(|element| matches!(
                 &element.kind,
                 ElementKind::Text { text, bold, .. } if text == "Imported title" && *bold
@@ -771,6 +955,71 @@ mod tests {
             &element.kind,
             ElementKind::Image { asset_hash, mime } if asset_hash.starts_with("data:image/png;base64,") && mime == "image/png"
         )));
+    }
+
+    #[test]
+    fn round_trips_native_pptx_tables() {
+        let mut source = DeckModel::new_default();
+        source.slides[0].elements.clear();
+        source.slides[0].elements.push(SlideElement {
+            id: "table".to_string(),
+            x: 40.0,
+            y: 80.0,
+            width: 360.0,
+            height: 120.0,
+            rotation: 0.0,
+            z_index: 1,
+            entrance: "none".to_string(),
+            kind: ElementKind::Table {
+                rows: 2,
+                cols: 2,
+                data: vec![
+                    vec!["Name".to_string(), "Value".to_string()],
+                    vec!["A & B".to_string(), "42".to_string()],
+                ],
+            },
+        });
+
+        let bytes = crate::pptx::export_deck_to_pptx(&source).expect("export table deck");
+        let slide_xml = {
+            let reader = std::io::Cursor::new(bytes.clone());
+            let mut archive = zip::ZipArchive::new(reader).expect("read exported archive");
+            let mut slide = String::new();
+            archive
+                .by_name("ppt/slides/slide1.xml")
+                .expect("slide part")
+                .read_to_string(&mut slide)
+                .expect("read slide part");
+            slide
+        };
+        assert!(slide_xml.contains("graphicFrame"));
+        assert!(slide_xml.contains("drawingml/2006/table"));
+        assert!(slide_xml.contains("A &amp; B"));
+
+        let path = std::env::temp_dir().join(format!(
+            "redoc-pptx-table-roundtrip-{}.pptx",
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).expect("write table deck");
+        let result = import_deck_from_pptx_with_report(&path).expect("import table deck");
+        let _ = std::fs::remove_file(&path);
+
+        let imported = result.deck.slides[0]
+            .elements
+            .iter()
+            .find_map(|element| match &element.kind {
+                ElementKind::Table { rows, cols, data } => Some((*rows, *cols, data.clone())),
+                _ => None,
+            })
+            .expect("native table element");
+        assert_eq!(imported.0, 2);
+        assert_eq!(imported.1, 2);
+        assert_eq!(imported.2[0], vec!["Name", "Value"]);
+        assert_eq!(imported.2[1], vec!["A & B", "42"]);
+        assert!(!result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unsupported table")));
     }
 
     #[test]

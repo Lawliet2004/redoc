@@ -163,10 +163,6 @@ fn pptx_warnings(deck: &DeckModel) -> Vec<String> {
                 );
             }
             match &element.kind {
-                ElementKind::Table { .. } => push_once(
-                    &mut warnings,
-                    "PPTX: tables export as editable text-grid fallback shapes, not native table parts.",
-                ),
                 ElementKind::Chart { .. } => push_once(
                     &mut warnings,
                     "PPTX: charts export as editable summary shapes, not native chart parts.",

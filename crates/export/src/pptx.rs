@@ -131,6 +131,7 @@ fn shape_xml(
             fill_color,
             stroke_color,
             stroke_width,
+            text: _,
         } => {
             let stroke_color_clean = stroke_color.trim_start_matches('#');
             let stroke_w_emu = (stroke_width.max(0.0) * 12_700.0) as u64;
@@ -206,35 +207,51 @@ fn shape_xml(
             }
         },
         ElementKind::Table { rows, cols, data } => {
-            let mut lines: Vec<String> = data
-                .iter()
-                .take(*rows)
-                .map(|row| {
-                    row.iter()
-                        .take(*cols)
-                        .map(|c| xml_escape(c))
-                        .collect::<Vec<_>>()
-                        .join(" | ")
-                })
-                .collect();
-            if lines.is_empty() {
-                lines.push(format!("Table {}×{}", rows, cols));
-            }
-            let body = lines
-                .into_iter()
-                .map(|line| {
-                    format!(
-                        r#"<a:p><a:r><a:rPr sz="1000"/><a:t>{}</a:t></a:r></a:p>"#,
-                        line
-                    )
+            let rows = (*rows).max(1);
+            let cols = (*cols).max(1);
+            let row_height = emu(element.height / rows as f64);
+            let col_width = emu(element.width / cols as f64);
+            let xfrm_inner = format!(
+                r#"<a:off x="{}" y="{}"/><a:ext cx="{}" cy="{}"/>"#,
+                emu(element.x),
+                emu(element.y),
+                emu(element.width),
+                emu(element.height)
+            );
+            let grid = (0..cols)
+                .map(|_| format!(r#"<a:gridCol w="{col_width}"/>"#))
+                .collect::<String>();
+            let rows_xml = (0..rows)
+                .map(|row_index| {
+                    let cells_xml = (0..cols)
+                        .map(|col_index| {
+                            let value = data
+                                .get(row_index)
+                                .and_then(|row| row.get(col_index))
+                                .map(String::as_str)
+                                .unwrap_or_default();
+                            format!(
+                                r#"<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="1000"/><a:t>{}</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>"#,
+                                xml_escape(value)
+                            )
+                        })
+                        .collect::<String>();
+                    format!(r#"<a:tr h="{row_height}">{cells_xml}</a:tr>"#)
                 })
                 .collect::<String>();
             format!(
-                r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Table {id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>{xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="CBD5E1"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>{body}</p:txBody></p:sp>"#
+                r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{id}" name="Table {id}"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm>{xfrm_inner}</p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>{{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}}</a:tableStyleId></a:tblPr><a:tblGrid>{grid}</a:tblGrid>{rows_xml}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
             )
         }
-        ElementKind::Chart { chart_type, data, labels } => {
-            let title = labels.first().map(|s| xml_escape(s)).unwrap_or_else(|| "Chart".into());
+        ElementKind::Chart {
+            chart_type,
+            data,
+            labels,
+        } => {
+            let title = labels
+                .first()
+                .map(|s| xml_escape(s))
+                .unwrap_or_else(|| "Chart".into());
             let summary = data
                 .iter()
                 .enumerate()
@@ -298,6 +315,41 @@ fn transition_xml(transition: &str) -> String {
     }
 }
 
+/// Emit the supported entrance-animation subset as native PresentationML timing.
+///
+/// The editor currently supports a fade entrance.  PowerPoint identifies targets
+/// by the shape's `cNvPr/@id`; the shape ids below intentionally mirror the ids
+/// emitted by `shape_xml` (element index + 2).  We use a deterministic sequence
+/// so exported files play in document order and remain stable for round trips.
+fn animation_timing_xml(slide: &redoc_slide_engine::Slide) -> String {
+    let animated: Vec<u32> = slide
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, element)| element.entrance.eq_ignore_ascii_case("fade"))
+        .map(|(index, _)| (index + 2) as u32)
+        .collect();
+    if animated.is_empty() {
+        return String::new();
+    }
+
+    let children = animated
+        .iter()
+        .enumerate()
+        .map(|(index, shape_id)| {
+            let sequence_id = 10 + (index as u32 * 3);
+            let behavior_id = sequence_id + 1;
+            format!(
+                r#"<p:par><p:cTn id="{sequence_id}" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:animEffect transition="in" filter="fade"><p:cBhvr><p:cTn id="{behavior_id}" dur="350" fill="hold"/><p:tgtEl><p:spTgt spid="{shape_id}"/></p:tgtEl></p:cBhvr></p:animEffect></p:childTnLst></p:cTn></p:par>"#
+            )
+        })
+        .collect::<String>();
+
+    format!(
+        r#"<p:timing><p:tnLst><p:par><p:cTn id="1" dur="indefinite" nodeType="tmRoot"><p:childTnLst><p:seq concurrent="1" nextAc="seek"><p:cTn id="2" dur="indefinite" nodeType="mainSeq"><p:childTnLst>{children}</p:childTnLst></p:cTn></p:seq></p:childTnLst></p:cTn></p:par></p:tnLst></p:timing>"#
+    )
+}
+
 fn slide_xml(slide: &redoc_slide_engine::Slide) -> String {
     let mut shapes = String::new();
     let mut image_index = 0usize;
@@ -315,8 +367,9 @@ fn slide_xml(slide: &redoc_slide_engine::Slide) -> String {
         ));
     }
     let transition = transition_xml(&slide.transition);
+    let timing = animation_timing_xml(slide);
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>{transition}</p:sld>"#
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>{transition}{timing}</p:sld>"#
     )
 }
 
@@ -552,6 +605,23 @@ mod tests {
     }
 
     #[test]
+    fn writes_native_fade_entrance_timing() {
+        let mut deck = DeckModel::new_default();
+        deck.slides[0].elements[0].entrance = "fade".to_string();
+        let bytes = export_deck_to_pptx(&deck).expect("export animated pptx");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read pptx zip");
+        let mut xml = String::new();
+        archive
+            .by_name("ppt/slides/slide1.xml")
+            .expect("slide1")
+            .read_to_string(&mut xml)
+            .expect("read slide xml");
+        assert!(xml.contains("<p:timing>"));
+        assert!(xml.contains("<p:animEffect transition=\"in\" filter=\"fade\">"));
+        assert!(xml.contains("<p:spTgt spid=\"2\"/>"));
+    }
+
+    #[test]
     fn writes_rotation_and_speaker_notes() {
         let mut deck = DeckModel::new_default();
         deck.slides[0].notes = "Remember to pause here.".to_string();
@@ -684,6 +754,7 @@ mod tests {
                     fill_color: "".to_string(),
                     stroke_color: "#00FF00".to_string(),
                     stroke_width: 2.0,
+                    text: String::new(),
                 },
             });
         deck.slides[0]
@@ -702,6 +773,7 @@ mod tests {
                     fill_color: "".to_string(),
                     stroke_color: "#FF0000".to_string(),
                     stroke_width: 3.0,
+                    text: String::new(),
                 },
             });
 
