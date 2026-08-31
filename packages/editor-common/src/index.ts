@@ -10,3 +10,4 @@ export * from "./Ruler";
 export * from "./FindBar";
 export * from "./ShortcutCheatsheet";
 export * from "./documentSessions";
+export * from "./fileRouting";

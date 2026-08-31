@@ -20,8 +20,8 @@
       "id": "shell.office-file-routing",
       "area": "shared",
       "title": "Route DOCX, XLSX, and PPTX files to the matching editor",
-      "status": "partial",
-      "evidence": ["apps/desktop/src/App.tsx"],
+      "status": "verified",
+      "evidence": ["apps/desktop/src/App.tsx", "apps/desktop/src/shell/fileRouting.ts", "apps/desktop/src/shell/fileRouting.test.ts"],
       "targetPhase": "office-sessions"
     },
     {

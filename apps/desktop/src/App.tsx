@@ -12,6 +12,7 @@ import {
   chooseAdjacentSession,
   removeDocumentSession,
   upsertDocumentSession,
+  supportedFileType,
   type DocumentSession,
 } from "@redoc/editor-common";
 import { commands, AppSettings, RecentEntry, RecoveredDoc } from "@redoc/api-client";
@@ -541,12 +542,12 @@ export function App() {
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         const path = (file as File & { path?: string }).path || file.name;
-        const ext = path.split(".").pop()?.toLowerCase();
-        if (ext && ["redoc", "csv", "docx", "xlsx", "pptx"].includes(ext)) {
+        const fileType = supportedFileType(path);
+        if (fileType) {
           void openFilePath(path);
           break;
-        } else if (ext) {
-          showToast(`Unsupported file format: .${ext}. Redoc supports .redoc, .csv, .docx, .xlsx, and .pptx`, "error");
+        } else {
+          showToast("Unsupported file format. Redoc supports .redoc, .csv, .docx, .xlsx, and .pptx", "error");
         }
       }
     };
@@ -560,12 +561,12 @@ export function App() {
           if (event.payload.type === "drop") {
             const paths = event.payload.paths || [];
             for (const path of paths) {
-              const ext = path.split(".").pop()?.toLowerCase();
-              if (ext && ["redoc", "csv", "docx", "xlsx", "pptx"].includes(ext)) {
+              const fileType = supportedFileType(path);
+              if (fileType) {
                 void openFilePath(path);
                 break;
-              } else if (ext) {
-                showToast(`Unsupported file format: .${ext}. Redoc supports .redoc, .csv, .docx, .xlsx, and .pptx`, "error");
+              } else {
+                showToast("Unsupported file format. Redoc supports .redoc, .csv, .docx, .xlsx, and .pptx", "error");
               }
             }
           }
@@ -692,8 +693,8 @@ export function App() {
     if (!confirmDiscardIfDirty()) return;
     cancelAutosave();
     try {
-      const extension = path.split(".").pop()?.toLowerCase();
-      if (extension === "pptx") {
+      const fileType = supportedFileType(path);
+      if (fileType === "pptx") {
         const imported = await commands.importPptxFile(path);
         const title = path.split(/[\\/]/).pop()?.replace(/\.pptx$/i, "") || "Imported presentation";
         const buffer: ModeBuffer = { content: imported.deck, title, filePath: null, docId: null, saveState: "Dirty" };
@@ -704,8 +705,8 @@ export function App() {
         showToast("Imported PPTX file; save as .redoc to continue editing", "success");
         return;
       }
-      if (extension === "csv" || extension === "xlsx") {
-        if (extension === "csv") {
+      if (fileType === "csv" || fileType === "xlsx") {
+        if (fileType === "csv") {
           const workbook = await requestCsvImport(path);
           if (!workbook) return;
           const title = path.split(/[\\/]/).pop()?.replace(/\.csv$/i, "") || "Imported spreadsheet";
@@ -726,7 +727,7 @@ export function App() {
         showToast("Imported XLSX file", "success");
         return;
       }
-      if (extension === "docx") {
+      if (fileType === "docx") {
         const imported = await commands.importDocxFile(path);
         const title = path.split(/[\\/]/).pop()?.replace(/\.docx$/i, "") || "Imported document";
         const buffer: ModeBuffer = { content: imported.document, title, filePath: null, docId: null, saveState: "Dirty" };
@@ -906,11 +907,11 @@ export function App() {
           }}
           onDropFile={(file) => {
             const path = (file as any).path || file.name;
-            const ext = path.split(".").pop()?.toLowerCase();
-            if (ext && ["redoc", "csv", "docx", "xlsx", "pptx"].includes(ext)) {
+            const fileType = supportedFileType(path);
+            if (fileType) {
               void openFilePath(path);
-            } else if (ext) {
-              showToast(`Unsupported file format: .${ext}. Redoc supports .redoc, .csv, .docx, .xlsx, and .pptx`, "error");
+            } else {
+              showToast("Unsupported file format. Redoc supports .redoc, .csv, .docx, .xlsx, and .pptx", "error");
             }
           }}
         />
