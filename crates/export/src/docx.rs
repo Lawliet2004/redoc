@@ -14,6 +14,26 @@ pub struct DocxImportResult {
     pub warnings: Vec<String>,
 }
 
+const MAX_DOCX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_DOCX_ARCHIVE_ENTRIES: usize = 10_000;
+const MAX_DOCX_XML_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_DOCX_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_DOCX_TOTAL_MEDIA_BYTES: u64 = 256 * 1024 * 1024;
+
+fn read_docx_xml(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Result<String, ExportError> {
+    let mut entry = archive
+        .by_name(name)
+        .map_err(|error| ExportError::Docx(error.to_string()))?;
+    if entry.size() > MAX_DOCX_XML_BYTES {
+        return Err(ExportError::Docx(format!(
+            "DOCX XML entry {name} exceeds the {MAX_DOCX_XML_BYTES}-byte safety limit"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut bytes)?;
+    String::from_utf8(bytes).map_err(|error| ExportError::Docx(error.to_string()))
+}
+
 fn css_hex_to_word_highlight(color: &str) -> String {
     let c = color.trim().to_lowercase();
     if !c.starts_with('#') {
@@ -529,24 +549,38 @@ pub fn export_doc_to_docx(
 }
 
 pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, ExportError> {
+    let file_size = std::fs::metadata(path)?.len();
+    if file_size > MAX_DOCX_FILE_BYTES {
+        return Err(ExportError::Docx(format!(
+            "DOCX file exceeds the {MAX_DOCX_FILE_BYTES}-byte safety limit"
+        )));
+    }
     let file = std::fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(file)?;
-    let mut document = String::new();
-    archive
-        .by_name("word/document.xml")
-        .map_err(|error| ExportError::Docx(error.to_string()))?
-        .read_to_string(&mut document)?;
+    if archive.len() > MAX_DOCX_ARCHIVE_ENTRIES {
+        return Err(ExportError::Docx(format!(
+            "DOCX archive has too many entries (maximum {MAX_DOCX_ARCHIVE_ENTRIES})"
+        )));
+    }
+    let document = read_docx_xml(&mut archive, "word/document.xml")?;
 
     let mut image_data: HashMap<String, String> = HashMap::new();
     let mut hyperlink_data: HashMap<String, String> = HashMap::new();
+    let mut warnings = Vec::new();
     let relationships_xml = match archive.by_name("word/_rels/document.xml.rels") {
         Ok(mut relationships) => {
-            let mut xml = String::new();
-            relationships.read_to_string(&mut xml)?;
-            Some(xml)
+            if relationships.size() > MAX_DOCX_XML_BYTES {
+                return Err(ExportError::Docx(format!(
+                    "DOCX relationships entry exceeds the {MAX_DOCX_XML_BYTES}-byte safety limit"
+                )));
+            }
+            let mut bytes = Vec::with_capacity(relationships.size() as usize);
+            relationships.read_to_end(&mut bytes)?;
+            Some(String::from_utf8(bytes).map_err(|error| ExportError::Docx(error.to_string()))?)
         }
         Err(_) => None,
     };
+    let mut total_media_bytes = 0_u64;
     if let Some(xml) = relationships_xml {
         let mut rel_reader = Reader::from_str(&xml);
         let mut rel_buffer = Vec::new();
@@ -584,8 +618,19 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                             target.trim_start_matches("../").trim_start_matches('/')
                         );
                         if let Ok(mut media) = archive.by_name(&package_path) {
+                            let media_size = media.size();
+                            if media_size > MAX_DOCX_MEDIA_BYTES
+                                || total_media_bytes.saturating_add(media_size)
+                                    > MAX_DOCX_TOTAL_MEDIA_BYTES
+                            {
+                                warnings.push(format!(
+                                    "Skipped DOCX media entry {package_path}: size exceeds import limits"
+                                ));
+                                continue;
+                            }
                             let mut bytes = Vec::new();
                             media.read_to_end(&mut bytes)?;
+                            total_media_bytes = total_media_bytes.saturating_add(bytes.len() as u64);
                             let mime = match target
                                 .rsplit('.')
                                 .next()
@@ -662,7 +707,6 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
     let mut pending_image: Option<Value> = None;
     let mut active_hyperlink: Option<String> = None;
     let mut open_list: Option<OpenList> = None;
-    let mut warnings = Vec::new();
     let mut buffer = Vec::new();
 
     loop {
