@@ -20,7 +20,10 @@ const MAX_DOCX_XML_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DOCX_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_DOCX_TOTAL_MEDIA_BYTES: u64 = 256 * 1024 * 1024;
 
-fn read_docx_xml(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Result<String, ExportError> {
+fn read_docx_xml(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    name: &str,
+) -> Result<String, ExportError> {
     let mut entry = archive
         .by_name(name)
         .map_err(|error| ExportError::Docx(error.to_string()))?;
@@ -395,13 +398,254 @@ fn add_runs_to_paragraph(
     p
 }
 
+#[derive(Clone)]
+struct ExportCommentAnchor {
+    id: usize,
+    from: usize,
+    to: usize,
+    comment: Comment,
+}
+
+#[derive(Clone, Default)]
+struct ParagraphCommentLayout {
+    start: usize,
+    anchors: Vec<ExportCommentAnchor>,
+}
+
+fn utf16_len(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+
+fn utf16_byte_offset(value: &str, units: usize) -> usize {
+    if units == 0 {
+        return 0;
+    }
+    let mut consumed = 0usize;
+    for (offset, character) in value.char_indices() {
+        let width = character.len_utf16();
+        if consumed.saturating_add(width) > units {
+            return offset;
+        }
+        consumed = consumed.saturating_add(width);
+        if consumed == units {
+            return offset + character.len_utf8();
+        }
+    }
+    value.len()
+}
+
+fn doc_node_size(node: &Value) -> usize {
+    if let Some(text) = node.get("text").and_then(Value::as_str) {
+        return utf16_len(text);
+    }
+    let Some(content) = node.get("content").and_then(Value::as_array) else {
+        return 1;
+    };
+    let content_size = content.iter().map(doc_node_size).sum::<usize>();
+    if node.get("type").and_then(Value::as_str) == Some("doc") {
+        content_size
+    } else {
+        content_size.saturating_add(2)
+    }
+}
+
+fn collect_text_spans(node: &Value, start: usize, spans: &mut Vec<(usize, usize)>) {
+    if let Some(text) = node.get("text").and_then(Value::as_str) {
+        let end = start.saturating_add(utf16_len(text));
+        if end > start {
+            spans.push((start, end));
+        }
+        return;
+    }
+    let Some(content) = node.get("content").and_then(Value::as_array) else {
+        return;
+    };
+    let mut child_start = if node.get("type").and_then(Value::as_str) == Some("doc") {
+        start
+    } else {
+        start.saturating_add(1)
+    };
+    for child in content {
+        collect_text_spans(child, child_start, spans);
+        child_start = child_start.saturating_add(doc_node_size(child));
+    }
+}
+
+fn collect_paragraph_comment_layouts(
+    node: &Value,
+    start: usize,
+    comments: &[ExportCommentAnchor],
+    assigned: &mut std::collections::HashSet<usize>,
+    layouts: &mut Vec<ParagraphCommentLayout>,
+) {
+    let node_type = node.get("type").and_then(Value::as_str);
+    if matches!(
+        node_type,
+        Some("paragraph" | "heading" | "blockquote" | "code_block")
+    ) {
+        let mut spans = Vec::new();
+        collect_text_spans(node, start, &mut spans);
+        if let (Some((text_start, _)), Some((_, text_end))) = (spans.first(), spans.last()) {
+            let mut anchors = Vec::new();
+            for anchor in comments {
+                if assigned.contains(&anchor.id)
+                    || anchor.to <= *text_start
+                    || anchor.from >= *text_end
+                {
+                    continue;
+                }
+                let from = anchor.from.max(*text_start);
+                let to = anchor.to.min(*text_end);
+                if from < to {
+                    let mut mapped = anchor.clone();
+                    mapped.from = from;
+                    mapped.to = to;
+                    anchors.push(mapped);
+                    assigned.insert(anchor.id);
+                }
+            }
+            anchors.sort_by_key(|anchor| (anchor.from, anchor.to, anchor.id));
+            layouts.push(ParagraphCommentLayout { start, anchors });
+        } else {
+            layouts.push(ParagraphCommentLayout {
+                start,
+                anchors: Vec::new(),
+            });
+        }
+    }
+
+    let Some(content) = node.get("content").and_then(Value::as_array) else {
+        return;
+    };
+    let mut child_start = if node_type == Some("doc") {
+        start
+    } else {
+        start.saturating_add(1)
+    };
+    for child in content {
+        collect_paragraph_comment_layouts(child, child_start, comments, assigned, layouts);
+        child_start = child_start.saturating_add(doc_node_size(child));
+    }
+}
+
+fn export_comment_anchors(doc_json: &Value) -> Vec<ExportCommentAnchor> {
+    let Some(comments) = doc_json.get("comments").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    comments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            let from = value.get("from").and_then(Value::as_u64)? as usize;
+            let to = value.get("to").and_then(Value::as_u64)? as usize;
+            if from >= to {
+                return None;
+            }
+            let author = value
+                .get("author")
+                .and_then(Value::as_str)
+                .unwrap_or("Unknown");
+            let text = value.get("text").and_then(Value::as_str).unwrap_or("");
+            let date = value
+                .get("createdAt")
+                .and_then(Value::as_str)
+                .unwrap_or("1970-01-01T00:00:00Z");
+            Some(ExportCommentAnchor {
+                id: index.saturating_add(1),
+                from,
+                to,
+                comment: Comment::new(index.saturating_add(1))
+                    .author(author)
+                    .date(date)
+                    .add_paragraph(Paragraph::new().add_run(Run::new().add_text(text))),
+            })
+        })
+        .collect()
+}
+
+fn add_runs_to_paragraph_with_comments(
+    mut paragraph: Paragraph,
+    child: &Value,
+    child_start: usize,
+    anchors: &[ExportCommentAnchor],
+    started: &mut std::collections::HashSet<usize>,
+    override_font: Option<&str>,
+) -> Paragraph {
+    let Some(text) = child.get("text").and_then(Value::as_str) else {
+        return add_runs_to_paragraph(paragraph, child, override_font);
+    };
+    let child_end = child_start.saturating_add(utf16_len(text));
+    for anchor in anchors {
+        if !started.contains(&anchor.id) && anchor.from <= child_start && anchor.to > child_start {
+            paragraph = paragraph.add_comment_start(anchor.comment.clone());
+            started.insert(anchor.id);
+        }
+    }
+    let mut boundaries = vec![child_start, child_end];
+    for anchor in anchors {
+        if anchor.from > child_start && anchor.from < child_end {
+            boundaries.push(anchor.from);
+        }
+        if anchor.to > child_start && anchor.to < child_end {
+            boundaries.push(anchor.to);
+        }
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    for window in boundaries.windows(2) {
+        let segment_start = window[0];
+        let segment_end = window[1];
+        for anchor in anchors {
+            if !started.contains(&anchor.id)
+                && anchor.from <= segment_start
+                && anchor.to > segment_start
+            {
+                paragraph = paragraph.add_comment_start(anchor.comment.clone());
+                started.insert(anchor.id);
+            }
+        }
+        if segment_end > segment_start {
+            let local_start = segment_start.saturating_sub(child_start);
+            let local_end = segment_end.saturating_sub(child_start);
+            let byte_start = utf16_byte_offset(text, local_start);
+            let byte_end = utf16_byte_offset(text, local_end);
+            let mut segment = child.clone();
+            segment["text"] = Value::String(text[byte_start..byte_end].to_string());
+            paragraph = add_runs_to_paragraph(paragraph, &segment, override_font);
+        }
+        for anchor in anchors {
+            if anchor.to == segment_end && started.contains(&anchor.id) {
+                paragraph = paragraph.add_comment_end(anchor.id);
+            }
+        }
+    }
+    paragraph
+}
+
 pub fn export_doc_to_docx(
     doc_json: &serde_json::Value,
     _title: &str,
 ) -> Result<Vec<u8>, ExportError> {
     let mut docx = add_list_numbering(Docx::new());
+    let comment_anchors = export_comment_anchors(doc_json);
+    let mut comment_assigned = std::collections::HashSet::new();
+    let mut paragraph_layouts = Vec::new();
+    collect_paragraph_comment_layouts(
+        doc_json,
+        0,
+        &comment_anchors,
+        &mut comment_assigned,
+        &mut paragraph_layouts,
+    );
+    let mut paragraph_index = 0usize;
 
-    fn build_nodes(node: &serde_json::Value, docx: &mut Docx, list_info: Option<(u32, u32)>) {
+    fn build_nodes(
+        node: &serde_json::Value,
+        docx: &mut Docx,
+        list_info: Option<(u32, u32)>,
+        paragraph_layouts: &[ParagraphCommentLayout],
+        paragraph_index: &mut usize,
+    ) {
         let node_type = node.get("type").and_then(|t| t.as_str());
 
         if node_type == Some("table") {
@@ -442,11 +686,32 @@ pub fn export_doc_to_docx(
                             if let Some(p_nodes) = cell.get("content").and_then(|c| c.as_array()) {
                                 for p_node in p_nodes {
                                     let mut cell_p = Paragraph::new();
+                                    let layout = paragraph_layouts
+                                        .get(*paragraph_index)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    *paragraph_index = (*paragraph_index).saturating_add(1);
+                                    let mut started = std::collections::HashSet::new();
+                                    let mut child_start = layout.start.saturating_add(1);
                                     if let Some(p_content) =
                                         p_node.get("content").and_then(|c| c.as_array())
                                     {
                                         for child in p_content {
-                                            cell_p = add_runs_to_paragraph(cell_p, child, None);
+                                            cell_p = add_runs_to_paragraph_with_comments(
+                                                cell_p,
+                                                child,
+                                                child_start,
+                                                &layout.anchors,
+                                                &mut started,
+                                                None,
+                                            );
+                                            child_start =
+                                                child_start.saturating_add(doc_node_size(child));
+                                        }
+                                    }
+                                    for anchor in &layout.anchors {
+                                        if started.contains(&anchor.id) {
+                                            cell_p = cell_p.add_comment_end(anchor.id);
                                         }
                                     }
                                     tc = tc.add_paragraph(cell_p);
@@ -462,7 +727,9 @@ pub fn export_doc_to_docx(
                     rows.push(TableRow::new(cells));
                 }
             }
-            *docx = docx.clone().add_table(Table::new(rows).set_borders(TableBorders::new()));
+            *docx = docx
+                .clone()
+                .add_table(Table::new(rows).set_borders(TableBorders::new()));
             return;
         }
 
@@ -475,10 +742,30 @@ pub fn export_doc_to_docx(
 
         if node_type == Some("code_block") {
             let mut p = Paragraph::new();
+            let layout = paragraph_layouts
+                .get(*paragraph_index)
+                .cloned()
+                .unwrap_or_default();
+            *paragraph_index = (*paragraph_index).saturating_add(1);
+            let mut started = std::collections::HashSet::new();
+            let mut child_start = layout.start.saturating_add(1);
             p.property = p.property.shading(Shading::new().fill("F4F4F4"));
             if let Some(content) = node.get("content").and_then(|c| c.as_array()) {
                 for child in content {
-                    p = add_runs_to_paragraph(p, child, Some("Courier New"));
+                    p = add_runs_to_paragraph_with_comments(
+                        p,
+                        child,
+                        child_start,
+                        &layout.anchors,
+                        &mut started,
+                        Some("Courier New"),
+                    );
+                    child_start = child_start.saturating_add(doc_node_size(child));
+                }
+            }
+            for anchor in &layout.anchors {
+                if started.contains(&anchor.id) {
+                    p = p.add_comment_end(anchor.id);
                 }
             }
             *docx = docx.clone().add_paragraph(p);
@@ -489,7 +776,13 @@ pub fn export_doc_to_docx(
             let level = list_info.map(|(_, lvl)| lvl + 1).unwrap_or(0);
             if let Some(content) = node.get("content").and_then(|c| c.as_array()) {
                 for child in content {
-                    build_nodes(child, docx, Some((1, level)));
+                    build_nodes(
+                        child,
+                        docx,
+                        Some((1, level)),
+                        paragraph_layouts,
+                        paragraph_index,
+                    );
                 }
             }
             return;
@@ -499,7 +792,13 @@ pub fn export_doc_to_docx(
             let level = list_info.map(|(_, lvl)| lvl + 1).unwrap_or(0);
             if let Some(content) = node.get("content").and_then(|c| c.as_array()) {
                 for child in content {
-                    build_nodes(child, docx, Some((2, level)));
+                    build_nodes(
+                        child,
+                        docx,
+                        Some((2, level)),
+                        paragraph_layouts,
+                        paragraph_index,
+                    );
                 }
             }
             return;
@@ -508,7 +807,7 @@ pub fn export_doc_to_docx(
         if node_type == Some("list_item") {
             if let Some(content) = node.get("content").and_then(|c| c.as_array()) {
                 for child in content {
-                    build_nodes(child, docx, list_info);
+                    build_nodes(child, docx, list_info, paragraph_layouts, paragraph_index);
                 }
             }
             return;
@@ -516,6 +815,13 @@ pub fn export_doc_to_docx(
 
         if let Some("paragraph" | "heading" | "blockquote") = node_type {
             let mut p = Paragraph::new();
+            let layout = paragraph_layouts
+                .get(*paragraph_index)
+                .cloned()
+                .unwrap_or_default();
+            *paragraph_index = (*paragraph_index).saturating_add(1);
+            let mut started = std::collections::HashSet::new();
+            let mut child_start = layout.start.saturating_add(1);
 
             if let Some((num_id, level)) = list_info {
                 p = p.numbering(
@@ -559,7 +865,20 @@ pub fn export_doc_to_docx(
 
             if let Some(content) = node.get("content").and_then(|c| c.as_array()) {
                 for child in content {
-                    p = add_runs_to_paragraph(p, child, None);
+                    p = add_runs_to_paragraph_with_comments(
+                        p,
+                        child,
+                        child_start,
+                        &layout.anchors,
+                        &mut started,
+                        None,
+                    );
+                    child_start = child_start.saturating_add(doc_node_size(child));
+                }
+            }
+            for anchor in &layout.anchors {
+                if started.contains(&anchor.id) {
+                    p = p.add_comment_end(anchor.id);
                 }
             }
             *docx = docx.clone().add_paragraph(p);
@@ -568,12 +887,18 @@ pub fn export_doc_to_docx(
 
         if let Some(content) = node.get("content").and_then(|c| c.as_array()) {
             for child in content {
-                build_nodes(child, docx, list_info);
+                build_nodes(child, docx, list_info, paragraph_layouts, paragraph_index);
             }
         }
     }
 
-    build_nodes(doc_json, &mut docx, None);
+    build_nodes(
+        doc_json,
+        &mut docx,
+        None,
+        &paragraph_layouts,
+        &mut paragraph_index,
+    );
 
     let mut buf = Vec::new();
     docx.build()
@@ -664,7 +989,8 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                             }
                             let mut bytes = Vec::new();
                             media.read_to_end(&mut bytes)?;
-                            total_media_bytes = total_media_bytes.saturating_add(bytes.len() as u64);
+                            total_media_bytes =
+                                total_media_bytes.saturating_add(bytes.len() as u64);
                             let mime = match target
                                 .rsplit('.')
                                 .next()
@@ -926,9 +1252,8 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                 b"w:numId" => {
                     for attribute in event.attributes().flatten() {
                         if attribute.key.as_ref() == b"w:val" {
-                            paragraph_num_id = String::from_utf8_lossy(&attribute.value)
-                                .parse()
-                                .ok();
+                            paragraph_num_id =
+                                String::from_utf8_lossy(&attribute.value).parse().ok();
                         }
                     }
                 }
@@ -1064,10 +1389,7 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
     let raw_document = json!({ "type": "doc", "content": paragraphs });
     let document = redoc_doc_engine::prune_doc(&raw_document);
 
-    Ok(DocxImportResult {
-        document,
-        warnings,
-    })
+    Ok(DocxImportResult { document, warnings })
 }
 
 pub fn import_docx_to_doc(path: &Path) -> Result<Value, ExportError> {
@@ -1100,6 +1422,44 @@ mod tests {
             "bold"
         );
         std::fs::remove_file(path).expect("cleanup docx");
+    }
+
+    #[test]
+    fn exports_review_comments_with_native_docx_anchors() {
+        let source = json!({
+            "type": "doc",
+            "content": [{
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Hello world" }]
+            }],
+            "comments": [{
+                "id": "comment-1",
+                "author": "Reviewer",
+                "text": "Check this greeting",
+                "from": 1,
+                "to": 6,
+                "resolved": false,
+                "createdAt": "2026-08-31T00:00:00Z"
+            }]
+        });
+        let bytes = export_doc_to_docx(&source, "Commented").expect("export docx");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read docx zip");
+        let mut comments_xml = String::new();
+        archive
+            .by_name("word/comments.xml")
+            .expect("comments xml")
+            .read_to_string(&mut comments_xml)
+            .expect("read comments xml");
+        assert!(comments_xml.contains("Reviewer"));
+        assert!(comments_xml.contains("Check this greeting"));
+        let mut document_xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .expect("document xml")
+            .read_to_string(&mut document_xml)
+            .expect("read document xml");
+        assert!(document_xml.contains("commentRangeStart"));
+        assert!(document_xml.contains("commentRangeEnd"));
     }
 
     #[test]
