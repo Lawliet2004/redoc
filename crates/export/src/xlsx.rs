@@ -529,6 +529,8 @@ fn archive_has_charts(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -
 }
 
 const MAX_XLSX_XML_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_XLSX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_XLSX_ARCHIVE_ENTRIES: usize = 10_000;
 
 fn xml_local_name(name: &[u8]) -> &[u8] {
     name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
@@ -833,11 +835,25 @@ pub fn import_workbook_from_xlsx(path: &Path) -> Result<WorkbookModel, ExportErr
 }
 
 pub fn import_workbook_from_xlsx_with_report(path: &Path) -> Result<XlsxImportResult, ExportError> {
+    let file_size = std::fs::metadata(path)?.len();
+    if file_size > MAX_XLSX_FILE_BYTES {
+        return Err(ExportError::Xlsx(format!(
+            "XLSX file exceeds the {MAX_XLSX_FILE_BYTES} byte limit"
+        )));
+    }
     let mut source =
         open_workbook_auto(path).map_err(|error| ExportError::Xlsx(error.to_string()))?;
     let mut archive = std::fs::read(path)
         .ok()
         .and_then(|bytes| zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok());
+    if archive
+        .as_ref()
+        .is_some_and(|archive| archive.len() > MAX_XLSX_ARCHIVE_ENTRIES)
+    {
+        return Err(ExportError::Xlsx(format!(
+            "XLSX archive has too many entries (maximum {MAX_XLSX_ARCHIVE_ENTRIES})"
+        )));
+    }
     let mut warnings = Vec::new();
     let has_chart_parts = archive.as_mut().map(archive_has_charts).unwrap_or(false);
     let mut sheets = Vec::new();
