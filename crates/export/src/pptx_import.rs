@@ -50,6 +50,7 @@ enum BuilderKind {
     TextOrShape,
     Connector,
     Image,
+    UnsupportedGraphic,
 }
 
 fn invalid_data(message: impl Into<String>) -> ExportError {
@@ -214,7 +215,16 @@ fn parse_slide(
                         });
                     }
                     b"graphicFrame" if current.is_none() => {
-                        warnings.push(format!("slide {slide_number}: table or chart was skipped"));
+                        current = Some(ElementBuilder {
+                            kind: BuilderKind::UnsupportedGraphic,
+                            fill_color: "#fef3c7".to_string(),
+                            stroke_color: "#d97706".to_string(),
+                            stroke_width: 1.0,
+                            ..Default::default()
+                        });
+                        warnings.push(format!(
+                            "slide {slide_number}: unsupported table or chart preserved as a placeholder"
+                        ));
                     }
                     b"off" => {
                         if let Some(element) = current.as_mut() {
@@ -362,7 +372,7 @@ fn parse_slide(
                         }
                     }
                 }
-                if matches!(name.as_slice(), b"sp" | b"cxnSp" | b"pic") {
+                if matches!(name.as_slice(), b"sp" | b"cxnSp" | b"pic" | b"graphicFrame") {
                     if let Some(element) = current.take() {
                         if element.kind == BuilderKind::Image {
                             if let Some(rel_id) = element.image_rel.as_deref() {
@@ -429,6 +439,30 @@ fn parse_slide(
                                     stroke_color: element.stroke_color,
                                     stroke_width: element.stroke_width.max(0.1),
                                     text: element.text.trim_end_matches('\n').to_string(),
+                                },
+                            });
+                            z_index += 1;
+                        } else if element.kind == BuilderKind::UnsupportedGraphic {
+                            let text = element.text.trim().to_string();
+                            elements.push(SlideElement {
+                                id: format!("pptx-{slide_number}-{z_index}"),
+                                x: element.x,
+                                y: element.y,
+                                width: element.width.max(120.0),
+                                height: element.height.max(80.0),
+                                rotation: element.rotation,
+                                z_index,
+                                entrance: "none".to_string(),
+                                kind: ElementKind::Shape {
+                                    shape_type: "rect".to_string(),
+                                    fill_color: element.fill_color,
+                                    stroke_color: element.stroke_color,
+                                    stroke_width: element.stroke_width.max(0.1),
+                                    text: if text.is_empty() {
+                                        "[Unsupported table or chart]".to_string()
+                                    } else {
+                                        format!("[Unsupported graphic: {text}]")
+                                    },
                                 },
                             });
                             z_index += 1;
@@ -736,6 +770,39 @@ mod tests {
         assert!(result.deck.slides[0].elements.iter().any(|element| matches!(
             &element.kind,
             ElementKind::Image { asset_hash, mime } if asset_hash.starts_with("data:image/png;base64,") && mime == "image/png"
+        )));
+    }
+
+    #[test]
+    fn preserves_unsupported_graphic_frames_as_placeholders() {
+        let path = std::env::temp_dir().join(format!(
+            "redoc-pptx-placeholder-{}.pptx",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).expect("create empty archive");
+        let mut zip = zip::ZipWriter::new(file);
+        zip.finish().expect("finish empty archive");
+        let file = std::fs::File::open(&path).expect("open empty archive");
+        let mut archive = zip::ZipArchive::new(file).expect("read empty archive");
+        let mut warnings = Vec::new();
+        let mut media_bytes = 0;
+        let slide = parse_slide(
+            br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:graphicFrame><p:xfrm><a:off x="95250" y="190500"/><a:ext cx="381000" cy="190500"/></p:xfrm><a:graphic><a:graphicData><a:t>Imported table</a:t></a:graphicData></a:graphic></p:graphicFrame></p:sld>"#,
+            1,
+            &mut archive,
+            &HashMap::new(),
+            &mut warnings,
+            &mut media_bytes,
+        )
+        .expect("parse slide");
+        let _ = std::fs::remove_file(path);
+
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("preserved as a placeholder")));
+        assert!(slide.elements.iter().any(|element| matches!(
+            &element.kind,
+            ElementKind::Shape { text, .. } if text == "[Unsupported graphic: Imported table]"
         )));
     }
 
