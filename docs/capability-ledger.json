@@ -100,8 +100,8 @@
       "id": "sheet.formula-catalog",
       "area": "spreadsheet",
       "title": "One generated formula catalog shared by engine and UI",
-      "status": "partial",
-      "evidence": ["crates/formula/src/functions.rs", "packages/sheet-editor/src/formulaFunctions.ts"],
+      "status": "verified",
+      "evidence": ["crates/formula/src/catalog.rs", "packages/sheet-editor/src/formulaFunctions.ts", "scripts/generate-formula-catalog.mjs", "scripts/quality-gates.mjs"],
       "targetPhase": "spreadsheet-completion"
     },
     {
@@ -157,7 +157,7 @@
       "area": "reliability",
       "title": "Atomic, validated saves that preserve the original on failure",
       "status": "implemented",
-      "evidence": ["crates/file-io/src/container.rs", "crates/file-io/tests/roundtrip.rs"],
+      "evidence": ["crates/file-io/src/container.rs", "crates/file-io/tests/roundtrip.rs", "crates/file-io/src/lib.rs"],
       "targetPhase": "office-sessions"
     },
     {
