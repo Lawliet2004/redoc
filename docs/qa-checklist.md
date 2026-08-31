@@ -22,7 +22,7 @@ Run this checklist against a fresh profile and an existing profile before releas
 - [ ] Paragraphs, headings (H1–H6), bold, italic, underline, strike, blockquote, code, and lists round-trip through `.redoc`.
 - [ ] Undo/redo, find/replace, word count, and title editing work without losing content.
 - [ ] Table merge/split and column resize behave as expected.
-- [ ] Page setup (margins/orientation) persists after save/reopen.
+- [ ] Page setup (paper size, margins, orientation, headers/footers, and page fields) persists after save/reopen and DOCX round-trip.
 - [ ] Print preview renders before printing.
 - [ ] Image drop and resize handle update the document.
 - [ ] Pasting from the web is sanitized (no script tags / hostile markup).
@@ -38,6 +38,7 @@ Run this checklist against a fresh profile and an existing profile before releas
 - [ ] Merged cells display and export correctly.
 - [ ] Freeze panes, insert/delete rows/cols, and find/replace work from toolbar or context menu.
 - [ ] Named ranges, number formats, validation lists, and hyperlinks persist.
+- [ ] Structured table names, ranges, headers, styles, and totals-row flags persist through XLSX round-trip.
 - [ ] Chart sidebar binds to a range and renders bar/line/pie.
 - [ ] CSV import and export round-trip quoted values and formulas-as-text.
 - [ ] Keyboard navigation and selection remain usable at high zoom.
@@ -61,7 +62,7 @@ Run this checklist against a fresh profile and an existing profile before releas
 - [ ] Opening a second `.redoc` while Redoc is running loads that file into the correct mode (where the OS delivers the open event).
 - [ ] Release installer artifacts are ≤ 55 MB (`pnpm quality:check` after `tauri build`, or release CI).
 - [ ] `pnpm quality:check` passes after `pnpm build` (frontend gzip budget, generated bindings, config gates).
-- [ ] Opening `.pptx` shows a friendly “not yet supported” message (no silent failure).
+- [ ] Opening `.pptx` imports supported text, shapes, media, notes, transitions, and fade effects; unsupported graphic frames remain visible with a compatibility warning.
 
 ## Recovery and failure handling
 

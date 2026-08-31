@@ -121,6 +121,158 @@ fn add_list_numbering(docx: Docx) -> Docx {
         .add_numbering(Numbering::new(2, 2))
 }
 
+#[derive(Clone, Copy)]
+struct DocxPageSetup {
+    width: u32,
+    height: u32,
+    orientation: PageOrientationType,
+    top: i32,
+    bottom: i32,
+    left: i32,
+    right: i32,
+}
+
+fn json_number(value: Option<&Value>, default: f64) -> f64 {
+    value
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(default)
+        .clamp(0.0, 12.0)
+}
+
+fn page_setup_value(doc_json: &Value) -> Option<&Value> {
+    doc_json
+        .get("pageSetup")
+        .or_else(|| doc_json.get("page_setup"))
+        .or_else(|| {
+            doc_json
+                .get("attrs")
+                .and_then(|attrs| attrs.get("pageSetup").or_else(|| attrs.get("page_setup")))
+        })
+        .filter(|value| value.is_object())
+}
+
+fn paper_dimensions_twips(name: &str) -> (u32, u32) {
+    match name {
+        "a4" => (11906, 16838),
+        "legal" => (12240, 20160),
+        "executive" => (10440, 15120),
+        _ => (12240, 15840),
+    }
+}
+
+fn twips_from_inches(value: f64) -> i32 {
+    (value * 1440.0).round().clamp(0.0, i32::MAX as f64) as i32
+}
+
+fn parse_export_page_setup(doc_json: &Value) -> Option<DocxPageSetup> {
+    let setup = page_setup_value(doc_json)?;
+    let paper_size = setup
+        .get("paperSize")
+        .or_else(|| setup.get("paper_size"))
+        .and_then(Value::as_str)
+        .unwrap_or("letter")
+        .to_ascii_lowercase();
+    let orientation = match setup
+        .get("orientation")
+        .and_then(Value::as_str)
+        .unwrap_or("portrait")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "landscape" => PageOrientationType::Landscape,
+        _ => PageOrientationType::Portrait,
+    };
+    let (mut width, mut height) = paper_dimensions_twips(&paper_size);
+    if orientation == PageOrientationType::Landscape {
+        std::mem::swap(&mut width, &mut height);
+    }
+    let margins = setup.get("margins");
+    Some(DocxPageSetup {
+        width,
+        height,
+        orientation,
+        top: twips_from_inches(json_number(margins.and_then(|value| value.get("top")), 1.0)),
+        bottom: twips_from_inches(json_number(
+            margins.and_then(|value| value.get("bottom")),
+            1.0,
+        )),
+        left: twips_from_inches(json_number(
+            margins.and_then(|value| value.get("left")),
+            1.0,
+        )),
+        right: twips_from_inches(json_number(
+            margins.and_then(|value| value.get("right")),
+            1.0,
+        )),
+    })
+}
+
+fn add_header_footer_text(mut paragraph: Paragraph, text: &str) -> Paragraph {
+    let mut remaining = text.chars().take(16_384).collect::<String>();
+    while !remaining.is_empty() {
+        let placeholders = [
+            ("{page}", "page"),
+            ("{pages}", "pages"),
+            ("{total}", "pages"),
+        ];
+        let next = placeholders
+            .iter()
+            .filter_map(|(token, kind)| remaining.find(token).map(|index| (index, *token, *kind)))
+            .min_by_key(|(index, _, _)| *index);
+        let Some((index, token, kind)) = next else {
+            paragraph = paragraph.add_run(Run::new().add_text(remaining));
+            break;
+        };
+        if index > 0 {
+            paragraph = paragraph.add_run(Run::new().add_text(remaining[..index].to_string()));
+        }
+        paragraph = if kind == "page" {
+            paragraph.add_page_num(PageNum::new())
+        } else {
+            paragraph.add_num_pages(NumPages::new())
+        };
+        remaining = remaining[index + token.len()..].to_string();
+    }
+    paragraph
+}
+
+fn apply_export_page_setup(mut docx: Docx, doc_json: &Value) -> Docx {
+    let Some(setup) = parse_export_page_setup(doc_json) else {
+        return docx;
+    };
+    docx = docx
+        .page_size(setup.width, setup.height)
+        .page_orient(setup.orientation)
+        .page_margin(PageMargin {
+            top: setup.top,
+            left: setup.left,
+            bottom: setup.bottom,
+            right: setup.right,
+            header: 720,
+            footer: 720,
+            gutter: 0,
+        });
+
+    if let Some(header) = page_setup_value(doc_json)
+        .and_then(|value| value.get("header"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        let header = Header::new().add_paragraph(add_header_footer_text(Paragraph::new(), header));
+        docx = docx.header(header);
+    }
+    if let Some(footer) = page_setup_value(doc_json)
+        .and_then(|value| value.get("footer"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        let footer = Footer::new().add_paragraph(add_header_footer_text(Paragraph::new(), footer));
+        docx = docx.footer(footer);
+    }
+    docx
+}
+
 struct RunImportState {
     bold: bool,
     italic: bool,
@@ -250,10 +402,8 @@ fn list_type_for_num_id(num_id: u32, formats: &HashMap<u32, String>) -> String {
 
 fn record_unsupported_docx_construct(warnings: &mut Vec<String>, name: &[u8]) {
     let warning = match name {
-        b"w:hyperlink" => "Hyperlinks were not imported.",
         b"w:fldSimple" | b"w:instrText" => "Word fields were skipped.",
         b"w:br" => "Manual line breaks were simplified.",
-        b"w:sectPr" => "Section/page layout settings were skipped.",
         b"w:bookmarkStart" | b"w:bookmarkEnd" => "Bookmarks were skipped.",
         _ => return,
     };
@@ -278,6 +428,253 @@ fn docx_attr(element: &BytesStart<'_>, name: &[u8]) -> Option<String> {
         (docx_local_name(attribute.key.as_ref()) == name)
             .then(|| String::from_utf8_lossy(attribute.value.as_ref()).into_owned())
     })
+}
+
+fn docx_twips_to_inches(value: Option<&str>) -> Option<f64> {
+    value
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+        .map(|value| (value / 1440.0 * 1000.0).round() / 1000.0)
+}
+
+fn docx_paper_size(width: u32, height: u32) -> &'static str {
+    let (width, height) = if width <= height {
+        (width, height)
+    } else {
+        (height, width)
+    };
+    let candidates = [
+        ("letter", 12240_u32, 15840_u32),
+        ("a4", 11906, 16838),
+        ("legal", 12240, 20160),
+        ("executive", 10440, 15120),
+    ];
+    candidates
+        .into_iter()
+        .min_by_key(|(_, expected_width, expected_height)| {
+            width.abs_diff(*expected_width) as u64 + height.abs_diff(*expected_height) as u64
+        })
+        .map(|(name, _, _)| name)
+        .unwrap_or("letter")
+}
+
+fn docx_part_path(target: &str) -> Option<String> {
+    let target = target.trim_start_matches('/');
+    let target = target.strip_prefix("../").unwrap_or(target);
+    let already_rooted = target.strip_prefix("word/");
+    let relative = already_rooted.unwrap_or(target);
+    if relative.is_empty()
+        || relative
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return None;
+    }
+    Some(if already_rooted.is_some() {
+        target.to_string()
+    } else {
+        format!("word/{target}")
+    })
+}
+
+fn read_docx_story_text(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    part: &str,
+) -> Result<Option<String>, ExportError> {
+    let Ok(xml) = read_docx_xml(archive, part) else {
+        return Ok(None);
+    };
+    let mut reader = Reader::from_str(&xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut text = String::new();
+    let mut in_text = false;
+    let mut in_instruction = false;
+    let mut field_result = false;
+    let mut current_field = None::<&'static str>;
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => match docx_local_name(event.name().as_ref()) {
+                b"t" => in_text = true,
+                b"instrText" => in_instruction = true,
+                b"fldChar" => match docx_attr(&event, b"fldCharType").as_deref() {
+                    Some("begin") => {
+                        field_result = true;
+                        current_field = None;
+                    }
+                    Some("separate") => field_result = true,
+                    Some("end") => {
+                        field_result = false;
+                        current_field = None;
+                    }
+                    _ => {}
+                },
+                _ => {}
+            },
+            Ok(Event::Empty(event)) if docx_local_name(event.name().as_ref()) == b"fldChar" => {
+                match docx_attr(&event, b"fldCharType").as_deref() {
+                    Some("begin") => {
+                        field_result = true;
+                        current_field = None;
+                    }
+                    Some("separate") => field_result = true,
+                    Some("end") => {
+                        field_result = false;
+                        current_field = None;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(event)) if in_text || in_instruction => {
+                let value = event
+                    .unescape()
+                    .map_err(|error| ExportError::Docx(error.to_string()))?;
+                if in_instruction {
+                    let instruction = value.to_ascii_uppercase();
+                    if instruction.contains("NUMPAGES") {
+                        current_field = Some("{pages}");
+                    } else if instruction.contains("PAGE") {
+                        current_field = Some("{page}");
+                    }
+                    if let Some(field) = current_field {
+                        text.push_str(field);
+                    }
+                } else if !field_result {
+                    text.push_str(&value);
+                }
+            }
+            Ok(Event::End(event)) => match docx_local_name(event.name().as_ref()) {
+                b"t" => in_text = false,
+                b"instrText" => in_instruction = false,
+                b"p" if !text.ends_with('\n') => text.push('\n'),
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(ExportError::Docx(error.to_string())),
+        }
+        buffer.clear();
+    }
+    while text.ends_with('\n') {
+        text.pop();
+    }
+    Ok(Some(text))
+}
+
+fn parse_docx_page_setup(
+    document_xml: &str,
+    relationships: &HashMap<String, (String, String)>,
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    warnings: &mut Vec<String>,
+) -> Result<Option<Value>, ExportError> {
+    let mut reader = Reader::from_str(document_xml);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut width = None::<u32>;
+    let mut height = None::<u32>;
+    let mut orientation = None::<String>;
+    let mut margins = serde_json::Map::new();
+    let mut header_id = None::<String>;
+    let mut footer_id = None::<String>;
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) | Ok(Event::Empty(event)) => {
+                match docx_local_name(event.name().as_ref()) {
+                    b"pgSz" => {
+                        width = docx_attr(&event, b"w").and_then(|value| value.parse().ok());
+                        height = docx_attr(&event, b"h").and_then(|value| value.parse().ok());
+                        orientation = docx_attr(&event, b"orient");
+                    }
+                    b"pgMar" => {
+                        for (name, key) in [
+                            (b"top".as_slice(), "top"),
+                            (b"bottom".as_slice(), "bottom"),
+                            (b"left".as_slice(), "left"),
+                            (b"right".as_slice(), "right"),
+                        ] {
+                            if let Some(value) =
+                                docx_twips_to_inches(docx_attr(&event, name).as_deref())
+                            {
+                                margins.insert(key.to_string(), json!(value));
+                            }
+                        }
+                    }
+                    b"headerReference" => {
+                        if docx_attr(&event, b"type").as_deref().unwrap_or("default") == "default" {
+                            header_id = docx_attr(&event, b"id");
+                        }
+                    }
+                    b"footerReference"
+                        if docx_attr(&event, b"type").as_deref().unwrap_or("default")
+                            == "default" =>
+                    {
+                        footer_id = docx_attr(&event, b"id");
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(ExportError::Docx(error.to_string())),
+        }
+        buffer.clear();
+    }
+    let (Some(width), Some(height)) = (width, height) else {
+        return Ok(None);
+    };
+    let orientation = orientation.unwrap_or_else(|| {
+        if width > height {
+            "landscape".to_string()
+        } else {
+            "portrait".to_string()
+        }
+    });
+    let orientation = if orientation.eq_ignore_ascii_case("landscape") {
+        "landscape"
+    } else {
+        "portrait"
+    };
+    let mut setup = serde_json::Map::new();
+    setup.insert(
+        "paperSize".to_string(),
+        json!(docx_paper_size(width, height)),
+    );
+    setup.insert("orientation".to_string(), json!(orientation));
+    if !margins.is_empty() {
+        setup.insert("margins".to_string(), Value::Object(margins));
+    }
+    if let Some(id) = header_id.as_deref() {
+        if let Some((target, relation_type)) = relationships.get(id) {
+            if relation_type.contains("/header") {
+                if let Some(part) = docx_part_path(target) {
+                    if let Some(text) = read_docx_story_text(archive, &part)? {
+                        if !text.is_empty() {
+                            setup.insert("header".to_string(), json!(text));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(id) = footer_id.as_deref() {
+        if let Some((target, relation_type)) = relationships.get(id) {
+            if relation_type.contains("/footer") {
+                if let Some(part) = docx_part_path(target) {
+                    if let Some(text) = read_docx_story_text(archive, &part)? {
+                        if !text.is_empty() {
+                            setup.insert("footer".to_string(), json!(text));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (header_id.is_some() && !setup.contains_key("header"))
+        || (footer_id.is_some() && !setup.contains_key("footer"))
+    {
+        warnings.push("DOCX header/footer reference could not be read.".to_string());
+    }
+    Ok(Some(Value::Object(setup)))
 }
 
 fn read_docx_comments(
@@ -1045,6 +1442,8 @@ pub fn export_doc_to_docx(
         &mut paragraph_index,
     );
 
+    docx = apply_export_page_setup(docx, doc_json);
+
     let mut buf = Vec::new();
     docx.build()
         .pack(std::io::Cursor::new(&mut buf))
@@ -1071,6 +1470,7 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
 
     let mut image_data: HashMap<String, String> = HashMap::new();
     let mut hyperlink_data: HashMap<String, String> = HashMap::new();
+    let mut relationship_targets: HashMap<String, (String, String)> = HashMap::new();
     let mut warnings = Vec::new();
     let relationships_xml = match archive.by_name("word/_rels/document.xml.rels") {
         Ok(mut relationships) => {
@@ -1114,6 +1514,10 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                         }
                     }
                     if let (Some(id), Some(target)) = (id, target) {
+                        relationship_targets.insert(
+                            id.clone(),
+                            (target.clone(), rel_type.clone().unwrap_or_default()),
+                        );
                         if rel_type.as_deref().is_some_and(|t| t.contains("hyperlink")) {
                             hyperlink_data.insert(id, target);
                             continue;
@@ -1163,6 +1567,13 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
             rel_buffer.clear();
         }
     }
+
+    let imported_page_setup = parse_docx_page_setup(
+        &document,
+        &relationship_targets,
+        &mut archive,
+        &mut warnings,
+    )?;
 
     let mut num_formats: HashMap<u32, String> = HashMap::new();
     if let Ok(mut numbering) = archive.by_name("word/numbering.xml") {
@@ -1577,6 +1988,9 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
     flush_open_list(&mut open_list, &mut paragraphs);
 
     let mut raw_document = json!({ "type": "doc", "content": paragraphs });
+    if let Some(page_setup) = imported_page_setup {
+        raw_document["pageSetup"] = page_setup;
+    }
     let mut comments = Vec::new();
     for (id, comment) in imported_comments {
         let Some((from, to)) = comment_ranges.get(&id).copied() else {
@@ -1638,6 +2052,69 @@ mod tests {
             imported["content"][0]["content"][0]["marks"][0]["type"],
             "bold"
         );
+        std::fs::remove_file(path).expect("cleanup docx");
+    }
+
+    #[test]
+    fn round_trips_docx_page_setup_and_header_footer_fields() {
+        let source = json!({
+            "type": "doc",
+            "pageSetup": {
+                "margins": { "top": 0.75, "bottom": 0.6, "left": 1.25, "right": 0.8 },
+                "orientation": "landscape",
+                "paperSize": "legal",
+                "header": "Quarterly — Page {page} of {pages}",
+                "footer": "Confidential {total}"
+            },
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Body" }] }]
+        });
+        let bytes = export_doc_to_docx(&source, "Page setup").expect("export docx");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read docx zip");
+        let mut document_xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .expect("document xml")
+            .read_to_string(&mut document_xml)
+            .expect("read document xml");
+        assert!(document_xml.contains("w:w=\"20160\""));
+        assert!(document_xml.contains("w:h=\"12240\""));
+        assert!(document_xml.contains("w:orient=\"landscape\""));
+        assert!(document_xml.contains("w:top=\"1080\""));
+        assert!(document_xml.contains("w:left=\"1800\""));
+        let mut header_xml = String::new();
+        archive
+            .by_name("word/header1.xml")
+            .expect("header xml")
+            .read_to_string(&mut header_xml)
+            .expect("read header xml");
+        assert!(header_xml.contains("Quarterly"));
+        assert!(header_xml.contains("PAGE"));
+        assert!(header_xml.contains("NUMPAGES"));
+        let mut footer_xml = String::new();
+        archive
+            .by_name("word/footer1.xml")
+            .expect("footer xml")
+            .read_to_string(&mut footer_xml)
+            .expect("read footer xml");
+        assert!(footer_xml.contains("Confidential"));
+        assert!(footer_xml.contains("NUMPAGES"));
+
+        let path =
+            std::env::temp_dir().join(format!("redoc-docx-page-setup-{}.docx", std::process::id()));
+        std::fs::write(
+            &path,
+            export_doc_to_docx(&source, "Page setup").expect("export docx"),
+        )
+        .expect("write docx");
+        let imported = import_docx_to_doc(&path).expect("import docx");
+        assert_eq!(imported["pageSetup"]["paperSize"], "legal");
+        assert_eq!(imported["pageSetup"]["orientation"], "landscape");
+        assert_eq!(imported["pageSetup"]["margins"]["left"], 1.25);
+        assert_eq!(
+            imported["pageSetup"]["header"],
+            "Quarterly — Page {page} of {pages}"
+        );
+        assert_eq!(imported["pageSetup"]["footer"], "Confidential {pages}");
         std::fs::remove_file(path).expect("cleanup docx");
     }
 
@@ -2011,6 +2488,42 @@ mod tests {
             .read_to_string(&mut document)
             .expect("read document");
         assert!(document.contains("hyperlink"));
+    }
+
+    #[test]
+    fn imports_hyperlinks_as_link_marks_without_warning() {
+        let source = json!({
+            "type": "doc",
+            "content": [{
+                "type": "paragraph",
+                "content": [{
+                    "type": "text",
+                    "text": "Open site",
+                    "marks": [{ "type": "link", "attrs": { "href": "https://example.com" } }]
+                }]
+            }]
+        });
+        let path =
+            std::env::temp_dir().join(format!("redoc-docx-hyperlink-{}.docx", std::process::id()));
+        std::fs::write(
+            &path,
+            export_doc_to_docx(&source, "Link").expect("export hyperlink"),
+        )
+        .expect("write docx");
+        let result = import_docx_to_doc_with_report(&path).expect("import hyperlink");
+        std::fs::remove_file(path).expect("cleanup docx");
+
+        let imported_text = &result.document["content"][0]["content"][0];
+        assert_eq!(imported_text["text"], "Open site");
+        let link_mark = imported_text["marks"]
+            .as_array()
+            .and_then(|marks| marks.iter().find(|mark| mark["type"] == "link"))
+            .expect("hyperlink should remain editable as a link mark");
+        assert_eq!(link_mark["attrs"]["href"], "https://example.com");
+        assert!(!result
+            .warnings
+            .iter()
+            .any(|warning| warning.to_lowercase().contains("hyperlink")));
     }
 
     #[test]

@@ -61,7 +61,7 @@
       "area": "document",
       "title": "Sections, columns, headers, footers, page numbering, and fields",
       "status": "partial",
-      "evidence": ["packages/doc-editor/src/PageSetupDialog.tsx", "crates/export/src/pdf.rs"],
+      "evidence": ["packages/doc-editor/src/PageSetupDialog.tsx", "crates/export/src/pdf.rs", "crates/export/src/docx.rs::round_trips_docx_page_setup_and_header_footer_fields"],
       "targetPhase": "document-completion"
     },
     {
@@ -77,7 +77,7 @@
       "area": "document",
       "title": "DOCX import and export with compatibility reporting",
       "status": "partial",
-      "evidence": ["crates/export/src/docx.rs"],
+      "evidence": ["crates/export/src/docx.rs", "crates/export/src/docx.rs::imports_hyperlinks_as_link_marks_without_warning", "crates/export/src/docx.rs::round_trips_docx_page_setup_and_header_footer_fields"],
       "targetPhase": "office-sessions"
     },
     {
@@ -109,7 +109,7 @@
       "area": "spreadsheet",
       "title": "Tables, conditional formatting, pivot tables, slicers, and scenarios",
       "status": "partial",
-      "evidence": ["packages/sheet-editor/src/SheetEditor.tsx", "packages/sheet-editor/src/conditionalFormatting.ts", "packages/sheet-editor/src/conditionalFormatting.test.ts", "packages/sheet-editor/src/pivotTables.ts", "packages/sheet-editor/src/pivotTables.test.ts", "crates/sheet-engine/src/workbook/model.rs"],
+      "evidence": ["packages/sheet-editor/src/SheetEditor.tsx", "packages/sheet-editor/src/conditionalFormatting.ts", "packages/sheet-editor/src/conditionalFormatting.test.ts", "packages/sheet-editor/src/pivotTables.ts", "packages/sheet-editor/src/pivotTables.test.ts", "packages/sheet-editor/src/sheetModel.test.ts", "crates/sheet-engine/src/workbook/model.rs", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_autofilter_range_and_selected_values", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_named_ranges", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_merged_ranges", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_list_validation", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_hyperlinks", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_table_metadata"],
       "targetPhase": "spreadsheet-completion"
     },
     {
@@ -117,7 +117,7 @@
       "area": "spreadsheet",
       "title": "XLSX import/export with formulas, styles, charts, and compatibility reporting",
       "status": "partial",
-      "evidence": ["crates/export/src/xlsx.rs", "crates/export/src/xlsx.rs::xlsx_imports_chart_anchor_and_metadata"],
+      "evidence": ["crates/export/src/xlsx.rs", "crates/export/src/xlsx.rs::xlsx_imports_chart_anchor_and_metadata", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_autofilter_range_and_selected_values", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_named_ranges", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_merged_ranges", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_list_validation", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_hyperlinks", "crates/export/src/xlsx.rs::xlsx_export_rejects_malformed_hyperlinks", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_table_metadata"],
       "targetPhase": "office-sessions"
     },
     {
@@ -141,7 +141,7 @@
       "area": "presentation",
       "title": "Transitions, animation timeline, and presenter playback",
       "status": "partial",
-      "evidence": ["packages/slide-editor/src/SlideEditor.tsx", "packages/slide-editor/src/deckNormalize.ts", "packages/slide-editor/src/PresenterView.tsx", "packages/slide-editor/src/animation.test.ts"],
+      "evidence": ["packages/slide-editor/src/SlideEditor.tsx", "packages/slide-editor/src/deckNormalize.ts", "packages/slide-editor/src/PresenterView.tsx", "packages/slide-editor/src/animation.test.ts", "crates/export/src/pptx.rs::writes_native_fade_entrance_timing", "crates/export/src/pptx_import.rs::imports_redoc_pptx_text_shapes_and_notes"],
       "targetPhase": "presentation-completion"
     },
     {
