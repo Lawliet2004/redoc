@@ -1525,10 +1525,12 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                             hyperlink_data.insert(id, target);
                             continue;
                         }
-                        let package_path = format!(
-                            "word/{}",
-                            target.trim_start_matches("../").trim_start_matches('/')
-                        );
+                        let Some(package_path) = docx_part_path(&target) else {
+                            warnings.push(format!(
+                                "Skipped DOCX relationship target '{target}': unsafe package path"
+                            ));
+                            continue;
+                        };
                         if let Ok(mut media) = archive.by_name(&package_path) {
                             let media_size = media.size();
                             if media_size > MAX_DOCX_MEDIA_BYTES
@@ -2062,6 +2064,13 @@ fn decode_data_uri(src: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn rejects_unsafe_docx_relationship_targets() {
+        assert_eq!(docx_part_path("../../outside.xml"), None);
+        assert_eq!(docx_part_path("/word/../outside.xml"), None);
+        assert_eq!(docx_part_path("media/image.png"), Some("word/media/image.png".to_string()));
+    }
 
     #[test]
     fn imports_exported_docx_paragraphs_and_marks() {
