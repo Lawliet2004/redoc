@@ -361,6 +361,50 @@ impl RedocContainer {
     }
 }
 
+/// Writes arbitrary exported bytes without truncating an existing destination.
+/// The temporary file is fsynced before replacement and cleaned up on every
+/// error path. On platforms that cannot atomically replace an existing file,
+/// the original is moved aside until the replacement succeeds.
+pub fn write_bytes_atomic<P: AsRef<Path>>(path: P, bytes: &[u8]) -> Result<(), FileIoError> {
+    let target_path = path.as_ref();
+    let parent = target_path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let temp_path = parent.join(format!(".tmp_export_{}", uuid::Uuid::now_v7()));
+    let mut temp_guard = TempPathGuard::new(temp_path.clone());
+    {
+        let mut file = File::create(&temp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+
+    if let Err(err) = std::fs::rename(&temp_path, target_path) {
+        if !target_path.exists() {
+            return Err(err.into());
+        }
+        let target_name = target_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("export");
+        let backup_path = parent.join(format!(".{}.bak-{}", target_name, uuid::Uuid::now_v7()));
+        std::fs::rename(target_path, &backup_path)?;
+        if let Err(rename_err) = std::fs::rename(&temp_path, target_path) {
+            if let Err(restore_err) = std::fs::rename(&backup_path, target_path) {
+                return Err(FileIoError::Io(std::io::Error::new(
+                    restore_err.kind(),
+                    format!(
+                        "atomic export failed ({rename_err}); original is recoverable at {}",
+                        backup_path.display()
+                    ),
+                )));
+            }
+            return Err(rename_err.into());
+        }
+        let _ = std::fs::remove_file(backup_path);
+    }
+    temp_guard.disarm();
+    Ok(())
+}
+
 fn decode_base64(value: &str) -> Option<Vec<u8>> {
     let mut output = Vec::new();
     let mut buffer = 0u32;
@@ -448,6 +492,23 @@ mod tests {
         let loaded = RedocContainer::read_from_file(&path).expect("read container after overwrite");
         assert_eq!(loaded.meta.title, "Updated Document");
         std::fs::remove_file(path).expect("cleanup test container");
+    }
+
+    #[test]
+    fn write_bytes_atomic_overwrites_without_leaving_temp_files() {
+        let dir = std::env::temp_dir().join(format!("redoc-export-bytes-{}", uuid::Uuid::now_v7()));
+        let path = dir.join("export.bin");
+        write_bytes_atomic(&path, b"first").expect("initial atomic write");
+        write_bytes_atomic(&path, b"second").expect("replacement atomic write");
+        assert_eq!(std::fs::read(&path).expect("read atomic output"), b"second");
+        let prefix = format!(".tmp_export_");
+        let leftovers = std::fs::read_dir(&dir)
+            .expect("read temp directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .count();
+        assert_eq!(leftovers, 0, "atomic writes left temporary files behind");
+        std::fs::remove_dir_all(dir).expect("cleanup atomic output");
     }
 
     #[test]

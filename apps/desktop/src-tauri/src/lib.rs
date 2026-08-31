@@ -424,7 +424,7 @@ fn export_document_to_file(
     handle_panic!({
         let normalized = normalize_file_path(&path);
         let bytes = export_document(mode, format, body_json, title)?;
-        std::fs::write(normalized, bytes).map_err(|e| e.to_string())
+        redoc_file_io::write_bytes_atomic(&normalized, &bytes).map_err(|e| e.to_string())
     })
 }
 
