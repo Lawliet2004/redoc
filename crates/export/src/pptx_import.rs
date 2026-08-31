@@ -967,6 +967,92 @@ fn parse_canvas_size(xml: &[u8]) -> (f64, f64) {
     (960.0, 540.0)
 }
 
+fn normalize_presentation_target(target: &str) -> Option<String> {
+    let target = target.trim();
+    let mut parts = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        vec!["ppt".to_string()]
+    };
+    for part in target.trim_start_matches('/').split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.is_empty() {
+                    return None;
+                }
+                parts.pop();
+            }
+            value => parts.push(value.to_string()),
+        }
+    }
+    if parts.first().is_none_or(|part| part != "ppt") {
+        parts.insert(0, "ppt".to_string());
+    }
+    Some(parts.join("/"))
+}
+
+fn parse_presentation_slide_order(presentation_xml: &[u8], relationships_xml: &[u8]) -> Vec<usize> {
+    let mut relationships = HashMap::new();
+    let mut rel_reader = Reader::from_reader(relationships_xml);
+    rel_reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    loop {
+        match rel_reader.read_event_into(&mut buffer) {
+            Ok(Event::Empty(event)) | Ok(Event::Start(event))
+                if local_name(event.name().as_ref()) == b"Relationship" =>
+            {
+                if let (Some(id), Some(target)) =
+                    (attribute(&event, b"Id"), attribute(&event, b"Target"))
+                {
+                    if let Some(path) = normalize_presentation_target(&target) {
+                        relationships.insert(id, path);
+                    }
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+        buffer.clear();
+    }
+
+    let mut order = Vec::new();
+    let mut reader = Reader::from_reader(presentation_xml);
+    reader.config_mut().trim_text(true);
+    buffer.clear();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Empty(event)) | Ok(Event::Start(event))
+                if local_name(event.name().as_ref()) == b"sldId" =>
+            {
+                let Some(rel_id) = event.attributes().flatten().find_map(|attr| {
+                    let key = attr.key.as_ref();
+                    (key == b"r:id" || key.ends_with(b":id"))
+                        .then(|| String::from_utf8_lossy(attr.value.as_ref()).into_owned())
+                }) else {
+                    buffer.clear();
+                    continue;
+                };
+                let Some(path) = relationships.get(&rel_id) else {
+                    buffer.clear();
+                    continue;
+                };
+                if let Some(number) = path
+                    .strip_prefix("ppt/slides/slide")
+                    .and_then(|value| value.strip_suffix(".xml"))
+                    .and_then(|value| value.parse::<usize>().ok())
+                {
+                    order.push(number);
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+        buffer.clear();
+    }
+    order
+}
+
 fn parse_theme(xml: &[u8]) -> redoc_slide_engine::SlideTheme {
     let mut theme = redoc_slide_engine::SlideTheme::default();
     let mut reader = Reader::from_reader(xml);
@@ -1069,18 +1155,29 @@ pub fn import_deck_from_pptx_with_report(path: &Path) -> Result<PptxImportResult
     let theme = read_entry(&mut archive, "ppt/theme/theme1.xml", MAX_XML_BYTES)
         .map(|xml| parse_theme(&xml))
         .unwrap_or_default();
-    let mut slide_numbers = Vec::new();
-    for index in 0..archive.len() {
-        let name = archive.by_index(index)?.name().to_string();
-        if let Some(number) = name
-            .strip_prefix("ppt/slides/slide")
-            .and_then(|value| value.strip_suffix(".xml"))
-            .and_then(|value| value.parse::<usize>().ok())
-        {
-            slide_numbers.push(number);
+    let relationship_xml = read_entry(
+        &mut archive,
+        "ppt/_rels/presentation.xml.rels",
+        MAX_XML_BYTES,
+    )
+    .ok();
+    let mut slide_numbers = relationship_xml
+        .as_deref()
+        .map(|rels| parse_presentation_slide_order(&presentation, rels))
+        .unwrap_or_default();
+    if slide_numbers.is_empty() {
+        for index in 0..archive.len() {
+            let name = archive.by_index(index)?.name().to_string();
+            if let Some(number) = name
+                .strip_prefix("ppt/slides/slide")
+                .and_then(|value| value.strip_suffix(".xml"))
+                .and_then(|value| value.parse::<usize>().ok())
+            {
+                slide_numbers.push(number);
+            }
         }
+        slide_numbers.sort_unstable();
     }
-    slide_numbers.sort_unstable();
     slide_numbers.dedup();
     if slide_numbers.is_empty() {
         return Err(invalid_data("PPTX contains no slides"));
@@ -1340,6 +1437,16 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("chart part was missing")));
+    }
+
+    #[test]
+    fn honors_presentation_slide_relationship_order() {
+        let presentation = br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId3"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst></p:presentation>"#;
+        let relationships = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>"#;
+        assert_eq!(
+            parse_presentation_slide_order(presentation, relationships),
+            vec![2, 1]
+        );
     }
 
     #[test]

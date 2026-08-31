@@ -149,7 +149,7 @@
       "area": "presentation",
       "title": "PPTX import/export with masters, media, notes, and animations",
       "status": "partial",
-      "evidence": ["crates/export/src/pptx.rs", "crates/export/src/pptx_import.rs", "crates/export/src/pptx.rs::writes_native_chart_parts_for_supported_types", "crates/export/src/pptx_import.rs::round_trips_native_pptx_tables", "crates/export/src/pptx_import.rs::round_trips_native_pptx_charts", "crates/export/src/pptx_import.rs::parse_theme", "apps/desktop/src/App.tsx", "apps/desktop/src-tauri/src/lib.rs"],
+      "evidence": ["crates/export/src/pptx.rs", "crates/export/src/pptx_import.rs", "crates/export/src/pptx.rs::writes_native_chart_parts_for_supported_types", "crates/export/src/pptx_import.rs::round_trips_native_pptx_tables", "crates/export/src/pptx_import.rs::round_trips_native_pptx_charts", "crates/export/src/pptx_import.rs::parse_theme", "crates/export/src/pptx_import.rs::honors_presentation_slide_relationship_order", "apps/desktop/src/App.tsx", "apps/desktop/src-tauri/src/lib.rs"],
       "targetPhase": "office-sessions"
     },
     {
