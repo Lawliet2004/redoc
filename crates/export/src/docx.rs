@@ -1536,23 +1536,30 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
     flush_open_list(&mut open_list, &mut paragraphs);
 
     let mut raw_document = json!({ "type": "doc", "content": paragraphs });
-    let comments = imported_comments
-        .into_iter()
-        .filter_map(|(id, comment)| {
-            let (from, to) = comment_ranges.get(&id).copied()?;
-            (from < to).then(|| {
-                json!({
-                    "id": format!("comment-{id}"),
-                    "author": comment.author,
-                    "text": comment.text,
-                    "from": from,
-                    "to": to,
-                    "resolved": false,
-                    "createdAt": comment.date,
-                })
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut comments = Vec::new();
+    for (id, comment) in imported_comments {
+        let Some((from, to)) = comment_ranges.get(&id).copied() else {
+            warnings.push(format!(
+                "DOCX comment {id} had no usable anchor and was skipped"
+            ));
+            continue;
+        };
+        if from >= to {
+            warnings.push(format!(
+                "DOCX comment {id} had an empty anchor and was skipped"
+            ));
+            continue;
+        }
+        comments.push(json!({
+            "id": format!("comment-{id}"),
+            "author": comment.author,
+            "text": comment.text,
+            "from": from,
+            "to": to,
+            "resolved": false,
+            "createdAt": comment.date,
+        }));
+    }
     if !comments.is_empty() {
         raw_document["comments"] = Value::Array(comments);
     }
