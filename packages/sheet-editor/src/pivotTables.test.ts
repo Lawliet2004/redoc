@@ -44,7 +44,9 @@ describe("pivot tables", () => {
       ["B", "4"],
     ]);
     expect(buildPivotTable(cells, { ...baseConfig, sourceRange: { ...baseConfig.sourceRange, endRow: 4 }, aggregation: "count" }).cells["2:5"].display).toBe("2");
-    expect(buildPivotTable(cells, { ...baseConfig, sourceRange: { ...baseConfig.sourceRange, endRow: 4 }, aggregation: "average" }).cells["2:5"].display).toBe("2.00");
+    const average = buildPivotTable(cells, { ...baseConfig, sourceRange: { ...baseConfig.sourceRange, endRow: 4 }, aggregation: "average" });
+    expect(average.cells["2:5"].display).toBe("2.00");
+    expect(average.cells["4:5"].display).toBe("3.00");
   });
 
   it("rejects invalid field and source ranges with a warning", () => {

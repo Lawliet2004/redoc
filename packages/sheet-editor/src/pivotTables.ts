@@ -38,16 +38,23 @@ export function buildPivotTable(cells: Record<string, GridCell>, config: PivotTa
   }
 
   const groups = new Map<string, { sum: number; count: number }>();
+  let grandSum = 0;
+  let grandCount = 0;
   for (let row = source.startRow + 1; row <= source.endRow; row += 1) {
     const key = textFor(cells, row, config.rowField) || "(blank)";
     const raw = textFor(cells, row, config.valueField);
     const value = Number(raw.replace(/,/g, ""));
     const current = groups.get(key) || { sum: 0, count: 0 };
     if (config.aggregation === "count") {
-      if (raw) current.count += 1;
+      if (raw) {
+        current.count += 1;
+        grandCount += 1;
+      }
     } else if (Number.isFinite(value)) {
       current.sum += value;
       current.count += 1;
+      grandSum += value;
+      grandCount += 1;
     }
     groups.set(key, current);
   }
@@ -69,7 +76,12 @@ export function buildPivotTable(cells: Record<string, GridCell>, config: PivotTa
         : value.toFixed(2);
     rows.push([key, formatted]);
   }
-  rows.push(["Grand Total", String(rows.slice(1).reduce((total, row) => total + (Number(row[1]) || 0), 0))]);
+  const grandTotal = config.aggregation === "count"
+    ? grandCount
+    : config.aggregation === "average"
+      ? (grandCount ? grandSum / grandCount : 0)
+      : grandSum;
+  rows.push(["Grand Total", config.aggregation === "average" ? grandTotal.toFixed(2) : String(grandTotal)]);
 
   const output: Record<string, GridCell> = {};
   rows.forEach((row, rowOffset) => row.forEach((value, colOffset) => {
