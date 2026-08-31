@@ -360,9 +360,24 @@ fn read_docx_comments(
 fn build_run(child: &serde_json::Value, override_font: Option<&str>) -> (Run, Option<String>) {
     let mut link_url = None;
     let mut run = Run::new();
+    let tracked_delete = child
+        .get("marks")
+        .and_then(Value::as_array)
+        .is_some_and(|marks| {
+            marks.iter().any(|mark| {
+                mark.get("type")
+                    .and_then(Value::as_str)
+                    .map(redoc_doc_engine::normalize_mark_type)
+                    == Some("trackDelete")
+            })
+        });
 
     if let Some(text) = child.get("text").and_then(|t| t.as_str()) {
-        run = run.add_text(text);
+        run = if tracked_delete {
+            run.add_delete_text(text)
+        } else {
+            run.add_text(text)
+        };
     }
 
     if let Some(font) = override_font {
@@ -432,8 +447,6 @@ fn build_run(child: &serde_json::Value, override_font: Option<&str>) -> (Run, Op
                     link_url = Some(href.to_string());
                     run = run.color("0563C1").underline("single");
                 }
-                // Native w:ins/w:del parts are not emitted yet, but retaining
-                // review state as visible markup keeps the export auditable.
                 Some("trackInsert") => {
                     run = run.color("008000").underline("single");
                 }
@@ -446,6 +459,30 @@ fn build_run(child: &serde_json::Value, override_font: Option<&str>) -> (Run, Op
     }
 
     (run, link_url)
+}
+
+fn tracked_change_metadata(child: &Value, kind: &str) -> Option<(String, String)> {
+    child.get("marks")?.as_array()?.iter().find_map(|mark| {
+        let mark_type = mark
+            .get("type")
+            .and_then(Value::as_str)
+            .map(redoc_doc_engine::normalize_mark_type)?;
+        if mark_type != kind {
+            return None;
+        }
+        let attrs = mark.get("attrs");
+        let author = attrs
+            .and_then(|attrs| attrs.get("author"))
+            .and_then(Value::as_str)
+            .unwrap_or("Unknown")
+            .to_string();
+        let date = attrs
+            .and_then(|attrs| attrs.get("createdAt"))
+            .and_then(Value::as_str)
+            .unwrap_or("1970-01-01T00:00:00Z")
+            .to_string();
+        Some((author, date))
+    })
 }
 
 fn add_runs_to_paragraph(
@@ -485,6 +522,10 @@ fn add_runs_to_paragraph(
         if let Some(url) = link_url {
             let hyperlink = Hyperlink::new(url, HyperlinkType::External).add_run(run);
             p = p.add_hyperlink(hyperlink);
+        } else if let Some((author, date)) = tracked_change_metadata(child, "trackInsert") {
+            p = p.add_insert(Insert::new(run).author(author).date(date));
+        } else if let Some((author, date)) = tracked_change_metadata(child, "trackDelete") {
+            p = p.add_delete(Delete::new().author(author).date(date).add_run(run));
         } else {
             p = p.add_run(run);
         }
@@ -1728,6 +1769,33 @@ mod tests {
             .iter()
             .any(|warning| warning.contains("Tracked changes were skipped")));
         std::fs::remove_file(path).expect("cleanup docx");
+    }
+
+    #[test]
+    fn exports_tracked_changes_as_native_docx_revision_elements() {
+        let source = json!({
+            "type": "doc",
+            "content": [{
+                "type": "paragraph",
+                "content": [
+                    { "type": "text", "text": "added", "marks": [{ "type": "trackInsert", "attrs": { "author": "Alice", "createdAt": "2026-08-31T10:00:00Z" } }] },
+                    { "type": "text", "text": "removed", "marks": [{ "type": "trackDelete", "attrs": { "author": "Bob", "createdAt": "2026-08-31T11:00:00Z" } }] }
+                ]
+            }]
+        });
+        let bytes = export_doc_to_docx(&source, "Tracked").expect("export docx");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read docx zip");
+        let mut document_xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .expect("document xml")
+            .read_to_string(&mut document_xml)
+            .expect("read document xml");
+        assert!(document_xml.contains("w:ins"));
+        assert!(document_xml.contains("w:del"));
+        assert!(document_xml.contains("w:delText"));
+        assert!(document_xml.contains("Alice"));
+        assert!(document_xml.contains("Bob"));
     }
 
     #[test]
