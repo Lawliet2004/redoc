@@ -7,7 +7,7 @@ The historical audit snapshot in `implementation-status.md` predates the current
 - Exported bytes use an atomic write path with fsync, temporary-file cleanup, and backup/restore replacement fallback.
 - DOCX package imports enforce file, archive-entry, XML-part, per-media, and total-media bounds; oversized media is skipped with an explicit compatibility warning.
 - The desktop shell now keeps multiple independent document sessions in tabbed views. Each session retains its editor mode, content, path, backend id, and dirty/error state; closing a dirty tab requires confirmation and editor panes remount per session to prevent state leakage.
-- Writer now supports persistent selection-anchored comments with a review sidebar, resolve/reopen/delete actions, and anchor mapping across edits. Tracked-change diffing and native DOCX comment round-trip remain future work.
+- Writer now supports persistent selection-anchored comments with a review sidebar, resolve/reopen/delete actions, and anchor mapping across edits. Review users can mark selected text as insertion/deletion and accept or reject all tracked marks; native DOCX w:ins/w:del and comment round-trip remain future work.
 - Calc conditional-formatting rules now survive workbook command round-trips and render on visible and merged cells for numeric/text predicates; pivot tables, slicers, scenarios, data bars, and color-scale authoring remain partial.
 - Presentation entrance fades now persist per-element delay, duration, and reveal order through deck normalization and export. Presenter playback applies the stored timing and reveals faded elements in the configured order; a full Office-compatible animation timeline and trigger model remain partial.
 
