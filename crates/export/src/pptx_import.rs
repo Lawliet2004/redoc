@@ -225,6 +225,12 @@ fn parse_slide(
                             element.height = parse_emu(attribute(&event, b"cy").as_deref());
                         }
                     }
+                    b"ln" => {
+                        if let Some(element) = current.as_mut() {
+                            element.stroke_width =
+                                parse_f64(attribute(&event, b"w").as_deref(), 12700.0) / 12700.0;
+                        }
+                    }
                     b"xfrm" => {
                         if let Some(element) = current.as_mut() {
                             element.rotation =
@@ -298,9 +304,27 @@ fn parse_slide(
             }
             Ok(Event::Empty(event)) => {
                 let name = local_name(event.name().as_ref()).to_vec();
-                if name.as_slice() == b"br" {
+                if name.as_slice() == b"off" {
+                    if let Some(element) = current.as_mut() {
+                        element.x = parse_emu(attribute(&event, b"x").as_deref());
+                        element.y = parse_emu(attribute(&event, b"y").as_deref());
+                    }
+                } else if name.as_slice() == b"ext" {
+                    if let Some(element) = current.as_mut() {
+                        element.width = parse_emu(attribute(&event, b"cx").as_deref());
+                        element.height = parse_emu(attribute(&event, b"cy").as_deref());
+                    }
+                } else if name.as_slice() == b"blip" {
+                    if let Some(element) = current.as_mut() {
+                        element.image_rel = attribute(&event, b"embed");
+                    }
+                } else if name.as_slice() == b"br" {
                     if let Some(element) = current.as_mut() {
                         element.text.push('\n');
+                    }
+                } else if matches!(name.as_slice(), b"buChar" | b"buAutoNum") {
+                    if let Some(element) = current.as_mut() {
+                        element.bullets = true;
                     }
                 } else if name.as_slice() == b"srgbClr" {
                     if let (Some(context), Some(value), Some(element)) =
@@ -327,6 +351,13 @@ fn parse_slide(
                 let name = local_name(event.name().as_ref()).to_vec();
                 if name.as_slice() == b"t" {
                     in_text = false;
+                }
+                if name.as_slice() == b"p" {
+                    if let Some(element) = current.as_mut() {
+                        if !element.text.ends_with('\n') {
+                            element.text.push('\n');
+                        }
+                    }
                 }
                 if matches!(name.as_slice(), b"sp" | b"cxnSp" | b"pic") {
                     if let Some(element) = current.take() {
@@ -377,11 +408,18 @@ fn parse_slide(
                                     fill_color: element.fill_color,
                                     stroke_color: element.stroke_color,
                                     stroke_width: element.stroke_width.max(0.1),
-                                    text: element.text,
+                                    text: element.text.trim_end_matches('\n').to_string(),
                                 },
                             });
                             z_index += 1;
-                        } else if !element.text.trim().is_empty() {
+                        } else {
+                            let text = element.text.trim_end_matches('\n').to_string();
+                            if text.trim().is_empty() && element.shape_type.is_empty() {
+                                stack.pop();
+                                color_context = None;
+                                buffer.clear();
+                                continue;
+                            }
                             if element.shape_type.is_empty() {
                                 elements.push(SlideElement {
                                     id: format!("pptx-{slide_number}-{z_index}"),
@@ -393,7 +431,7 @@ fn parse_slide(
                                     z_index,
                                     entrance: "none".to_string(),
                                     kind: ElementKind::Text {
-                                        text: element.text,
+                                        text,
                                         font_size: element.font_size.max(1.0),
                                         font_family: if element.font_family.is_empty() {
                                             "Calibri".to_string()
@@ -439,7 +477,7 @@ fn parse_slide(
                                             element.stroke_color
                                         },
                                         stroke_width: element.stroke_width.max(0.1),
-                                        text: element.text,
+                                        text,
                                     },
                                 });
                             }
@@ -616,6 +654,37 @@ mod tests {
                 bullets: false,
             },
         });
+        source.slides[0].elements.push(SlideElement {
+            id: "shape".to_string(),
+            x: 40.0,
+            y: 180.0,
+            width: 120.0,
+            height: 80.0,
+            rotation: 15.0,
+            z_index: 2,
+            entrance: "none".to_string(),
+            kind: ElementKind::Shape {
+                shape_type: "ellipse".to_string(),
+                fill_color: "#00ff00".to_string(),
+                stroke_color: "#0000ff".to_string(),
+                stroke_width: 2.0,
+                text: String::new(),
+            },
+        });
+        source.slides[0].elements.push(SlideElement {
+            id: "image".to_string(),
+            x: 220.0,
+            y: 180.0,
+            width: 100.0,
+            height: 100.0,
+            rotation: 0.0,
+            z_index: 3,
+            entrance: "none".to_string(),
+            kind: ElementKind::Image {
+                asset_hash: "data:image/png;base64,aGVsbG8=".to_string(),
+                mime: "image/png".to_string(),
+            },
+        });
         let bytes = crate::pptx::export_deck_to_pptx(&source).expect("export source deck");
         let path =
             std::env::temp_dir().join(format!("redoc-pptx-import-{}.pptx", std::process::id()));
@@ -633,5 +702,13 @@ mod tests {
                 &element.kind,
                 ElementKind::Text { text, bold, .. } if text == "Imported title" && *bold
             )));
+        assert!(result.deck.slides[0].elements.iter().any(|element| matches!(
+            &element.kind,
+            ElementKind::Shape { shape_type, text, .. } if shape_type == "ellipse" && text.is_empty()
+        )));
+        assert!(result.deck.slides[0].elements.iter().any(|element| matches!(
+            &element.kind,
+            ElementKind::Image { asset_hash, mime } if asset_hash.starts_with("data:image/png;base64,") && mime == "image/png"
+        )));
     }
 }
