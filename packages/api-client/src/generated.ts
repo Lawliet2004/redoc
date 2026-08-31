@@ -362,12 +362,12 @@ export type RedocMeta = { formatVersion: number; id: string; mode: string; title
 export type SearchMatch = { text: string; index: number; lineNumber: number }
 export type SheetCell = { rawValue: string; displayValue: string; formula: string | null; style: CellStyle | null }
 export type SheetData = { id: string; name: string; cells: { [key in string]: SheetCell }; colWidths: { [key in number]: number }; rowHeights: { [key in number]: number }; freezeRows: number; freezeCols: number; charts?: ChartModel[]; filterQuery?: string | null; merges?: MergeRange[]; autoFilter?: AutoFilterState | null }
-export type Slide = { id: string; layout: string; elements: SlideElement[]; notes: string; bgOverride: string | null; 
+export type Slide = { id: string; layout: string; elements: SlideElement[]; notes: string; bgOverride: string | null;
 /**
  * Per-slide transition: "none" | "fade" | "slide-left" | "slide-right"
  */
 transition?: string }
-export type SlideElement = { id: string; x: number; y: number; width: number; height: number; rotation: number; zIndex: number; 
+export type SlideElement = { id: string; x: number; y: number; width: number; height: number; rotation: number; zIndex: number;
 /**
  * Per-element entrance animation: "none" | "fade"
  */
