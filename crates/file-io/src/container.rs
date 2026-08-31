@@ -346,11 +346,29 @@ impl RedocContainer {
             file.sync_all()?;
         }
 
-        // Rename temp to target atomically
+        // Rename temp to target atomically or via backup
         if let Err(err) = std::fs::rename(&temp_path, target_path) {
             if target_path.exists() {
-                let _ = std::fs::remove_file(target_path);
-                std::fs::rename(&temp_path, target_path)?;
+                let target_name = target_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("document");
+                let backup_path =
+                    parent.join(format!(".{}.bak-{}", target_name, uuid::Uuid::now_v7()));
+                std::fs::rename(target_path, &backup_path)?;
+                if let Err(rename_err) = std::fs::rename(&temp_path, target_path) {
+                    if let Err(restore_err) = std::fs::rename(&backup_path, target_path) {
+                        return Err(FileIoError::Io(std::io::Error::new(
+                            restore_err.kind(),
+                            format!(
+                                "atomic replace failed ({rename_err}); original is recoverable at {}",
+                                backup_path.display()
+                            ),
+                        )));
+                    }
+                    return Err(rename_err.into());
+                }
+                let _ = std::fs::remove_file(backup_path);
             } else {
                 return Err(err.into());
             }
@@ -501,7 +519,7 @@ mod tests {
         write_bytes_atomic(&path, b"first").expect("initial atomic write");
         write_bytes_atomic(&path, b"second").expect("replacement atomic write");
         assert_eq!(std::fs::read(&path).expect("read atomic output"), b"second");
-        let prefix = format!(".tmp_export_");
+        let prefix = ".tmp_export_";
         let leftovers = std::fs::read_dir(&dir)
             .expect("read temp directory")
             .filter_map(Result::ok)
