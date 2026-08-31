@@ -1218,18 +1218,26 @@ pub fn import_deck_from_pptx_with_report(path: &Path) -> Result<PptxImportResult
         .as_deref()
         .map(|rels| parse_presentation_slide_order(&presentation, rels))
         .unwrap_or_default();
+    let mut discovered_slides = Vec::new();
+    for index in 0..archive.len() {
+        let name = archive.by_index(index)?.name().to_string();
+        if let Some(number) = name
+            .strip_prefix("ppt/slides/slide")
+            .and_then(|value| value.strip_suffix(".xml"))
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            discovered_slides.push(number);
+        }
+    }
+    discovered_slides.sort_unstable();
     if slide_numbers.is_empty() {
-        for index in 0..archive.len() {
-            let name = archive.by_index(index)?.name().to_string();
-            if let Some(number) = name
-                .strip_prefix("ppt/slides/slide")
-                .and_then(|value| value.strip_suffix(".xml"))
-                .and_then(|value| value.parse::<usize>().ok())
-            {
+        slide_numbers = discovered_slides;
+    } else {
+        for number in discovered_slides {
+            if !slide_numbers.contains(&number) {
                 slide_numbers.push(number);
             }
         }
-        slide_numbers.sort_unstable();
     }
     slide_numbers.dedup();
     if slide_numbers.is_empty() {
