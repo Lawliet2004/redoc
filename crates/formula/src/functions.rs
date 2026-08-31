@@ -1950,4 +1950,99 @@ mod tests {
             FormulaValue::String("b".into())
         );
     }
+
+    #[test]
+    fn test_financial_functions() {
+        let pmt = match eval_func(
+            "PMT",
+            &[
+                FormulaValue::Number(0.1),
+                FormulaValue::Number(3.0),
+                FormulaValue::Number(1000.0),
+            ],
+        ) {
+            FormulaValue::Number(value) => value,
+            other => panic!("expected PMT number, got {other:?}"),
+        };
+        assert!((pmt + 402.114803625).abs() < 1e-8);
+
+        let pv = match eval_func(
+            "PV",
+            &[
+                FormulaValue::Number(0.1),
+                FormulaValue::Number(3.0),
+                FormulaValue::Number(pmt),
+            ],
+        ) {
+            FormulaValue::Number(value) => value,
+            other => panic!("expected PV number, got {other:?}"),
+        };
+        assert!((pv - 1000.0).abs() < 1e-8);
+
+        let fv = match eval_func(
+            "FV",
+            &[
+                FormulaValue::Number(0.1),
+                FormulaValue::Number(3.0),
+                FormulaValue::Number(pmt),
+                FormulaValue::Number(1000.0),
+            ],
+        ) {
+            FormulaValue::Number(value) => value,
+            other => panic!("expected FV number, got {other:?}"),
+        };
+        assert!(fv.abs() < 1e-8);
+
+        let cashflows = arr(
+            &[
+                FormulaValue::Number(-100.0),
+                FormulaValue::Number(60.0),
+                FormulaValue::Number(60.0),
+            ],
+            3,
+            1,
+        );
+        let npv = eval_func("NPV", &[FormulaValue::Number(0.1), cashflows.clone()]);
+        match npv {
+            FormulaValue::Number(value) => assert!((value - 3.7565740045078755).abs() < 1e-12),
+            other => panic!("expected NPV number, got {other:?}"),
+        }
+        let irr = match eval_func("IRR", &[cashflows]) {
+            FormulaValue::Number(value) => value,
+            other => panic!("expected IRR number, got {other:?}"),
+        };
+        assert!((irr - 0.1306623862918075).abs() < 1e-8);
+    }
+
+    #[test]
+    fn financial_functions_reject_invalid_inputs() {
+        assert_eq!(
+            eval_func(
+                "PMT",
+                &[
+                    FormulaValue::Number(0.1),
+                    FormulaValue::Number(0.0),
+                    FormulaValue::Number(100.0),
+                ],
+            ),
+            FormulaValue::Error(FormulaError::DivZero)
+        );
+        assert_eq!(
+            eval_func(
+                "PV",
+                &[
+                    FormulaValue::Number(0.1),
+                    FormulaValue::Number(3.0),
+                    FormulaValue::Number(10.0),
+                    FormulaValue::Number(0.0),
+                    FormulaValue::Number(2.0),
+                ],
+            ),
+            FormulaValue::Error(FormulaError::Value)
+        );
+        assert_eq!(
+            eval_func("IRR", &[arr(&[FormulaValue::Number(1.0)], 1, 1)]),
+            FormulaValue::Error(FormulaError::Value)
+        );
+    }
 }

@@ -93,7 +93,7 @@
       "area": "spreadsheet",
       "title": "Formula parsing, evaluation, dependencies, and recalculation",
       "status": "implemented",
-      "evidence": ["crates/formula/src/eval.rs", "crates/formula/tests/proptest_formula.rs"],
+      "evidence": ["crates/formula/src/eval.rs", "crates/formula/src/functions.rs::test_financial_functions", "crates/formula/tests/proptest_formula.rs"],
       "targetPhase": "spreadsheet-completion"
     },
     {
