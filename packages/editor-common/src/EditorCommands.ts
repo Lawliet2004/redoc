@@ -9,6 +9,7 @@ export type EditorCommandId =
   | "insert-textbox"
   | "insert-chart"
   | "insert-page-break"
+  | "add-comment"
   | "bold"
   | "italic"
   | "underline"

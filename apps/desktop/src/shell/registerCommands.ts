@@ -215,6 +215,14 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
         action: () => emitEditorCommand("insert-page-break"),
       },
       {
+        id: "add-comment",
+        title: "New Comment",
+        mode: "doc" as const,
+        menuPath: ["Review", "New Comment"],
+        disabled: () => ctx.activeMode() !== "doc",
+        action: () => emitEditorCommand("add-comment"),
+      },
+      {
         id: "clear-formatting",
         title: "Clear Direct Formatting",
         mode: "global" as const,
