@@ -19,14 +19,17 @@ export function runPerfBudgetGate({ log = console } = {}) {
     {
       cwd: process.cwd(),
       encoding: "utf8",
-      shell: true,
+      // Cargo and its arguments are fixed; avoid shell mediation so paths or
+      // environment values cannot be interpreted as command text.
+      timeout: 120_000,
       env: { ...process.env },
     },
   );
 
   const output = `${result.stdout || ""}\n${result.stderr || ""}`;
-  if (result.status !== 0) {
+  if (result.error || result.status !== 0) {
     log.error("Perf budget gate: grid_render bench failed.");
+    if (result.error) log.error(String(result.error));
     if (output.trim()) log.error(output.trim());
     return { skipped: false, warmMedianMs: null, failed: true };
   }
