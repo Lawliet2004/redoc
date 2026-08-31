@@ -8,5 +8,6 @@ The historical audit snapshot in `implementation-status.md` predates the current
 - DOCX package imports enforce file, archive-entry, XML-part, per-media, and total-media bounds; oversized media is skipped with an explicit compatibility warning.
 - The desktop shell now keeps multiple independent document sessions in tabbed views. Each session retains its editor mode, content, path, backend id, and dirty/error state; closing a dirty tab requires confirmation and editor panes remount per session to prevent state leakage.
 - Writer now supports persistent selection-anchored comments with a review sidebar, resolve/reopen/delete actions, and anchor mapping across edits. Tracked-change diffing and native DOCX comment round-trip remain future work.
+- Calc conditional-formatting rules now survive workbook command round-trips and render on visible and merged cells for numeric/text predicates; pivot tables, slicers, scenarios, data bars, and color-scale authoring remain partial.
 
 These features remain intentionally partial where Office fidelity requires advanced masters, placeholders, pivot charts, or animation timelines.
