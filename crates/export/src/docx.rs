@@ -1630,6 +1630,7 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
     let mut document_position = 0usize;
     let mut paragraph_start = 0usize;
     let mut paragraph_text_units = 0usize;
+    let mut pending_page_break = false;
     let mut comment_ranges: HashMap<usize, (usize, usize)> = HashMap::new();
     let mut open_list: Option<OpenList> = None;
     let mut buffer = Vec::new();
@@ -1798,6 +1799,13 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                     }
                 }
                 b"w:commentReference" => {}
+                b"w:br" => {
+                    if docx_attr(&event, b"type").as_deref() == Some("page") {
+                        pending_page_break = true;
+                    } else {
+                        record_unsupported_docx_construct(&mut warnings, event.name().as_ref());
+                    }
+                }
                 b"w:b" => run_state.bold = true,
                 b"w:i" => run_state.italic = true,
                 b"w:u" => run_state.underline = true,
@@ -1927,16 +1935,28 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                             content.push(image);
                         }
                     }
-                    if let Some(content) = cell_content.as_mut() {
-                        content.push(node);
-                    } else if let Some(num_id) = paragraph_num_id {
-                        let list_type = list_type_for_num_id(num_id, &num_formats);
-                        let list_item = json!({ "type": "list_item", "content": [node] });
-                        if let Some(open) = &mut open_list {
-                            if open.num_id == num_id && open.list_type == list_type {
-                                open.items.push(list_item);
+                    let node_has_content = node
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .is_some_and(|content| !content.is_empty());
+                    if node_has_content || !pending_page_break {
+                        if let Some(content) = cell_content.as_mut() {
+                            content.push(node);
+                        } else if let Some(num_id) = paragraph_num_id {
+                            let list_type = list_type_for_num_id(num_id, &num_formats);
+                            let list_item = json!({ "type": "list_item", "content": [node] });
+                            if let Some(open) = &mut open_list {
+                                if open.num_id == num_id && open.list_type == list_type {
+                                    open.items.push(list_item);
+                                } else {
+                                    flush_open_list(&mut open_list, &mut paragraphs);
+                                    open_list = Some(OpenList {
+                                        list_type,
+                                        num_id,
+                                        items: vec![list_item],
+                                    });
+                                }
                             } else {
-                                flush_open_list(&mut open_list, &mut paragraphs);
                                 open_list = Some(OpenList {
                                     list_type,
                                     num_id,
@@ -1944,15 +1964,18 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                                 });
                             }
                         } else {
-                            open_list = Some(OpenList {
-                                list_type,
-                                num_id,
-                                items: vec![list_item],
-                            });
+                            flush_open_list(&mut open_list, &mut paragraphs);
+                            paragraphs.push(node);
                         }
-                    } else {
-                        flush_open_list(&mut open_list, &mut paragraphs);
-                        paragraphs.push(node);
+                    }
+                    if pending_page_break {
+                        if let Some(content) = cell_content.as_mut() {
+                            content.push(json!({ "type": "page_break" }));
+                        } else {
+                            flush_open_list(&mut open_list, &mut paragraphs);
+                            paragraphs.push(json!({ "type": "page_break" }));
+                        }
+                        pending_page_break = false;
                     }
                 }
                 b"w:tc" => {
@@ -2045,7 +2068,8 @@ mod tests {
         let path = std::env::temp_dir().join(format!("redoc-docx-{}.docx", std::process::id()));
         let source = json!({ "type": "doc", "content": [
             { "type": "paragraph", "content": [{ "type": "text", "text": "Hello", "marks": [{ "type": "bold" }] }] },
-            { "type": "heading", "attrs": { "level": 6 }, "content": [{ "type": "text", "text": "Deep heading" }] }
+            { "type": "heading", "attrs": { "level": 6 }, "content": [{ "type": "text", "text": "Deep heading" }] },
+            { "type": "page_break" }
         ] });
         std::fs::write(
             &path,
@@ -2060,6 +2084,7 @@ mod tests {
         );
         assert_eq!(imported["content"][1]["type"], "heading");
         assert_eq!(imported["content"][1]["attrs"]["level"], 6);
+        assert_eq!(imported["content"][2]["type"], "page_break");
         std::fs::remove_file(path).expect("cleanup docx");
     }
 
