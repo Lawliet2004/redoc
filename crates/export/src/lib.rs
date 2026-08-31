@@ -2,6 +2,7 @@ pub mod base64_util;
 pub mod docx;
 pub mod pdf;
 pub mod pptx;
+pub mod pptx_import;
 pub mod xlsx;
 
 pub use docx::{
@@ -9,6 +10,7 @@ pub use docx::{
 };
 pub use pdf::{export_deck_to_pdf, export_doc_to_pdf, export_workbook_to_pdf};
 pub use pptx::export_deck_to_pptx;
+pub use pptx_import::{import_deck_from_pptx_with_report, PptxImportResult};
 pub use xlsx::{
     export_workbook_to_xlsx, import_workbook_from_xlsx, import_workbook_from_xlsx_with_report,
     XlsxImportResult,

@@ -1,0 +1,637 @@
+use crate::base64_util::encode_base64;
+use crate::pdf::ExportError;
+use quick_xml::events::Event;
+use quick_xml::Reader;
+use redoc_slide_engine::{DeckModel, ElementKind, SlideElement};
+use serde::Serialize;
+use std::collections::HashMap;
+use std::io::{Error, ErrorKind, Read};
+use std::path::Path;
+
+const EMU_PER_CANVAS_UNIT: f64 = 9_525.0;
+const MAX_XML_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PptxImportResult {
+    pub deck: DeckModel,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Default)]
+struct ElementBuilder {
+    kind: BuilderKind,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    rotation: f64,
+    shape_type: String,
+    text: String,
+    font_size: f64,
+    font_family: String,
+    color: String,
+    align: String,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    bullets: bool,
+    fill_color: String,
+    stroke_color: String,
+    stroke_width: f64,
+    image_rel: Option<String>,
+}
+
+#[derive(Default, PartialEq, Eq)]
+enum BuilderKind {
+    #[default]
+    TextOrShape,
+    Connector,
+    Image,
+}
+
+fn invalid_data(message: impl Into<String>) -> ExportError {
+    ExportError::Io(Error::new(ErrorKind::InvalidData, message.into()))
+}
+
+fn local_name(name: &[u8]) -> &[u8] {
+    name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
+}
+
+fn attribute(event: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<String> {
+    event.attributes().flatten().find_map(|attr| {
+        (local_name(attr.key.as_ref()) == name)
+            .then(|| String::from_utf8_lossy(attr.value.as_ref()).into_owned())
+    })
+}
+
+fn parse_f64(value: Option<&str>, fallback: f64) -> f64 {
+    value
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(fallback)
+}
+
+fn parse_emu(value: Option<&str>) -> f64 {
+    parse_f64(value, 0.0) / EMU_PER_CANVAS_UNIT
+}
+
+fn parse_color(value: &str, fallback: &str) -> String {
+    let value = value.trim();
+    if value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        format!("#{value}")
+    } else {
+        fallback.to_string()
+    }
+}
+
+fn mime_for_path(path: &str) -> &'static str {
+    match path
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        _ => "image/png",
+    }
+}
+
+fn normalize_target(target: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    if target.starts_with('/') {
+        parts.push("ppt".to_string());
+    } else {
+        parts.extend(["ppt".to_string(), "slides".to_string()]);
+    }
+    for part in target.trim_start_matches('/').split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.len() <= 1 {
+                    return None;
+                }
+                parts.pop();
+            }
+            value => parts.push(value.to_string()),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+fn read_entry(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    path: &str,
+    limit: u64,
+) -> Result<Vec<u8>, ExportError> {
+    let mut entry = archive
+        .by_name(path)
+        .map_err(|error| invalid_data(format!("missing {path}: {error}")))?;
+    if entry.size() > limit {
+        return Err(invalid_data(format!(
+            "{path} exceeds the {limit} byte limit"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn read_relationships(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    slide_number: usize,
+) -> Result<HashMap<String, String>, ExportError> {
+    let path = format!("ppt/slides/_rels/slide{slide_number}.xml.rels");
+    let Ok(bytes) = read_entry(archive, &path, MAX_XML_BYTES) else {
+        return Ok(HashMap::new());
+    };
+    let mut reader = Reader::from_reader(bytes.as_slice());
+    let mut buffer = Vec::new();
+    let mut relationships = HashMap::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Empty(event)) | Ok(Event::Start(event))
+                if local_name(event.name().as_ref()) == b"Relationship" =>
+            {
+                let id = attribute(&event, b"Id");
+                let target = attribute(&event, b"Target");
+                if let (Some(id), Some(target)) = (id, target) {
+                    if let Some(path) = normalize_target(&target) {
+                        relationships.insert(id, path);
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(invalid_data(format!("invalid relationships XML: {error}"))),
+        }
+        buffer.clear();
+    }
+    Ok(relationships)
+}
+
+fn parse_slide(
+    xml: &[u8],
+    slide_number: usize,
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    relationships: &HashMap<String, String>,
+    warnings: &mut Vec<String>,
+) -> Result<redoc_slide_engine::Slide, ExportError> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut current: Option<ElementBuilder> = None;
+    let mut in_text = false;
+    let mut color_context = None::<&'static str>;
+    let mut elements = Vec::new();
+    let mut z_index = 0i32;
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => {
+                let name = local_name(event.name().as_ref()).to_vec();
+                match name.as_slice() {
+                    b"sp" if current.is_none() => current = Some(ElementBuilder::default()),
+                    b"cxnSp" if current.is_none() => {
+                        current = Some(ElementBuilder {
+                            kind: BuilderKind::Connector,
+                            stroke_color: "#1e293b".to_string(),
+                            stroke_width: 1.0,
+                            ..Default::default()
+                        });
+                    }
+                    b"pic" if current.is_none() => {
+                        current = Some(ElementBuilder {
+                            kind: BuilderKind::Image,
+                            ..Default::default()
+                        });
+                    }
+                    b"graphicFrame" if current.is_none() => {
+                        warnings.push(format!("slide {slide_number}: table or chart was skipped"));
+                    }
+                    b"off" => {
+                        if let Some(element) = current.as_mut() {
+                            element.x = parse_emu(attribute(&event, b"x").as_deref());
+                            element.y = parse_emu(attribute(&event, b"y").as_deref());
+                        }
+                    }
+                    b"ext" => {
+                        if let Some(element) = current.as_mut() {
+                            element.width = parse_emu(attribute(&event, b"cx").as_deref());
+                            element.height = parse_emu(attribute(&event, b"cy").as_deref());
+                        }
+                    }
+                    b"xfrm" => {
+                        if let Some(element) = current.as_mut() {
+                            element.rotation =
+                                parse_f64(attribute(&event, b"rot").as_deref(), 0.0) / 60_000.0;
+                        }
+                    }
+                    b"prstGeom" => {
+                        if let Some(element) = current.as_mut() {
+                            element.shape_type =
+                                attribute(&event, b"prst").unwrap_or_else(|| "rect".to_string());
+                        }
+                    }
+                    b"blip" => {
+                        if let Some(element) = current.as_mut() {
+                            element.image_rel = attribute(&event, b"embed");
+                        }
+                    }
+                    b"pPr" => {
+                        if let Some(element) = current.as_mut() {
+                            element.align = match attribute(&event, b"algn").as_deref() {
+                                Some("ctr") => "center",
+                                Some("r") => "right",
+                                Some("j") => "justify",
+                                _ => "left",
+                            }
+                            .to_string();
+                            element.bullets = stack.iter().any(|item| item.as_slice() == b"buChar");
+                        }
+                    }
+                    b"rPr" => {
+                        if let Some(element) = current.as_mut() {
+                            element.font_size =
+                                parse_f64(attribute(&event, b"sz").as_deref(), 1800.0) / 100.0;
+                            element.bold = attribute(&event, b"b").as_deref() == Some("1");
+                            element.italic = attribute(&event, b"i").as_deref() == Some("1");
+                            element.underline =
+                                attribute(&event, b"u").is_some_and(|value| value != "none");
+                        }
+                    }
+                    b"latin" => {
+                        if let Some(element) = current.as_mut() {
+                            element.font_family =
+                                attribute(&event, b"typeface").unwrap_or_default();
+                        }
+                    }
+                    b"solidFill" => {
+                        color_context = if stack.iter().any(|item| item.as_slice() == b"rPr") {
+                            Some("text")
+                        } else if stack.iter().any(|item| item.as_slice() == b"ln") {
+                            Some("stroke")
+                        } else {
+                            Some("fill")
+                        };
+                    }
+                    b"srgbClr" => {
+                        if let (Some(context), Some(value), Some(element)) =
+                            (color_context, attribute(&event, b"val"), current.as_mut())
+                        {
+                            match context {
+                                "text" => element.color = parse_color(&value, "#1e293b"),
+                                "stroke" => element.stroke_color = parse_color(&value, "#1e293b"),
+                                "fill" => element.fill_color = parse_color(&value, "#ffffff"),
+                                _ => {}
+                            }
+                        }
+                    }
+                    b"t" => in_text = true,
+                    _ => {}
+                }
+                stack.push(name);
+            }
+            Ok(Event::Empty(event)) => {
+                let name = local_name(event.name().as_ref()).to_vec();
+                if name.as_slice() == b"br" {
+                    if let Some(element) = current.as_mut() {
+                        element.text.push('\n');
+                    }
+                } else if name.as_slice() == b"srgbClr" {
+                    if let (Some(context), Some(value), Some(element)) =
+                        (color_context, attribute(&event, b"val"), current.as_mut())
+                    {
+                        match context {
+                            "text" => element.color = parse_color(&value, "#1e293b"),
+                            "stroke" => element.stroke_color = parse_color(&value, "#1e293b"),
+                            "fill" => element.fill_color = parse_color(&value, "#ffffff"),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Ok(Event::Text(event)) if in_text => {
+                if let Some(element) = current.as_mut() {
+                    let text = event
+                        .unescape()
+                        .map_err(|error| invalid_data(format!("invalid slide text: {error}")))?;
+                    element.text.push_str(&text);
+                }
+            }
+            Ok(Event::End(event)) => {
+                let name = local_name(event.name().as_ref()).to_vec();
+                if name.as_slice() == b"t" {
+                    in_text = false;
+                }
+                if matches!(name.as_slice(), b"sp" | b"cxnSp" | b"pic") {
+                    if let Some(element) = current.take() {
+                        if element.kind == BuilderKind::Image {
+                            if let Some(rel_id) = element.image_rel.as_deref() {
+                                if let Some(media_path) = relationships.get(rel_id) {
+                                    let media = read_entry(archive, media_path, MAX_MEDIA_BYTES)?;
+                                    let mime = mime_for_path(media_path);
+                                    elements.push(SlideElement {
+                                        id: format!("pptx-{slide_number}-{z_index}"),
+                                        x: element.x,
+                                        y: element.y,
+                                        width: element.width,
+                                        height: element.height,
+                                        rotation: element.rotation,
+                                        z_index,
+                                        entrance: "none".to_string(),
+                                        kind: ElementKind::Image {
+                                            asset_hash: format!(
+                                                "data:{mime};base64,{}",
+                                                encode_base64(&media)
+                                            ),
+                                            mime: mime.to_string(),
+                                        },
+                                    });
+                                    z_index += 1;
+                                } else {
+                                    warnings.push(format!("slide {slide_number}: image relationship {rel_id} was missing"));
+                                }
+                            }
+                        } else if element.kind == BuilderKind::Connector {
+                            let shape_type = if element.shape_type == "line" {
+                                "line"
+                            } else {
+                                "arrow"
+                            };
+                            elements.push(SlideElement {
+                                id: format!("pptx-{slide_number}-{z_index}"),
+                                x: element.x,
+                                y: element.y,
+                                width: element.width,
+                                height: element.height,
+                                rotation: element.rotation,
+                                z_index,
+                                entrance: "none".to_string(),
+                                kind: ElementKind::Shape {
+                                    shape_type: shape_type.to_string(),
+                                    fill_color: element.fill_color,
+                                    stroke_color: element.stroke_color,
+                                    stroke_width: element.stroke_width.max(0.1),
+                                    text: element.text,
+                                },
+                            });
+                            z_index += 1;
+                        } else if !element.text.trim().is_empty() {
+                            if element.shape_type.is_empty() {
+                                elements.push(SlideElement {
+                                    id: format!("pptx-{slide_number}-{z_index}"),
+                                    x: element.x,
+                                    y: element.y,
+                                    width: element.width,
+                                    height: element.height,
+                                    rotation: element.rotation,
+                                    z_index,
+                                    entrance: "none".to_string(),
+                                    kind: ElementKind::Text {
+                                        text: element.text,
+                                        font_size: element.font_size.max(1.0),
+                                        font_family: if element.font_family.is_empty() {
+                                            "Calibri".to_string()
+                                        } else {
+                                            element.font_family
+                                        },
+                                        color: if element.color.is_empty() {
+                                            "#1e293b".to_string()
+                                        } else {
+                                            element.color
+                                        },
+                                        align: if element.align.is_empty() {
+                                            "left".to_string()
+                                        } else {
+                                            element.align
+                                        },
+                                        bold: element.bold,
+                                        italic: element.italic,
+                                        underline: element.underline,
+                                        bullets: element.bullets,
+                                    },
+                                });
+                            } else {
+                                elements.push(SlideElement {
+                                    id: format!("pptx-{slide_number}-{z_index}"),
+                                    x: element.x,
+                                    y: element.y,
+                                    width: element.width,
+                                    height: element.height,
+                                    rotation: element.rotation,
+                                    z_index,
+                                    entrance: "none".to_string(),
+                                    kind: ElementKind::Shape {
+                                        shape_type: element.shape_type,
+                                        fill_color: if element.fill_color.is_empty() {
+                                            "#ffffff".to_string()
+                                        } else {
+                                            element.fill_color
+                                        },
+                                        stroke_color: if element.stroke_color.is_empty() {
+                                            "#1e293b".to_string()
+                                        } else {
+                                            element.stroke_color
+                                        },
+                                        stroke_width: element.stroke_width.max(0.1),
+                                        text: element.text,
+                                    },
+                                });
+                            }
+                            z_index += 1;
+                        }
+                    }
+                }
+                stack.pop();
+                color_context = None;
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(invalid_data(format!("invalid slide XML: {error}"))),
+        }
+        buffer.clear();
+    }
+
+    let transition = if xml
+        .windows(b"<p:fade".len())
+        .any(|window| window == b"<p:fade")
+    {
+        "fade"
+    } else if xml
+        .windows(b"<p:push dir=\"l\"".len())
+        .any(|window| window == b"<p:push dir=\"l\"")
+    {
+        "slide-left"
+    } else if xml
+        .windows(b"<p:push dir=\"r\"".len())
+        .any(|window| window == b"<p:push dir=\"r\"")
+    {
+        "slide-right"
+    } else {
+        "none"
+    };
+
+    Ok(redoc_slide_engine::Slide {
+        id: format!("pptx-slide-{slide_number}"),
+        layout: "blank".to_string(),
+        elements,
+        notes: String::new(),
+        bg_override: None,
+        transition: transition.to_string(),
+    })
+}
+
+fn parse_notes(xml: &[u8]) -> Result<String, ExportError> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut in_text = false;
+    let mut notes = String::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => in_text = local_name(event.name().as_ref()) == b"t",
+            Ok(Event::Text(event)) if in_text => {
+                notes.push_str(
+                    &event
+                        .unescape()
+                        .map_err(|error| invalid_data(format!("invalid notes XML: {error}")))?,
+                );
+            }
+            Ok(Event::End(event)) if local_name(event.name().as_ref()) == b"t" => in_text = false,
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(invalid_data(format!("invalid notes XML: {error}"))),
+        }
+        buffer.clear();
+    }
+    Ok(notes)
+}
+
+fn parse_canvas_size(xml: &[u8]) -> (f64, f64) {
+    let mut reader = Reader::from_reader(xml);
+    let mut buffer = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Empty(event)) | Ok(Event::Start(event))
+                if local_name(event.name().as_ref()) == b"sldSz" =>
+            {
+                return (
+                    parse_emu(attribute(&event, b"cx").as_deref()).max(1.0),
+                    parse_emu(attribute(&event, b"cy").as_deref()).max(1.0),
+                );
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+        buffer.clear();
+    }
+    (960.0, 540.0)
+}
+
+pub fn import_deck_from_pptx_with_report(path: &Path) -> Result<PptxImportResult, ExportError> {
+    let file = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    let presentation = read_entry(&mut archive, "ppt/presentation.xml", MAX_XML_BYTES)?;
+    let (canvas_width, canvas_height) = parse_canvas_size(&presentation);
+    let mut slide_numbers = Vec::new();
+    for index in 0..archive.len() {
+        let name = archive.by_index(index)?.name().to_string();
+        if let Some(number) = name
+            .strip_prefix("ppt/slides/slide")
+            .and_then(|value| value.strip_suffix(".xml"))
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            slide_numbers.push(number);
+        }
+    }
+    slide_numbers.sort_unstable();
+    slide_numbers.dedup();
+    if slide_numbers.is_empty() {
+        return Err(invalid_data("PPTX contains no slides"));
+    }
+
+    let mut warnings = Vec::new();
+    let mut slides = Vec::with_capacity(slide_numbers.len());
+    for slide_number in slide_numbers {
+        let slide_path = format!("ppt/slides/slide{slide_number}.xml");
+        let xml = read_entry(&mut archive, &slide_path, MAX_XML_BYTES)?;
+        let relationships = read_relationships(&mut archive, slide_number)?;
+        let mut slide = parse_slide(
+            &xml,
+            slide_number,
+            &mut archive,
+            &relationships,
+            &mut warnings,
+        )?;
+        let notes_path = format!("ppt/notesSlides/notesSlide{slide_number}.xml");
+        if let Ok(notes_xml) = read_entry(&mut archive, &notes_path, MAX_XML_BYTES) {
+            slide.notes = parse_notes(&notes_xml)?;
+        }
+        slides.push(slide);
+    }
+
+    let mut deck = DeckModel::new_default();
+    deck.slides = slides;
+    deck.canvas_width = canvas_width;
+    deck.canvas_height = canvas_height;
+    deck.active_slide_index = 0;
+    deck.fade_between_slides = deck.slides.iter().any(|slide| slide.transition == "fade");
+    Ok(PptxImportResult { deck, warnings })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redoc_slide_engine::ElementKind;
+
+    #[test]
+    fn imports_redoc_pptx_text_shapes_and_notes() {
+        let mut source = DeckModel::new_default();
+        source.slides[0].elements.clear();
+        source.slides[0].notes = "Speaker note".to_string();
+        source.slides[0].transition = "fade".to_string();
+        source.slides[0].elements.push(SlideElement {
+            id: "text".to_string(),
+            x: 100.0,
+            y: 80.0,
+            width: 400.0,
+            height: 80.0,
+            rotation: 0.0,
+            z_index: 1,
+            entrance: "none".to_string(),
+            kind: ElementKind::Text {
+                text: "Imported title".to_string(),
+                font_size: 32.0,
+                font_family: "Arial".to_string(),
+                color: "#ff0000".to_string(),
+                align: "center".to_string(),
+                bold: true,
+                italic: false,
+                underline: false,
+                bullets: false,
+            },
+        });
+        let bytes = crate::pptx::export_deck_to_pptx(&source).expect("export source deck");
+        let path =
+            std::env::temp_dir().join(format!("redoc-pptx-import-{}.pptx", std::process::id()));
+        std::fs::write(&path, bytes).expect("write source deck");
+        let result = import_deck_from_pptx_with_report(&path).expect("import source deck");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result.deck.slides.len(), 1);
+        assert_eq!(result.deck.slides[0].notes, "Speaker note");
+        assert_eq!(result.deck.slides[0].transition, "fade");
+        assert!(result.deck.slides[0]
+            .elements
+            .iter()
+            .any(|element| matches!(
+                &element.kind,
+                ElementKind::Text { text, bold, .. } if text == "Imported title" && *bold
+            )));
+    }
+}
