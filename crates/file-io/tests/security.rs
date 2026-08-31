@@ -30,7 +30,8 @@ fn rejects_oversized_body_before_parsing() {
     let oversized = vec![b' '; 16 * 1024 * 1024 + 1];
     let archive = write_archive(&[("meta.json", &minimal_meta("")), ("body.json", &oversized)]);
 
-    let error = RedocContainer::read_from_file(archive.path()).expect_err("oversized body must fail");
+    let error =
+        RedocContainer::read_from_file(archive.path()).expect_err("oversized body must fail");
     assert!(matches!(error, FileIoError::EntryTooLarge { name, .. } if name == "body.json"));
 }
 
@@ -44,21 +45,27 @@ fn rejects_asset_hash_and_size_mismatches() {
     let archive = write_archive(&[
         ("meta.json", &meta),
         ("body.json", br#"{"type":"doc","content":[]}"#),
-        ("assets/0000000000000000000000000000000000000000000000000000000000000000", b"abc"),
+        (
+            "assets/0000000000000000000000000000000000000000000000000000000000000000",
+            b"abc",
+        ),
     ]);
 
-    let error = RedocContainer::read_from_file(archive.path()).expect_err("hash mismatch must fail");
+    let error =
+        RedocContainer::read_from_file(archive.path()).expect_err("hash mismatch must fail");
     assert!(matches!(error, FileIoError::AssetHashMismatch { .. }));
 }
 
 #[test]
 fn rejects_invalid_asset_path_reference() {
-    let meta = minimal_meta(r#"{"hash":"../escape","mime":"image/png","name":"image.png","size":1}"#);
+    let meta =
+        minimal_meta(r#"{"hash":"../escape","mime":"image/png","name":"image.png","size":1}"#);
     let archive = write_archive(&[
         ("meta.json", &meta),
         ("body.json", br#"{"type":"doc","content":[]}"#),
     ]);
 
-    let error = RedocContainer::read_from_file(archive.path()).expect_err("invalid asset must fail");
+    let error =
+        RedocContainer::read_from_file(archive.path()).expect_err("invalid asset must fail");
     assert!(matches!(error, FileIoError::InvalidAsset(value) if value == "../escape"));
 }
