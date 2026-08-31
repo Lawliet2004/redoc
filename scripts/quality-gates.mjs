@@ -49,6 +49,17 @@ if (!generatedSource.includes("tauri-specta") || !generatedSource.includes("expo
   process.exit(1);
 }
 
+const formulaCatalog = spawnSync("node", ["scripts/generate-formula-catalog.mjs", "--check"], {
+  cwd: process.cwd(),
+  encoding: "utf8",
+  shell: true,
+});
+if (formulaCatalog.status !== 0) {
+  console.error("Quality gate: generated formula catalog is stale.");
+  if (formulaCatalog.stderr?.trim()) console.error(formulaCatalog.stderr.trim());
+  process.exit(formulaCatalog.status ?? 1);
+}
+
 const sourceRoot = join(process.cwd(), "packages");
 const sourceFiles = [];
 const visitSource = (directory) => {

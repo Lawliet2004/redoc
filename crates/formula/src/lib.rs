@@ -1,10 +1,12 @@
 pub mod ast;
+pub mod catalog;
 pub mod dep_graph;
 pub mod eval;
 pub mod functions;
 pub mod parser;
 
 pub use ast::{BinaryOp, Expr, FormulaError, FormulaValue};
+pub use catalog::{is_supported_function, SUPPORTED_FUNCTION_NAMES};
 pub use dep_graph::{CellCoord, DependencyGraph};
 pub use eval::{eval_expr, extract_dependencies, CellProvider};
 pub use functions::eval_func;
