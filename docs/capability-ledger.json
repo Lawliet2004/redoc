@@ -68,8 +68,8 @@
       "id": "doc.review",
       "area": "document",
       "title": "Comments, tracked changes, compare, and accept/reject",
-      "status": "absent",
-      "evidence": [],
+      "status": "partial",
+      "evidence": ["packages/doc-editor/src/DocEditor.tsx", "packages/doc-editor/src/review.ts", "packages/doc-editor/src/review.test.ts"],
       "targetPhase": "document-completion"
     },
     {
