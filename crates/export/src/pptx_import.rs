@@ -11,6 +11,8 @@ use std::path::Path;
 const EMU_PER_CANVAS_UNIT: f64 = 9_525.0;
 const MAX_XML_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+const MAX_TOTAL_MEDIA_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PptxImportResult {
@@ -179,6 +181,7 @@ fn parse_slide(
     archive: &mut zip::ZipArchive<std::fs::File>,
     relationships: &HashMap<String, String>,
     warnings: &mut Vec<String>,
+    media_bytes: &mut u64,
 ) -> Result<redoc_slide_engine::Slide, ExportError> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(true);
@@ -364,26 +367,43 @@ fn parse_slide(
                         if element.kind == BuilderKind::Image {
                             if let Some(rel_id) = element.image_rel.as_deref() {
                                 if let Some(media_path) = relationships.get(rel_id) {
-                                    let media = read_entry(archive, media_path, MAX_MEDIA_BYTES)?;
-                                    let mime = mime_for_path(media_path);
-                                    elements.push(SlideElement {
-                                        id: format!("pptx-{slide_number}-{z_index}"),
-                                        x: element.x,
-                                        y: element.y,
-                                        width: element.width,
-                                        height: element.height,
-                                        rotation: element.rotation,
-                                        z_index,
-                                        entrance: "none".to_string(),
-                                        kind: ElementKind::Image {
-                                            asset_hash: format!(
-                                                "data:{mime};base64,{}",
-                                                encode_base64(&media)
-                                            ),
-                                            mime: mime.to_string(),
-                                        },
-                                    });
-                                    z_index += 1;
+                                    let media_size = archive
+                                        .by_name(media_path)
+                                        .map(|entry| entry.size())
+                                        .unwrap_or(0);
+                                    if *media_bytes + media_size > MAX_TOTAL_MEDIA_BYTES {
+                                        warnings.push(format!(
+                                            "slide {slide_number}: image {media_path} skipped because the total media limit was exceeded"
+                                        ));
+                                    } else {
+                                        match read_entry(archive, media_path, MAX_MEDIA_BYTES) {
+                                            Ok(media) => {
+                                                *media_bytes += media.len() as u64;
+                                                let mime = mime_for_path(media_path);
+                                                elements.push(SlideElement {
+                                                    id: format!("pptx-{slide_number}-{z_index}"),
+                                                    x: element.x,
+                                                    y: element.y,
+                                                    width: element.width,
+                                                    height: element.height,
+                                                    rotation: element.rotation,
+                                                    z_index,
+                                                    entrance: "none".to_string(),
+                                                    kind: ElementKind::Image {
+                                                        asset_hash: format!(
+                                                            "data:{mime};base64,{}",
+                                                            encode_base64(&media)
+                                                        ),
+                                                        mime: mime.to_string(),
+                                                    },
+                                                });
+                                                z_index += 1;
+                                            }
+                                            Err(error) => warnings.push(format!(
+                                                "slide {slide_number}: image {media_path} skipped ({error})"
+                                            )),
+                                        }
+                                    }
                                 } else {
                                     warnings.push(format!("slide {slide_number}: image relationship {rel_id} was missing"));
                                 }
@@ -574,6 +594,11 @@ fn parse_canvas_size(xml: &[u8]) -> (f64, f64) {
 pub fn import_deck_from_pptx_with_report(path: &Path) -> Result<PptxImportResult, ExportError> {
     let file = std::fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(file)?;
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(invalid_data(format!(
+            "PPTX archive has too many entries (maximum {MAX_ARCHIVE_ENTRIES})"
+        )));
+    }
     let presentation = read_entry(&mut archive, "ppt/presentation.xml", MAX_XML_BYTES)?;
     let (canvas_width, canvas_height) = parse_canvas_size(&presentation);
     let mut slide_numbers = Vec::new();
@@ -595,6 +620,7 @@ pub fn import_deck_from_pptx_with_report(path: &Path) -> Result<PptxImportResult
 
     let mut warnings = Vec::new();
     let mut slides = Vec::with_capacity(slide_numbers.len());
+    let mut media_bytes = 0u64;
     for slide_number in slide_numbers {
         let slide_path = format!("ppt/slides/slide{slide_number}.xml");
         let xml = read_entry(&mut archive, &slide_path, MAX_XML_BYTES)?;
@@ -605,6 +631,7 @@ pub fn import_deck_from_pptx_with_report(path: &Path) -> Result<PptxImportResult
             &mut archive,
             &relationships,
             &mut warnings,
+            &mut media_bytes,
         )?;
         let notes_path = format!("ppt/notesSlides/notesSlide{slide_number}.xml");
         if let Ok(notes_xml) = read_entry(&mut archive, &notes_path, MAX_XML_BYTES) {
@@ -710,5 +737,25 @@ mod tests {
             &element.kind,
             ElementKind::Image { asset_hash, mime } if asset_hash.starts_with("data:image/png;base64,") && mime == "image/png"
         )));
+    }
+
+    #[test]
+    fn rejects_pptx_archives_with_too_many_entries() {
+        let path = std::env::temp_dir().join(format!(
+            "redoc-pptx-entry-limit-{}.pptx",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).expect("create oversized archive");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::FileOptions::default();
+        for index in 0..=MAX_ARCHIVE_ENTRIES {
+            zip.start_file(format!("padding/{index}"), options)
+                .expect("write padding entry");
+        }
+        zip.finish().expect("finish oversized archive");
+
+        let error = import_deck_from_pptx_with_report(&path).expect_err("entry limit must fail");
+        let _ = std::fs::remove_file(path);
+        assert!(error.to_string().contains("too many entries"));
     }
 }
