@@ -44,9 +44,9 @@
       "id": "shell.multi-document",
       "area": "shared",
       "title": "Multiple open documents with independent dirty state",
-      "status": "absent",
-      "evidence": [],
-      "targetPhase": "shared-shell"
+      "status": "implemented",
+      "evidence": ["apps/desktop/src/App.tsx", "packages/editor-common/src/documentSessions.ts", "packages/editor-common/src/documentSessions.test.ts"],
+      "targetPhase": "cross-platform-certification"
     },
     {
       "id": "doc.core-editing",

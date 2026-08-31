@@ -9,3 +9,4 @@ export * from "./IconSidebar";
 export * from "./Ruler";
 export * from "./FindBar";
 export * from "./ShortcutCheatsheet";
+export * from "./documentSessions";
