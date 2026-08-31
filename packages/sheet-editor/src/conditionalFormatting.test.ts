@@ -19,4 +19,15 @@ describe("conditional formatting", () => {
     expect(conditionalStyleForCell(source, 1, 1, [rule])).toEqual(rule.style);
     expect(source.style).toBeUndefined();
   });
+
+  it("maps color-scale values into stable buckets", () => {
+    const rule = {
+      range,
+      type: "colorScale" as const,
+      scaleColors: ["#fee2e2", "#fef08a", "#dcfce7"],
+    };
+    expect(conditionalStyleForCell(cell("0"), 1, 1, [rule])?.bgColor).toBe("#fee2e2");
+    expect(conditionalStyleForCell(cell("50"), 1, 1, [rule])?.bgColor).toBe("#fef08a");
+    expect(conditionalStyleForCell(cell("100"), 1, 1, [rule])?.bgColor).toBe("#dcfce7");
+  });
 });

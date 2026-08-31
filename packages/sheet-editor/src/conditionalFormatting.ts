@@ -41,7 +41,11 @@ export function conditionalStyleForCell(
   for (const rule of rules) {
     if (!conditionalRuleMatches(cell, row, col, rule)) continue;
     if (rule.type === "colorScale" && rule.scaleColors?.length) {
-      const index = Math.min(rule.scaleColors.length - 1, Math.max(0, Math.floor(Number(cell.raw) % rule.scaleColors.length)));
+      const normalized = Math.max(0, Math.min(1, Number(cell.raw) / 100));
+      const index = Math.min(
+        rule.scaleColors.length - 1,
+        Math.max(0, Math.round(normalized * (rule.scaleColors.length - 1))),
+      );
       return { ...rule.style, bgColor: rule.scaleColors[index] };
     }
     return rule.style;
