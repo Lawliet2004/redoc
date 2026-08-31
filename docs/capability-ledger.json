@@ -109,7 +109,7 @@
       "area": "spreadsheet",
       "title": "Tables, conditional formatting, pivot tables, slicers, and scenarios",
       "status": "partial",
-      "evidence": ["packages/sheet-editor/src/SheetEditor.tsx", "packages/sheet-editor/src/conditionalFormatting.ts", "packages/sheet-editor/src/conditionalFormatting.test.ts", "crates/sheet-engine/src/workbook/model.rs"],
+      "evidence": ["packages/sheet-editor/src/SheetEditor.tsx", "packages/sheet-editor/src/conditionalFormatting.ts", "packages/sheet-editor/src/conditionalFormatting.test.ts", "packages/sheet-editor/src/pivotTables.ts", "packages/sheet-editor/src/pivotTables.test.ts", "crates/sheet-engine/src/workbook/model.rs"],
       "targetPhase": "spreadsheet-completion"
     },
     {
