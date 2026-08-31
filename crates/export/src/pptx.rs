@@ -43,6 +43,30 @@ fn xfrm_xml(element: &redoc_slide_engine::SlideElement) -> String {
     }
 }
 
+fn graphic_xfrm_xml(element: &redoc_slide_engine::SlideElement) -> String {
+    let x = emu(element.x);
+    let y = emu(element.y);
+    let width = emu(element.width);
+    let height = emu(element.height);
+    let rot = ooxml_rot(element.rotation);
+    if rot == 0 {
+        format!(r#"<p:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{width}" cy="{height}"/></p:xfrm>"#)
+    } else {
+        format!(
+            r#"<p:xfrm rot="{rot}"><a:off x="{x}" y="{y}"/><a:ext cx="{width}" cy="{height}"/></p:xfrm>"#
+        )
+    }
+}
+
+fn native_chart_type(chart_type: &str) -> Option<&'static str> {
+    match chart_type.to_ascii_lowercase().as_str() {
+        "bar" | "column" => Some("bar"),
+        "line" => Some("line"),
+        "pie" => Some("pie"),
+        _ => None,
+    }
+}
+
 fn image_bytes(element: &redoc_slide_engine::SlideElement) -> Option<Vec<u8>> {
     let ElementKind::Image { asset_hash, .. } = &element.kind else {
         return None;
@@ -61,10 +85,66 @@ fn image_extension(element: &redoc_slide_engine::SlideElement) -> &'static str {
     }
 }
 
+fn chart_part_xml(chart_type: &str, data: &[f64], labels: &[String]) -> Option<String> {
+    let chart_type = native_chart_type(chart_type)?;
+    let title = labels.first().map(String::as_str).unwrap_or("Chart");
+    let categories = data
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let label = labels
+                .get(index + 1)
+                .or_else(|| labels.get(index))
+                .map(String::as_str)
+                .unwrap_or_else(|| "Item");
+            format!(
+                r#"<c:pt idx="{index}"><c:v>{}</c:v></c:pt>"#,
+                xml_escape(label)
+            )
+        })
+        .collect::<String>();
+    let values = data
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let value = if value.is_finite() { *value } else { 0.0 };
+            format!(r#"<c:pt idx="{index}"><c:v>{value}</c:v></c:pt>"#)
+        })
+        .collect::<String>();
+    let point_count = data.len();
+    let series = format!(
+        r#"<c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>Series 1</c:v></c:tx><c:cat><c:strLit><c:ptCount val="{point_count}"/>{categories}</c:strLit></c:cat><c:val><c:numLit><c:formatCode>General</c:formatCode><c:ptCount val="{point_count}"/>{values}</c:numLit></c:val></c:ser>"#
+    );
+    let title_xml = format!(
+        r#"<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{}</a:t></a:r></a:p></c:rich></c:tx><c:layout/><c:overlay val="0"/></c:title>"#,
+        xml_escape(title)
+    );
+    let plot_xml = if chart_type == "bar" {
+        format!(
+            r#"<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="0"/>{series}<c:axId val="-2068027336"/><c:axId val="-2019485262"/></c:barChart>"#
+        )
+    } else if chart_type == "line" {
+        format!(
+            r#"<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>{series}<c:axId val="-2068027336"/><c:axId val="-2019485262"/></c:lineChart>"#
+        )
+    } else {
+        format!(r#"<c:pieChart><c:varyColors val="1"/>{series}</c:pieChart>"#)
+    };
+    let axes = if chart_type == "pie" {
+        String::new()
+    } else {
+        r#"<c:catAx><c:axId val="-2068027336"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="-2019485262"/><c:crosses val="autoZero"/><c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/></c:catAx><c:valAx><c:axId val="-2019485262"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:majorGridlines/><c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="-2068027336"/><c:crosses val="autoZero"/><c:crossBetween val="midCat"/></c:valAx>"#.to_string()
+    };
+    Some(format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:date1904 val="0"/><c:lang val="en-US"/><c:roundedCorners val="0"/><c:chart>{title_xml}<c:plotArea><c:layout/>{plot_xml}{axes}</c:plotArea><c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart><c:printSettings><c:headerFooter/><c:pageMargins b="0.75" l="0.7" r="0.7" t="0.75" header="0.3" footer="0.3"/><c:pageSetup/></c:printSettings></c:chartSpace>"#
+    ))
+}
+
 fn shape_xml(
     id: u32,
     element: &redoc_slide_engine::SlideElement,
     image_rel: Option<&str>,
+    chart_rel: Option<&str>,
 ) -> String {
     let xfrm = xfrm_xml(element);
     match &element.kind {
@@ -248,6 +328,12 @@ fn shape_xml(
             data,
             labels,
         } => {
+            if let Some(chart_rel) = chart_rel {
+                return format!(
+                    r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{id}" name="Chart {id}"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>{}<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="{chart_rel}"/></a:graphicData></a:graphic></p:graphicFrame>"#,
+                    graphic_xfrm_xml(element)
+                );
+            }
             let title = labels
                 .first()
                 .map(|s| xml_escape(s))
@@ -353,6 +439,12 @@ fn animation_timing_xml(slide: &redoc_slide_engine::Slide) -> String {
 fn slide_xml(slide: &redoc_slide_engine::Slide) -> String {
     let mut shapes = String::new();
     let mut image_index = 0usize;
+    let image_count = slide
+        .elements
+        .iter()
+        .filter(|element| image_bytes(element).is_some())
+        .count();
+    let mut chart_index = 0usize;
     for (index, element) in slide.elements.iter().enumerate() {
         let relationship = if image_bytes(element).is_some() {
             image_index += 1;
@@ -360,10 +452,18 @@ fn slide_xml(slide: &redoc_slide_engine::Slide) -> String {
         } else {
             None
         };
+        let chart_relationship = if matches!(&element.kind, ElementKind::Chart { chart_type, .. } if native_chart_type(chart_type).is_some())
+        {
+            chart_index += 1;
+            Some(format!("rId{}", image_count + chart_index + 1))
+        } else {
+            None
+        };
         shapes.push_str(&shape_xml(
             (index + 2) as u32,
             element,
             relationship.as_deref(),
+            chart_relationship.as_deref(),
         ));
     }
     let transition = transition_xml(&slide.transition);
@@ -402,6 +502,19 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
                 r#"<Override PartName="/ppt/notesSlides/notesSlide{notes_index}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>"#
             )
             .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
+        }
+        let mut chart_index = 0usize;
+        for element in &slide.elements {
+            if let ElementKind::Chart { chart_type, .. } = &element.kind {
+                if native_chart_type(chart_type).is_some() {
+                    chart_index += 1;
+                    write!(
+                        overrides,
+                        r#"<Override PartName="/ppt/charts/chart{index}_{chart_index}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>"#
+                    )
+                    .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
+                }
+            }
         }
     }
     overrides.push_str("</Types>");
@@ -491,6 +604,29 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
                 )
                 .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
                 next_rel += 1;
+            }
+        }
+        let mut chart_index = 0usize;
+        for element in &slide.elements {
+            if let ElementKind::Chart {
+                chart_type,
+                data,
+                labels,
+            } = &element.kind
+            {
+                if native_chart_type(chart_type).is_some() {
+                    chart_index += 1;
+                    write!(
+                        relationships,
+                        r#"<Relationship Id="rId{next_rel}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart{slide_number}_{chart_index}.xml"/>"#
+                    )
+                    .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
+                    next_rel += 1;
+                    add(
+                        &format!("ppt/charts/chart{slide_number}_{chart_index}.xml"),
+                        chart_part_xml(chart_type, data, labels).expect("native chart type"),
+                    )?;
+                }
             }
         }
         let has_notes = !slide.notes.trim().is_empty();
@@ -619,6 +755,55 @@ mod tests {
         assert!(xml.contains("<p:timing>"));
         assert!(xml.contains("<p:animEffect transition=\"in\" filter=\"fade\">"));
         assert!(xml.contains("<p:spTgt spid=\"2\"/>"));
+    }
+
+    #[test]
+    fn writes_native_chart_parts_for_supported_types() {
+        let mut deck = DeckModel::new_default();
+        deck.slides[0].elements.clear();
+        deck.slides[0]
+            .elements
+            .push(redoc_slide_engine::SlideElement {
+                id: "chart-1".to_string(),
+                x: 20.0,
+                y: 20.0,
+                width: 320.0,
+                height: 180.0,
+                rotation: 0.0,
+                z_index: 1,
+                entrance: "none".to_string(),
+                kind: ElementKind::Chart {
+                    chart_type: "bar".to_string(),
+                    data: vec![1.0, 2.5],
+                    labels: vec!["Revenue".to_string(), "Q1".to_string(), "Q2".to_string()],
+                },
+            });
+        let bytes = export_deck_to_pptx(&deck).expect("export chart pptx");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read pptx zip");
+        let mut slide = String::new();
+        archive
+            .by_name("ppt/slides/slide1.xml")
+            .expect("slide1")
+            .read_to_string(&mut slide)
+            .expect("read slide xml");
+        assert!(slide.contains("drawingml/2006/chart"));
+        assert!(slide.contains("r:id=\"rId2\""));
+        let mut chart = String::new();
+        archive
+            .by_name("ppt/charts/chart1_1.xml")
+            .expect("chart part")
+            .read_to_string(&mut chart)
+            .expect("read chart xml");
+        assert!(chart.contains("<c:barChart>"));
+        assert!(chart.contains("Revenue"));
+        assert!(chart.contains("Q2"));
+        let mut content_types = String::new();
+        archive
+            .by_name("[Content_Types].xml")
+            .expect("content types")
+            .read_to_string(&mut content_types)
+            .expect("read content types");
+        assert!(content_types.contains("drawingml.chart+xml"));
     }
 
     #[test]

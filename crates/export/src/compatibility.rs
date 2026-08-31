@@ -163,10 +163,20 @@ fn pptx_warnings(deck: &DeckModel) -> Vec<String> {
                 );
             }
             match &element.kind {
-                ElementKind::Chart { .. } => push_once(
-                    &mut warnings,
-                    "PPTX: charts export as editable summary shapes, not native chart parts.",
-                ),
+                ElementKind::Chart { chart_type, .. }
+                    if !matches!(
+                        chart_type.to_ascii_lowercase().as_str(),
+                        "bar" | "column" | "line" | "pie"
+                    ) =>
+                {
+                    push_once(
+                        &mut warnings,
+                        format!(
+                            "PPTX: chart type '{}' exports as an editable summary shape, not a native chart part.",
+                            chart_type
+                        ),
+                    );
+                }
                 ElementKind::Shape { shape_type, .. }
                     if !matches!(shape_type.as_str(), "rect" | "ellipse" | "line" | "arrow") =>
                 {
@@ -290,7 +300,7 @@ mod tests {
             z_index: 1,
             entrance: "zoom".to_string(),
             kind: ElementKind::Chart {
-                chart_type: "bar".to_string(),
+                chart_type: "radar".to_string(),
                 data: vec![1.0],
                 labels: vec!["Value".to_string()],
             },
@@ -308,6 +318,6 @@ mod tests {
             .any(|warning| warning.contains("entrance animation")));
         assert!(warnings
             .iter()
-            .any(|warning| warning.contains("charts export")));
+            .any(|warning| warning.contains("chart type")));
     }
 }

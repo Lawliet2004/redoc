@@ -2,7 +2,7 @@
 
 The historical audit snapshot in `implementation-status.md` predates the current interoperability work. The following capabilities are now implemented beyond that snapshot:
 
-- PPTX import is available from the desktop open dialog, OS open events, and drag-and-drop. Text, basic shapes/connectors, embedded media, notes, canvas size, basic transitions, and native table parts are preserved; unsupported graphic frames remain visible as editable placeholders with explicit warnings. Charts and advanced graphic-frame features remain partial.
+- PPTX import is available from the desktop open dialog, OS open events, and drag-and-drop. Text, basic shapes/connectors, embedded media, notes, canvas size, basic transitions, native table parts, and supported bar/line/pie chart parts are preserved; unsupported graphic frames remain visible as editable placeholders with explicit warnings. Other chart types and advanced graphic-frame features remain partial.
 - XLSX chart parts are mapped through worksheet and drawing relationships into `ChartModel` entries with chart type, title, and placement anchors. Unsupported or malformed chart mappings remain non-fatal warnings.
 - Exported bytes use an atomic write path with fsync, temporary-file cleanup, and backup/restore replacement fallback.
 - DOCX package imports enforce file, archive-entry, XML-part, per-media, and total-media bounds; oversized media is skipped with an explicit compatibility warning.
@@ -19,6 +19,6 @@ The historical audit snapshot in `implementation-status.md` predates the current
 - Calc structured table metadata now round-trips through native XLSX table parts, including table name, range, headers, style, and header/totals-row flags; advanced calculated columns and slicer connections remain partial.
 - Calc can now create and persist a deterministic one-row-field pivot summary (sum, count, or average) below a selected source range, with refresh-on-workbook-build and removal controls; multi-field pivots, slicers, scenarios, and native XLSX pivot parts remain partial.
 - Presentation entrance fades now persist per-element delay, duration, and reveal order through `.redoc` deck normalization and presenter playback. PPTX export/import also round-trips the supported native fade effect and its shape target using PresentationML timing (with the current native export using a deterministic 350 ms duration and document order); a full Office-compatible animation timeline, authored timing, and trigger model remain partial.
-- Office export now has a preflight compatibility inspector. DOCX, XLSX, and PPTX exports surface deterministic warnings for known fallback paths (unsupported nodes, native pivot/chart/table gaps, unsupported animations/shapes, and non-inline media) after the file is written; the inspector is intentionally advisory and does not block a user export.
+- Office export now has a preflight compatibility inspector. DOCX, XLSX, and PPTX exports surface deterministic warnings for known fallback paths (unsupported nodes, native pivot parts, unsupported chart types/animations/shapes, and non-inline media) after the file is written; the inspector is intentionally advisory and does not block a user export.
 
 These features remain intentionally partial where Office fidelity requires advanced masters, placeholders, pivot charts, or animation timelines.

@@ -46,6 +46,7 @@ struct ElementBuilder {
     table_data: Vec<Vec<String>>,
     table_row: Option<Vec<String>>,
     table_cell: Option<String>,
+    chart_rel: Option<String>,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -55,6 +56,7 @@ enum BuilderKind {
     Connector,
     Image,
     Table,
+    Chart,
     UnsupportedGraphic,
 }
 
@@ -229,6 +231,87 @@ fn animated_shape_ids(xml: &[u8]) -> HashSet<u32> {
     ids
 }
 
+fn parse_chart_part(xml: &[u8]) -> Option<(String, Vec<f64>, Vec<String>)> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut chart_type = None::<String>;
+    let mut title = None::<String>;
+    let mut labels = Vec::new();
+    let mut values = Vec::new();
+    let mut in_title = false;
+    let mut in_categories = false;
+    let mut in_values = false;
+    let mut in_value = false;
+    let mut current_value = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => {
+                let name = local_name(event.name().as_ref()).to_vec();
+                match name.as_slice() {
+                    b"barChart" => chart_type = Some("bar".to_string()),
+                    b"lineChart" => chart_type = Some("line".to_string()),
+                    b"pieChart" => chart_type = Some("pie".to_string()),
+                    b"title" => in_title = true,
+                    b"cat" => in_categories = true,
+                    b"val" => in_values = true,
+                    b"v" if in_title || in_categories || in_values => {
+                        in_value = true;
+                        current_value.clear();
+                    }
+                    b"t" if in_title => {
+                        in_value = true;
+                        current_value.clear();
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(event)) if in_value => {
+                current_value.push_str(
+                    &event
+                        .unescape()
+                        .ok()
+                        .map(|text| text.into_owned())
+                        .unwrap_or_default(),
+                );
+            }
+            Ok(Event::End(event)) => {
+                let name = local_name(event.name().as_ref()).to_vec();
+                match name.as_slice() {
+                    b"v" | b"t" if in_value => {
+                        if in_title {
+                            if title.is_none() {
+                                title = Some(current_value.clone());
+                            }
+                        } else if in_categories {
+                            labels.push(current_value.clone());
+                        } else if in_values {
+                            if let Ok(value) = current_value.parse::<f64>() {
+                                values.push(value);
+                            }
+                        }
+                        in_value = false;
+                    }
+                    b"title" => in_title = false,
+                    b"cat" => in_categories = false,
+                    b"val" => in_values = false,
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+        buffer.clear();
+    }
+
+    let chart_type = chart_type?;
+    let mut all_labels = Vec::with_capacity(labels.len() + 1);
+    all_labels.push(title.unwrap_or_else(|| "Chart".to_string()));
+    all_labels.extend(labels);
+    Some((chart_type, values, all_labels))
+}
+
 fn parse_slide(
     xml: &[u8],
     slide_number: usize,
@@ -279,10 +362,21 @@ fn parse_slide(
                     }
                     b"graphicData" => {
                         if let Some(element) = current.as_mut() {
-                            if attribute(&event, b"uri").as_deref()
-                                == Some("http://schemas.openxmlformats.org/drawingml/2006/table")
-                            {
-                                element.kind = BuilderKind::Table;
+                            match attribute(&event, b"uri").as_deref() {
+                                Some("http://schemas.openxmlformats.org/drawingml/2006/table") => {
+                                    element.kind = BuilderKind::Table;
+                                }
+                                Some("http://schemas.openxmlformats.org/drawingml/2006/chart") => {
+                                    element.kind = BuilderKind::Chart;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    b"chart" => {
+                        if let Some(element) = current.as_mut() {
+                            if element.kind == BuilderKind::Chart {
+                                element.chart_rel = attribute(&event, b"id");
                             }
                         }
                     }
@@ -422,6 +516,12 @@ fn parse_slide(
                 } else if name.as_slice() == b"blip" {
                     if let Some(element) = current.as_mut() {
                         element.image_rel = attribute(&event, b"embed");
+                    }
+                } else if name.as_slice() == b"chart" {
+                    if let Some(element) = current.as_mut() {
+                        if element.kind == BuilderKind::Chart {
+                            element.chart_rel = attribute(&event, b"id");
+                        }
                     }
                 } else if name.as_slice() == b"br" {
                     if let Some(element) = current.as_mut() {
@@ -596,6 +696,69 @@ fn parse_slide(
                                 },
                                 kind: ElementKind::Table { rows, cols, data },
                             });
+                            z_index += 1;
+                        } else if element.kind == BuilderKind::Chart {
+                            let chart_path = element
+                                .chart_rel
+                                .as_deref()
+                                .and_then(|rel_id| relationships.get(rel_id))
+                                .cloned();
+                            let chart = chart_path
+                                .as_deref()
+                                .and_then(|path| read_entry(archive, path, MAX_XML_BYTES).ok())
+                                .and_then(|xml| parse_chart_part(&xml));
+                            if let Some((chart_type, data, labels)) = chart {
+                                elements.push(SlideElement {
+                                    id: format!("pptx-{slide_number}-{z_index}"),
+                                    x: element.x,
+                                    y: element.y,
+                                    width: element.width,
+                                    height: element.height,
+                                    rotation: element.rotation,
+                                    z_index,
+                                    entrance: if element
+                                        .shape_id
+                                        .is_some_and(|id| animated_ids.contains(&id))
+                                    {
+                                        "fade".to_string()
+                                    } else {
+                                        "none".to_string()
+                                    },
+                                    kind: ElementKind::Chart {
+                                        chart_type,
+                                        data,
+                                        labels,
+                                    },
+                                });
+                            } else {
+                                warnings.push(format!(
+                                    "slide {slide_number}: chart part was missing or unsupported; preserved as a placeholder"
+                                ));
+                                elements.push(SlideElement {
+                                    id: format!("pptx-{slide_number}-{z_index}"),
+                                    x: element.x,
+                                    y: element.y,
+                                    width: element.width.max(120.0),
+                                    height: element.height.max(80.0),
+                                    rotation: element.rotation,
+                                    z_index,
+                                    entrance: if element
+                                        .shape_id
+                                        .is_some_and(|id| animated_ids.contains(&id))
+                                    {
+                                        "fade".to_string()
+                                    } else {
+                                        "none".to_string()
+                                    },
+                                    kind: ElementKind::Shape {
+                                        shape_type: "rect".to_string(),
+                                        fill_color: "#fef3c7".to_string(),
+                                        stroke_color: "#d97706".to_string(),
+                                        stroke_width: 1.0,
+                                        text: "[Unsupported chart]".to_string(),
+                                    },
+                                });
+                            }
                             z_index += 1;
                         } else if element.kind == BuilderKind::UnsupportedGraphic {
                             warnings.push(format!(
@@ -1020,6 +1183,60 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("unsupported table")));
+    }
+
+    #[test]
+    fn round_trips_native_pptx_charts() {
+        let mut source = DeckModel::new_default();
+        source.slides[0].elements.clear();
+        source.slides[0].elements.push(SlideElement {
+            id: "chart".to_string(),
+            x: 40.0,
+            y: 80.0,
+            width: 360.0,
+            height: 180.0,
+            rotation: 0.0,
+            z_index: 1,
+            entrance: "none".to_string(),
+            kind: ElementKind::Chart {
+                chart_type: "pie".to_string(),
+                data: vec![1.0, 2.0, 3.5],
+                labels: vec![
+                    "Mix".to_string(),
+                    "A".to_string(),
+                    "B".to_string(),
+                    "C".to_string(),
+                ],
+            },
+        });
+        let bytes = crate::pptx::export_deck_to_pptx(&source).expect("export chart deck");
+        let path = std::env::temp_dir().join(format!(
+            "redoc-pptx-chart-roundtrip-{}.pptx",
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).expect("write chart deck");
+        let result = import_deck_from_pptx_with_report(&path).expect("import chart deck");
+        let _ = std::fs::remove_file(&path);
+
+        let imported = result.deck.slides[0]
+            .elements
+            .iter()
+            .find_map(|element| match &element.kind {
+                ElementKind::Chart {
+                    chart_type,
+                    data,
+                    labels,
+                } => Some((chart_type.clone(), data.clone(), labels.clone())),
+                _ => None,
+            })
+            .expect("native chart element");
+        assert_eq!(imported.0, "pie");
+        assert_eq!(imported.1, vec![1.0, 2.0, 3.5]);
+        assert_eq!(imported.2, vec!["Mix", "A", "B", "C"]);
+        assert!(!result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("chart part was missing")));
     }
 
     #[test]
