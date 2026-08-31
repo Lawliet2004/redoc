@@ -967,6 +967,95 @@ fn parse_canvas_size(xml: &[u8]) -> (f64, f64) {
     (960.0, 540.0)
 }
 
+fn parse_theme(xml: &[u8]) -> redoc_slide_engine::SlideTheme {
+    let mut theme = redoc_slide_engine::SlideTheme::default();
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut color_slot = None::<&'static str>;
+    let mut in_major_font = false;
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => {
+                let name = local_name(event.name().as_ref()).to_vec();
+                match name.as_slice() {
+                    b"theme" => {
+                        if let Some(value) = attribute(&event, b"name") {
+                            theme.name = value;
+                        }
+                    }
+                    b"dk1" => color_slot = Some("text"),
+                    b"lt1" => color_slot = Some("background"),
+                    b"accent1" => color_slot = Some("accent"),
+                    b"majorFont" => in_major_font = true,
+                    b"latin" if in_major_font => {
+                        if let Some(value) = attribute(&event, b"typeface") {
+                            if !value.trim().is_empty() {
+                                theme.font_family = value;
+                            }
+                        }
+                    }
+                    b"srgbClr" => {
+                        if let (Some(slot), Some(value)) =
+                            (color_slot, attribute(&event, b"val"))
+                        {
+                            let value = value.trim();
+                            if value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            {
+                                let color = format!("#{value}");
+                                match slot {
+                                    "text" => theme.text_color = color,
+                                    "background" => theme.bg_color = color,
+                                    "accent" => theme.accent_color = color,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(event)) => {
+                let name = local_name(event.name().as_ref()).to_vec();
+                if name.as_slice() == b"srgbClr" {
+                    if let (Some(slot), Some(value)) =
+                        (color_slot, attribute(&event, b"val"))
+                    {
+                        let value = value.trim();
+                        if value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                            let color = format!("#{value}");
+                            match slot {
+                                "text" => theme.text_color = color,
+                                "background" => theme.bg_color = color,
+                                "accent" => theme.accent_color = color,
+                                _ => {}
+                            }
+                        }
+                    }
+                } else if name.as_slice() == b"latin" && in_major_font {
+                    if let Some(value) = attribute(&event, b"typeface") {
+                        if !value.trim().is_empty() {
+                            theme.font_family = value;
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(event)) => match local_name(event.name().as_ref()) {
+                b"dk1" | b"lt1" | b"accent1" => color_slot = None,
+                b"majorFont" => in_major_font = false,
+                _ => {}
+            },
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+        buffer.clear();
+    }
+
+    theme.id = "pptx-imported-theme".to_string();
+    theme
+}
+
 pub fn import_deck_from_pptx_with_report(path: &Path) -> Result<PptxImportResult, ExportError> {
     let file = std::fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(file)?;
@@ -977,6 +1066,9 @@ pub fn import_deck_from_pptx_with_report(path: &Path) -> Result<PptxImportResult
     }
     let presentation = read_entry(&mut archive, "ppt/presentation.xml", MAX_XML_BYTES)?;
     let (canvas_width, canvas_height) = parse_canvas_size(&presentation);
+    let theme = read_entry(&mut archive, "ppt/theme/theme1.xml", MAX_XML_BYTES)
+        .map(|xml| parse_theme(&xml))
+        .unwrap_or_default();
     let mut slide_numbers = Vec::new();
     for index in 0..archive.len() {
         let name = archive.by_index(index)?.name().to_string();
@@ -1020,6 +1112,7 @@ pub fn import_deck_from_pptx_with_report(path: &Path) -> Result<PptxImportResult
     deck.slides = slides;
     deck.canvas_width = canvas_width;
     deck.canvas_height = canvas_height;
+    deck.theme = theme;
     deck.active_slide_index = 0;
     deck.fade_between_slides = deck.slides.iter().any(|slide| slide.transition == "fade");
     Ok(PptxImportResult { deck, warnings })
@@ -1188,6 +1281,11 @@ mod tests {
     #[test]
     fn round_trips_native_pptx_charts() {
         let mut source = DeckModel::new_default();
+        source.theme.name = "Imported Theme".to_string();
+        source.theme.bg_color = "#102030".to_string();
+        source.theme.text_color = "#f0f0f0".to_string();
+        source.theme.accent_color = "#c06020".to_string();
+        source.theme.font_family = "Aptos".to_string();
         source.slides[0].elements.clear();
         source.slides[0].elements.push(SlideElement {
             id: "chart".to_string(),
@@ -1233,6 +1331,11 @@ mod tests {
         assert_eq!(imported.0, "pie");
         assert_eq!(imported.1, vec![1.0, 2.0, 3.5]);
         assert_eq!(imported.2, vec!["Mix", "A", "B", "C"]);
+        assert_eq!(result.deck.theme.name, "Imported Theme");
+        assert_eq!(result.deck.theme.bg_color, "#102030");
+        assert_eq!(result.deck.theme.text_color, "#f0f0f0");
+        assert_eq!(result.deck.theme.accent_color, "#c06020");
+        assert_eq!(result.deck.theme.font_family, "Aptos");
         assert!(!result
             .warnings
             .iter()
