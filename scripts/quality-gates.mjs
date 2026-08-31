@@ -52,10 +52,11 @@ if (!generatedSource.includes("tauri-specta") || !generatedSource.includes("expo
 const formulaCatalog = spawnSync("node", ["scripts/generate-formula-catalog.mjs", "--check"], {
   cwd: process.cwd(),
   encoding: "utf8",
-  shell: true,
+  timeout: 120_000,
 });
-if (formulaCatalog.status !== 0) {
+if (formulaCatalog.error || formulaCatalog.status !== 0) {
   console.error("Quality gate: generated formula catalog is stale.");
+  if (formulaCatalog.error) console.error(String(formulaCatalog.error));
   if (formulaCatalog.stderr?.trim()) console.error(formulaCatalog.stderr.trim());
   process.exit(formulaCatalog.status ?? 1);
 }
@@ -111,13 +112,18 @@ for (const [file, markers] of accessibilityMarkers) {
   }
 }
 
-const a11y = spawnSync("pnpm", ["a11y:check"], {
+const a11yCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+const a11y = spawnSync(a11yCommand, ["a11y:check"], {
   cwd: process.cwd(),
   stdio: "inherit",
-  shell: true,
+  timeout: 120_000,
+  // pnpm is a .cmd shim on Windows and requires shell mediation there; the
+  // command and arguments are fixed, so no user-controlled text is evaluated.
+  shell: process.platform === "win32",
 });
-if (a11y.status !== 0) {
+if (a11y.error || a11y.status !== 0) {
   console.error("Quality gate: axe-core a11y:check failed.");
+  if (a11y.error) console.error(String(a11y.error));
   process.exit(a11y.status ?? 1);
 }
 
