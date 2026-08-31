@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use specta::Type;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub const CURRENT_FORMAT_VERSION: u32 = 1;
@@ -11,6 +11,26 @@ const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_JSON_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ASSET_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TOTAL_ASSET_BYTES: u64 = 256 * 1024 * 1024;
+
+struct TempPathGuard(Option<PathBuf>);
+
+impl TempPathGuard {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TempPathGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum FileIoError {
@@ -233,12 +253,13 @@ impl RedocContainer {
                     limit: MAX_ASSET_BYTES,
                 });
             }
-            total_asset_bytes = total_asset_bytes
-                .checked_add(asset.size)
-                .ok_or(FileIoError::EntryTooLarge {
-                    name: "assets/*".to_string(),
-                    limit: MAX_TOTAL_ASSET_BYTES,
-                })?;
+            total_asset_bytes =
+                total_asset_bytes
+                    .checked_add(asset.size)
+                    .ok_or(FileIoError::EntryTooLarge {
+                        name: "assets/*".to_string(),
+                        limit: MAX_TOTAL_ASSET_BYTES,
+                    })?;
             if total_asset_bytes > MAX_TOTAL_ASSET_BYTES {
                 return Err(FileIoError::EntryTooLarge {
                     name: "assets/*".to_string(),
@@ -291,6 +312,7 @@ impl RedocContainer {
         std::fs::create_dir_all(parent)?;
         let temp_filename = format!(".tmp_{}", uuid::Uuid::now_v7());
         let temp_path = parent.join(temp_filename);
+        let mut temp_guard = TempPathGuard::new(temp_path.clone());
 
         self.meta.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -334,6 +356,7 @@ impl RedocContainer {
             }
         }
 
+        temp_guard.disarm();
         Ok(())
     }
 }
