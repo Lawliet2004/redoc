@@ -1,5 +1,5 @@
 import { For, Show, createSignal, onMount, onCleanup } from "solid-js";
-import type { MenuDefinition } from "./MenuBar";
+import type { MenuDefinition } from "./ShortcutRegistry";
 import { t } from "@redoc/ui";
 
 export interface CommandBarAction {

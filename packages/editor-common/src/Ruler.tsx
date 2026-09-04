@@ -80,7 +80,7 @@ export function Ruler(props: RulerProps) {
             height: "0",
             "border-left": "4px solid transparent",
             "border-right": "4px solid transparent",
-            "border-top": "6px solid #ddd",
+            "border-top": "6px solid var(--text-muted)",
           }}
         />
         <div
@@ -92,7 +92,7 @@ export function Ruler(props: RulerProps) {
             height: "0",
             "border-left": "4px solid transparent",
             "border-right": "4px solid transparent",
-            "border-top": "6px solid #ddd",
+            "border-top": "6px solid var(--text-muted)",
           }}
         />
         {tabStops().map((stop) => (
@@ -105,7 +105,7 @@ export function Ruler(props: RulerProps) {
               height: "0",
               "border-left": "4px solid transparent",
               "border-right": "4px solid transparent",
-              "border-bottom": "6px solid #1a73e8",
+              "border-bottom": "6px solid var(--doc-accent)",
               transform: "translateX(-4px)",
             }}
           />

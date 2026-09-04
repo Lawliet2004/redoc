@@ -18,115 +18,44 @@ interface BubbleToolbarProps {
   onLink: () => void;
 }
 
+const buttonStyle = {
+  background: "none",
+  border: "none",
+  padding: "4px",
+  cursor: "pointer",
+  display: "flex",
+  "align-items": "center",
+  "justify-content": "center",
+  "border-radius": "4px",
+  color: "inherit",
+} as const;
+
 export const BubbleToolbar: Component<BubbleToolbarProps> = (props) => {
   return (
     <Show when={props.visible}>
       <div
+        class="g-bubble"
         style={{
           position: "fixed",
           top: `${props.top}px`,
           left: `${props.left}px`,
           transform: "translate(-50%, -100%)",
           "margin-top": "-10px",
-          display: "flex",
-          "align-items": "center",
-          gap: "4px",
-          padding: "4px",
-          background: "#ffffff",
-          border: "1px solid #dadce0",
-          "border-radius": "8px",
-          "box-shadow": "0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)",
-          "z-index": 1000,
         }}
       >
-        <button
-          onClick={(e) => { e.preventDefault(); props.onBold(); }}
-          style={{
-            background: "none",
-            border: "none",
-            padding: "4px",
-            cursor: "pointer",
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "center",
-            "border-radius": "4px",
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#f3f4f6")}
-          onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
-          title="Bold"
-        >
+        <button onClick={(e) => { e.preventDefault(); props.onBold(); }} style={buttonStyle} title="Bold">
           <IconBold width={18} height={18} />
         </button>
-        <button
-          onClick={(e) => { e.preventDefault(); props.onItalic(); }}
-          style={{
-            background: "none",
-            border: "none",
-            padding: "4px",
-            cursor: "pointer",
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "center",
-            "border-radius": "4px",
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#f3f4f6")}
-          onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
-          title="Italic"
-        >
+        <button onClick={(e) => { e.preventDefault(); props.onItalic(); }} style={buttonStyle} title="Italic">
           <IconItalic width={18} height={18} />
         </button>
-        <button
-          onClick={(e) => { e.preventDefault(); props.onUnderline(); }}
-          style={{
-            background: "none",
-            border: "none",
-            padding: "4px",
-            cursor: "pointer",
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "center",
-            "border-radius": "4px",
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#f3f4f6")}
-          onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
-          title="Underline"
-        >
+        <button onClick={(e) => { e.preventDefault(); props.onUnderline(); }} style={buttonStyle} title="Underline">
           <IconUnderline width={18} height={18} />
         </button>
-        <button
-          onClick={(e) => { e.preventDefault(); props.onStrikethrough(); }}
-          style={{
-            background: "none",
-            border: "none",
-            padding: "4px",
-            cursor: "pointer",
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "center",
-            "border-radius": "4px",
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#f3f4f6")}
-          onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
-          title="Strikethrough"
-        >
+        <button onClick={(e) => { e.preventDefault(); props.onStrikethrough(); }} style={buttonStyle} title="Strikethrough">
           <IconStrikethrough width={18} height={18} />
         </button>
-        <button
-          onClick={(e) => { e.preventDefault(); props.onLink(); }}
-          style={{
-            background: "none",
-            border: "none",
-            padding: "4px",
-            cursor: "pointer",
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "center",
-            "border-radius": "4px",
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#f3f4f6")}
-          onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
-          title="Link"
-        >
+        <button onClick={(e) => { e.preventDefault(); props.onLink(); }} style={buttonStyle} title="Link">
           <IconLink width={18} height={18} />
         </button>
       </div>

@@ -1122,14 +1122,13 @@ export function App() {
                   <IconSlide width="14" height="14" color="var(--slide-accent)" /> {t("shell.titlebar.modeImpress")}
                 </button>
               </div>
-              <div class="g-avatar-stack" role="group" aria-label={t("shell.titlebar.avatarStack")} title={t("shell.titlebar.avatarStack")}>
-                <span class="g-avatar" style={{ background: "#5b9bd5" }} title="You (offline stub)">Y</span>
-                <span class="g-avatar" style={{ background: "#70ad47" }} title="Teammate (offline stub)">T</span>
-              </div>
-              <span title={t("shell.titlebar.shareDisabledTooltip")}>
-                <Button variant="share" class="g-share-disabled" disabled aria-disabled="true" title={t("shell.titlebar.shareDisabledTooltip")}>
-                  {t("shell.titlebar.share")}
-                </Button>
+              <span
+                class="g-offline-badge"
+                title={t("shell.titlebar.shareDisabledTooltip")}
+                aria-label={t("shell.titlebar.shareDisabledTooltip")}
+              >
+                <span class="g-offline-dot" aria-hidden="true" />
+                {t("shell.titlebar.offline")}
               </span>
               <Button variant="ghost" size="sm" onClick={() => setSettingsOpen(true)} title={t("shell.titlebar.settings")} aria-label={t("shell.titlebar.settings")}>
                 <IconSettings />
@@ -1242,8 +1241,12 @@ export function App() {
         <main id="canvas-pane" data-pane="canvas" aria-label={t("shell.panes.canvas")} style={{ flex: 1, position: "relative", overflow: "hidden", "min-height": "0", "min-width": "0" }}>
           <Suspense
             fallback={
-              <div style={{ padding: "48px", "text-align": "center", color: "var(--text-muted)" }}>
-                {t("common.loading")}
+              <div class="g-editor-skeleton" role="status" aria-label={t("common.loading")}>
+                <div class="g-editor-skeleton-line" style={{ width: "38%" }} />
+                <div class="g-editor-skeleton-line" style={{ width: "72%" }} />
+                <div class="g-editor-skeleton-line" style={{ width: "55%" }} />
+                <div class="g-editor-skeleton-line" style={{ width: "80%" }} />
+                <div class="g-editor-skeleton-line" style={{ width: "46%" }} />
               </div>
             }
           >

@@ -1,5 +1,19 @@
 import { emitEditorCommand, repeatLastFormattingCommand } from "./EditorCommands";
-import type { MenuDefinition } from "./MenuBar";
+
+export interface MenuAction {
+  id: string;
+  label: string;
+  shortcut?: string;
+  disabled?: boolean;
+  separator?: boolean;
+  action?: () => void;
+}
+
+export interface MenuDefinition {
+  id: string;
+  label: string;
+  items: MenuAction[];
+}
 
 export interface CommandItem {
   id: string;

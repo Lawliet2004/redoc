@@ -1,6 +1,5 @@
-/* Phase 3 modern collaborative chrome: single command bar + inspector, Inter, hard focus rings */
+/* Phase 3 modern collaborative chrome: single command bar + inspector, system font stack, hard focus rings */
 :root {
-  --font-inter: "Inter", "Segoe UI", "Noto Sans", system-ui, sans-serif;
   --focus-ring: 2px solid var(--border-focus);
   --focus-ring-offset: 2px;
   --g-blue: #5b9bd5;
@@ -48,7 +47,7 @@
 
   --shadow-paper: 0 0 0 1px #1a1a1a, 0 4px 16px rgba(0, 0, 0, 0.55);
 
-  --font-sans: "Inter", "Segoe UI", "Noto Sans", system-ui, -apple-system, sans-serif;
+  --font-sans: "Segoe UI", "Noto Sans", system-ui, -apple-system, sans-serif;
   --font-doc: "Liberation Serif", "Times New Roman", Times, serif;
   --font-sheet: "Liberation Sans", Arial, Helvetica, sans-serif;
   --font-mono: "Liberation Mono", Consolas, "Courier New", monospace;
@@ -230,6 +229,14 @@
   from { opacity: 0; transform: scale(0.97); }
   to { opacity: 1; transform: scale(1); }
 }
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes fadeOutRight {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(16px); }
+}
 @keyframes slideInRight {
   from { opacity: 0; transform: translateX(16px); }
   to { opacity: 1; transform: translateX(0); }
@@ -330,11 +337,27 @@ select {
   color: var(--accent-color);
 }
 
+/* Selection bubble toolbar (doc editor) — token-driven so it works in both themes. */
+.g-bubble {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  color: var(--text-primary);
+  z-index: 300;
+}
+.g-bubble button:hover {
+  background: var(--color-surface-hover);
+}
+
 .g-toolbar-sep {
   width: 1px;
   height: 18px;
-  background: var(--border-color);
-  margin: 0 3px;
+  background: var(--border-color);  margin: 0 3px;
   flex-shrink: 0;
 }
 
@@ -661,29 +684,15 @@ select {
 }
 
 @media (prefers-contrast: more) {
-  :root {
-    --bg-primary: #000000;
-    --bg-secondary: #0a0a0a;
-    --bg-tertiary: #1a1a1a;
-    --bg-surface: #121212;
-    --bg-toolbar: #0f0f0f;
-    --bg-menubar: #000000;
-    --text-primary: #ffffff;
-    --text-secondary: #f0f0f0;
-    --text-muted: #d0d0d0;
-    --border-color: #ffffff;
-    --border-hover: #ffffff;
-    --accent-color: #66ccff;
-    --accent-hover: #99ddff;
-    --focus-ring: 2px solid #ffff00;
-  }
+  /* Consolidated with the high-contrast token block near the top of the file;
+     only input-element focus coverage lives here (the earlier block handles
+     tokens and button/link/tab focus). */
   .g-toolbar-btn:focus-visible,
   .g-menu-item:focus-visible,
-  button:focus-visible,
   input:focus-visible,
   select:focus-visible,
   textarea:focus-visible {
-    outline: var(--focus-ring);
+    outline: 3px solid var(--border-focus);
     outline-offset: 2px;
   }
 }
@@ -990,7 +999,7 @@ button,
 .g-toolbar-btn:focus-visible,
 .g-menu-item:focus-visible,
 [role="tab"]:focus-visible {
-  outline: 2px solid var(--focus-ring, #7c3aed);
+  outline: 2px solid var(--border-focus);
   outline-offset: 1px;
 }
 
@@ -1183,6 +1192,27 @@ body {
   opacity: 0.55;
   cursor: not-allowed;
 }
+/* Honest offline badge — replaces the cosmetic avatar stack / share stub. */
+.g-offline-badge {  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: default;
+  user-select: none;
+}
+.g-offline-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--sheet-accent);
+  flex-shrink: 0;
+}
 .g-skip-link {
   position: absolute;
   left: 8px;
@@ -1288,4 +1318,34 @@ textarea:focus-visible,
   .home-right {
     display: none;
   }
+}
+
+/* Editor loading skeleton — shown while lazy editor chunks stream in. */
+.g-editor-skeleton {
+  padding: 64px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 640px;
+}
+.g-editor-skeleton-line {
+  height: 12px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    90deg,
+    var(--bg-tertiary) 25%,
+    var(--bg-toolbar) 45%,
+    var(--bg-tertiary) 65%
+  );
+  background-size: 200% 100%;
+  animation: g-skeleton-wave 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .g-editor-skeleton-line {
+    animation: none;
+  }
+}
+@keyframes g-skeleton-wave {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
 }
