@@ -9,10 +9,10 @@ pub mod xlsx;
 pub mod xlsx_pivot;
 
 pub use compatibility::export_compatibility_warnings;
-pub use fixups::{apply_export_fixups, nearest_paper_size, transcode_image_to_png_data_uri};
 pub use docx::{
     export_doc_to_docx, import_docx_to_doc, import_docx_to_doc_with_report, DocxImportResult,
 };
+pub use fixups::{apply_export_fixups, nearest_paper_size, transcode_image_to_png_data_uri};
 pub use pdf::{export_deck_to_pdf, export_doc_to_pdf, export_workbook_to_pdf};
 pub use pptx::export_deck_to_pptx;
 pub use pptx_import::{import_deck_from_pptx_with_report, PptxImportResult};

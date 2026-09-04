@@ -1,6 +1,8 @@
 #![allow(clippy::redundant_closure_call)]
 
-use redoc_core::{audit_event, sanitize_author_name, AppSettings, AppState, RecentEntry, RecoveredDoc};
+use redoc_core::{
+    audit_event, sanitize_author_name, AppSettings, AppState, RecentEntry, RecoveredDoc,
+};
 use redoc_doc_engine::{DocWordCount, SearchMatch};
 use redoc_file_io::{HistoryEntry, MergeDecision, RedocContainer, RedocMeta};
 use redoc_sheet_engine::{SheetData, WorkbookModel};
@@ -280,7 +282,12 @@ fn open_document(
         let normalized = normalize_file_path(&path);
         let container = RedocContainer::read_from_file(&normalized).map_err(|e| e.to_string())?;
         let actor = state.settings.read().author.display_name.clone();
-        audit_event(&actor, "document.open", &container.meta.id, Some(&container.meta.mode));
+        audit_event(
+            &actor,
+            "document.open",
+            &container.meta.id,
+            Some(&container.meta.mode),
+        );
         let path_str = normalized.to_string_lossy().to_string();
         state.recents.write().add(
             path_str,
@@ -356,7 +363,12 @@ fn save_document(
         // when overwriting an existing file (last-write-wins keeps the newest
         // body, but attribution accumulates for the history drawer).
         if let Ok(previous) = RedocContainer::read_from_file(&normalized) {
-            for name in previous.meta.collaborators.iter().chain(previous.meta.author.iter()) {
+            for name in previous
+                .meta
+                .collaborators
+                .iter()
+                .chain(previous.meta.author.iter())
+            {
                 let name = sanitize_author_name(name);
                 if !container.meta.collaborators.iter().any(|c| c == &name) {
                     container.meta.collaborators.push(name);
@@ -936,13 +948,18 @@ fn list_document_history(
 /// silently overwriting.
 #[tauri::command]
 #[specta::specta]
-fn compare_document_files(current_path: String, candidate_path: String) -> Result<MergeDecision, String> {
+fn compare_document_files(
+    current_path: String,
+    candidate_path: String,
+) -> Result<MergeDecision, String> {
     handle_panic!({
         let current = RedocContainer::read_from_file(normalize_file_path(&current_path))
             .map_err(|e| e.to_string())?;
         let candidate = RedocContainer::read_from_file(normalize_file_path(&candidate_path))
             .map_err(|e| e.to_string())?;
-        Ok(redoc_file_io::SnapshotManager::merge_decision(&current, &candidate))
+        Ok(redoc_file_io::SnapshotManager::merge_decision(
+            &current, &candidate,
+        ))
     })
 }
 

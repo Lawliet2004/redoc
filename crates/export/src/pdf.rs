@@ -1352,7 +1352,9 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
                     );
                     end_element_rotation(&current, rotation);
                 }
-                ElementKind::Table { rows, cols, data, .. } => {
+                ElementKind::Table {
+                    rows, cols, data, ..
+                } => {
                     let (draw_x, draw_y) =
                         begin_element_rotation(&current, x, y, width, height, rotation);
                     current.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));

@@ -135,10 +135,7 @@ impl SnapshotManager {
     /// Last-write-wins comparison: the higher `revision` (falling back to
     /// `updated_at`) wins; equal revisions with different hashes surface a
     /// merge prompt instead of silently overwriting.
-    pub fn merge_decision(
-        current: &RedocContainer,
-        candidate: &RedocContainer,
-    ) -> MergeDecision {
+    pub fn merge_decision(current: &RedocContainer, candidate: &RedocContainer) -> MergeDecision {
         let current_stamp = current.meta.revision.max(current.meta.updated_at);
         let candidate_stamp = candidate.meta.revision.max(candidate.meta.updated_at);
         let current_hash = compute_body_hash(&current.body);

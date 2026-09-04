@@ -261,7 +261,11 @@ fn parse_xlsx_styles(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) ->
                 current_border_side = None;
             }
             Ok(Event::Start(element)) | Ok(Event::Empty(element))
-                if current_border.is_some() && matches!(element.name().as_ref(), b"top" | b"right" | b"bottom" | b"left") =>
+                if current_border.is_some()
+                    && matches!(
+                        element.name().as_ref(),
+                        b"top" | b"right" | b"bottom" | b"left"
+                    ) =>
             {
                 let side = match element.name().as_ref() {
                     b"top" => 0u8,
@@ -282,7 +286,11 @@ fn parse_xlsx_styles(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) ->
                 }
             }
             Ok(Event::End(element))
-                if current_border.is_some() && matches!(element.name().as_ref(), b"top" | b"right" | b"bottom" | b"left") =>
+                if current_border.is_some()
+                    && matches!(
+                        element.name().as_ref(),
+                        b"top" | b"right" | b"bottom" | b"left"
+                    ) =>
             {
                 current_border_side = None;
             }
@@ -3957,10 +3965,22 @@ mod tests {
                 formula: None,
                 style: Some(CellStyle {
                     borders: Some(CellBorders {
-                        top: Some(BorderEdge { style: "thin".to_string(), color: Some("#000000".to_string()) }),
-                        bottom: Some(BorderEdge { style: "medium".to_string(), color: None }),
-                        left: Some(BorderEdge { style: "dashed".to_string(), color: Some("#1f2937".to_string()) }),
-                        right: Some(BorderEdge { style: "dotted".to_string(), color: None }),
+                        top: Some(BorderEdge {
+                            style: "thin".to_string(),
+                            color: Some("#000000".to_string()),
+                        }),
+                        bottom: Some(BorderEdge {
+                            style: "medium".to_string(),
+                            color: None,
+                        }),
+                        left: Some(BorderEdge {
+                            style: "dashed".to_string(),
+                            color: Some("#1f2937".to_string()),
+                        }),
+                        right: Some(BorderEdge {
+                            style: "dotted".to_string(),
+                            color: None,
+                        }),
                     }),
                     ..Default::default()
                 }),
@@ -3980,9 +4000,7 @@ mod tests {
         )
         .expect("write xlsx");
         let imported = import_workbook_from_xlsx_with_report(&path).expect("import xlsx");
-        let borders = imported
-            .workbook
-            .sheets[0]
+        let borders = imported.workbook.sheets[0]
             .cells
             .get("1:1")
             .and_then(|cell| cell.style.as_ref())

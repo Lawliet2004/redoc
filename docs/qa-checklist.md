@@ -6,6 +6,8 @@ Run this checklist against a fresh profile and an existing profile before releas
 
 - [ ] Home screen creates a document, spreadsheet, and presentation.
 - [ ] `Ctrl+Alt+1/2/3` switches editor modes and `Ctrl+K` opens the command palette.
+- [ ] `Ctrl+=` zooms in, `Ctrl+-` zooms out, and `Ctrl+0` resets zoom from any editor.
+- [ ] Settings → author profile (display name / email / color) saves; new comments and tracked changes in all three editors attribute to that name.
 - [ ] Light, dark, and system themes render with readable contrast.
 - [ ] With OS high-contrast / `prefers-contrast: more`, chrome tokens remain readable and toolbar focus rings are visible.
 - [ ] Toolbar rows support keyboard focus: Tab into a toolbar, then ArrowLeft/Right among buttons.
@@ -38,6 +40,7 @@ Run this checklist against a fresh profile and an existing profile before releas
 ## Spreadsheet
 
 - [ ] Cell edits and formulas recalculate and persist.
+- [ ] Cell borders: apply All/Outer/Top/Bottom/None presets with each line style and color over a multi-cell selection; verify render (incl. merged cells), `.redoc` reload, and XLSX round-trip.
 - [ ] Multiple sheets can be selected, renamed, and saved.
 - [ ] AutoFilter: enable → column chevrons → uncheck value hides rows → survives `.redoc` reload.
 - [ ] Sort… dialog: multi-key stable order; undo restores prior state.
@@ -66,7 +69,8 @@ Run this checklist against a fresh profile and an existing profile before releas
 - [ ] 8-handle resize and zoom behave predictably.
 - [ ] Layout masters apply placeholder elements.
 - [ ] Supported slide layouts (title, title/content, section, two-column, picture/caption, and blank) survive PPTX export/import and retain their editable layout choice.
-- [ ] Slide transition selection (none/fade/slide left/slide right/wipe left/wipe right/zoom/dissolve) applies in the editor and presenter and survives save/reopen and PPTX round-trip.
+- [ ] Slide transition selection (none/fade/slide left/slide right/wipe left/wipe right/zoom/dissolve/morph) applies in the editor and presenter and survives save/reopen and PPTX round-trip.
+- [ ] Context menu Bring Forward / Send Backward step the selected element one layer at a time; Bring to Front / Send to Back still jump to the extremes.
 - [ ] Empty native picture placeholders remain visible as editable “Click to add Picture” shapes when imported without media; malformed media relationships produce a bounded warning without dropping the placeholder.
 - [ ] Align, distribute, group, and ungroup work on multi-selection.
 - [ ] Presenter window opens with current/next slide and speaker notes.
@@ -90,7 +94,7 @@ Run this checklist against a fresh profile and an existing profile before releas
 - [ ] Double-click / “Open with” a `.redoc` document (doc, sheet, and slide variants) launches Redoc in the matching editor mode.
 - [ ] Opening a second `.redoc` while Redoc is running loads that file into the correct mode (where the OS delivers the open event).
 - [ ] Release installer artifacts are ≤ 55 MB (`pnpm quality:check` after `tauri build`, or release CI).
-- [ ] `pnpm quality:check` passes after `pnpm build` (frontend gzip budget, generated bindings, config gates).
+- [ ] `pnpm quality:check` passes after `pnpm build` (frontend gzip budget, generated bindings, capability-ledger validation, config gates).
 - [ ] Opening `.pptx` imports supported text, shapes, media, notes, transitions, and native fade/zoom entrance effects; unsupported graphic frames remain visible with a compatibility warning.
 
 ## Recovery and failure handling

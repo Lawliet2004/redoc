@@ -34,11 +34,12 @@
     {
       "id": "shell.command-system",
       "area": "shared",
-      "title": "Unified commands, menus, shortcuts, and command palette",
+      "title": "Unified commands, menus, shortcuts (incl. Ctrl+=/-/0 zoom), and command palette",
       "status": "verified",
       "evidence": [
         "apps/desktop/src/shell/registerCommands.ts",
-        "packages/editor-common/src/ShortcutRegistry.test.ts"
+        "packages/editor-common/src/ShortcutRegistry.test.ts",
+        "packages/editor-common/src/ShortcutRegistry.test.ts::matches zoom shortcuts via physical key codes"
       ],
       "targetPhase": "shared-shell"
     },
@@ -198,12 +199,17 @@
     {
       "id": "sheet.grid-editing",
       "area": "spreadsheet",
-      "title": "Virtualized grid, cell editing, selection, clipboard, and history",
+      "title": "Virtualized grid, cell editing, selection, clipboard, history, and cell borders",
       "status": "verified",
       "evidence": [
         "packages/sheet-editor/src/SheetEditor.tsx",
         "packages/sheet-editor/src/sheetHistory.test.ts",
-        "packages/sheet-editor/src/sheetTypes.ts"
+        "packages/sheet-editor/src/sheetTypes.ts",
+        "packages/sheet-editor/src/cellBorders.ts",
+        "packages/sheet-editor/src/cellBorders.test.ts",
+        "crates/sheet-engine/src/cell.rs::CellBorders",
+        "crates/sheet-engine/src/workbook/workbook_core.rs::tests::cell_borders_survive_serialization",
+        "crates/export/src/xlsx.rs::tests::xlsx_round_trips_cell_borders"
       ],
       "targetPhase": "maintain"
     },
@@ -322,7 +328,7 @@
     {
       "id": "slide.core-editing",
       "area": "presentation",
-      "title": "Slides, text, shapes, images, tables, charts, resize, align, and group",
+      "title": "Slides, text, shapes, images, tables, charts, resize, align, group, and stepped z-order",
       "status": "verified",
       "evidence": [
         "packages/slide-editor/src/SlideEditor.tsx",
@@ -349,7 +355,7 @@
     {
       "id": "slide.animation",
       "area": "presentation",
-      "title": "Transitions, entrance/exit animations with reorder, and presenter playback",
+      "title": "Transitions (incl. morph), entrance/exit animations with reorder, and presenter playback",
       "status": "implemented",
       "evidence": [
         "packages/slide-editor/src/SlideEditor.tsx",
@@ -369,7 +375,8 @@
         "crates/export/src/pptx_import.rs::parses_supported_native_transitions",
         "crates/export/src/pptx_import.rs::parses_native_zoom_animation_kind",
         "crates/export/src/pptx_import.rs::round_trips_extended_transition_through_pptx",
-        "crates/export/src/pptx_import.rs::imports_redoc_pptx_text_shapes_and_notes"
+        "crates/export/src/pptx_import.rs::imports_redoc_pptx_text_shapes_and_notes",
+        "crates/export/src/pptx_import.rs::parses_supported_native_transitions::morph"
       ],
       "targetPhase": "presentation-completion"
     },

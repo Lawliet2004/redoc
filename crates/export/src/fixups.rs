@@ -177,11 +177,11 @@ fn visit_doc_images(body: &mut Value, applied: &mut Vec<String>, remote: &mut Ve
 }
 
 fn fixup_workbook(body: &mut Value, applied: &mut Vec<String>, remote: &mut Vec<String>) {
-    let mut workbook: redoc_sheet_engine::WorkbookModel =
-        match serde_json::from_value(body.clone()) {
-            Ok(workbook) => workbook,
-            Err(_) => return,
-        };
+    let mut workbook: redoc_sheet_engine::WorkbookModel = match serde_json::from_value(body.clone())
+    {
+        Ok(workbook) => workbook,
+        Err(_) => return,
+    };
     for sheet in &mut workbook.sheets {
         for chart in &mut sheet.charts {
             let lower = chart.chart_type.to_ascii_lowercase();
@@ -242,9 +242,7 @@ fn fixup_deck(body: &mut Value, applied: &mut Vec<String>, remote: &mut Vec<Stri
                     }
                 }
                 ElementKind::Shape {
-                    shape_type,
-                    text,
-                    ..
+                    shape_type, text, ..
                 } => {
                     let lower = shape_type.to_ascii_lowercase();
                     let known = matches!(
@@ -395,10 +393,7 @@ mod tests {
         let report = apply_export_fixups("slide", "pptx", &deck);
         let kind = &report.body["slides"][0]["elements"][0]["kind"];
         assert_eq!(kind["Shape"]["shapeType"], "rect");
-        assert!(kind["Shape"]["text"]
-            .as_str()
-            .unwrap()
-            .contains("hexagon"));
+        assert!(kind["Shape"]["text"].as_str().unwrap().contains("hexagon"));
         assert!(report.applied.iter().any(|note| note.contains("hexagon")));
     }
 
@@ -415,7 +410,8 @@ mod tests {
     #[test]
     fn transcodes_gif_data_uri_to_png() {
         // 1x1 transparent GIF.
-        let gif = "data:image/gif;base64,R0lGODlhAQABAIAAAP///////yH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+        let gif =
+            "data:image/gif;base64,R0lGODlhAQABAIAAAP///////yH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
         let transcoded = transcode_image_to_png_data_uri(gif).expect("transcode gif");
         assert!(transcoded.starts_with("data:image/png;base64,"));
         assert!(data_uri_mime(&transcoded).unwrap() == "image/png");

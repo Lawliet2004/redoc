@@ -59,7 +59,10 @@ export function validateCapabilityLedger(cwd = process.cwd()) {
 }
 
 // Direct CLI invocation.
-if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"))) {
+import { fileURLToPath } from "node:url";
+const isDirectRun =
+  process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isDirectRun) {
   const failures = validateCapabilityLedger();
   for (const failure of failures) console.error(`Capability ledger: ${failure}`);
   if (failures.length) process.exitCode = 1;

@@ -155,7 +155,11 @@ impl RedocContainer {
             collaborators: attributed.clone().into_iter().collect(),
             revision: now,
             last_modified_by: attributed,
-            permissions: vec!["read".to_string(), "write".to_string(), "comment".to_string()],
+            permissions: vec![
+                "read".to_string(),
+                "write".to_string(),
+                "comment".to_string(),
+            ],
             app_version: "0.1.0".to_string(),
             assets: Vec::new(),
             dirty_on_crash: Some(false),

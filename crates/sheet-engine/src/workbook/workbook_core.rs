@@ -1126,9 +1126,18 @@ mod tests {
         if let Some(cell) = workbook.sheets[0].cells.get_mut("1:1") {
             cell.style = Some(CellStyle {
                 borders: Some(CellBorders {
-                    top: Some(BorderEdge { style: "thin".to_string(), color: Some("#000000".to_string()) }),
-                    bottom: Some(BorderEdge { style: "medium".to_string(), color: None }),
-                    left: Some(BorderEdge { style: "dashed".to_string(), color: Some("#1f2937".to_string()) }),
+                    top: Some(BorderEdge {
+                        style: "thin".to_string(),
+                        color: Some("#000000".to_string()),
+                    }),
+                    bottom: Some(BorderEdge {
+                        style: "medium".to_string(),
+                        color: None,
+                    }),
+                    left: Some(BorderEdge {
+                        style: "dashed".to_string(),
+                        color: Some("#1f2937".to_string()),
+                    }),
                     right: None,
                 }),
                 ..Default::default()
@@ -1143,7 +1152,10 @@ mod tests {
             .and_then(|style| style.borders.as_ref())
             .expect("borders survive round-trip");
         assert_eq!(borders.top.as_ref().unwrap().style, "thin");
-        assert_eq!(borders.top.as_ref().unwrap().color.as_deref(), Some("#000000"));
+        assert_eq!(
+            borders.top.as_ref().unwrap().color.as_deref(),
+            Some("#000000")
+        );
         assert_eq!(borders.bottom.as_ref().unwrap().style, "medium");
         assert_eq!(borders.left.as_ref().unwrap().style, "dashed");
         assert!(borders.right.is_none());

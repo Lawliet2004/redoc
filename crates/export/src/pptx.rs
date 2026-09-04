@@ -491,10 +491,7 @@ fn shape_xml(
                     let alt_text = if native_shape_preset(shape_type).is_some() {
                         String::new()
                     } else {
-                        format!(
-                            r#" descr="Original shape: {}""#,
-                            xml_escape(shape_type)
-                        )
+                        format!(r#" descr="Original shape: {}""#, xml_escape(shape_type))
                     };
                     let fill_color_clean = fill_color.trim_start_matches('#');
                     let fill_xml = if !fill_color_clean.is_empty() {
@@ -541,7 +538,9 @@ fn shape_xml(
                 )
             }
         },
-        ElementKind::Table { rows, cols, data, .. } => {
+        ElementKind::Table {
+            rows, cols, data, ..
+        } => {
             let rows = (*rows).max(1);
             let cols = (*cols).max(1);
             let row_height = emu(element.height / rows as f64);

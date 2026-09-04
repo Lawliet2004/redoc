@@ -100,10 +100,12 @@ if (tauriConfig.mainBinaryName !== "redoc-desktop-tauri") {
 
 const accessibilityMarkers = [
   [join(process.cwd(), "packages", "ui", "src", "SegmentedControl.tsx"), ["role=\"group\"", "aria-pressed"]],
-  [join(process.cwd(), "packages", "sheet-editor", "src", "SheetEditor.tsx"), ["aria-label=\"Formula input\"", "aria-label=\"Spreadsheet grid\"", "aria-rowcount=\"100000\"", "aria-live=\"polite\""]],
-  [join(process.cwd(), "packages", "slide-editor", "src", "SlideEditor.tsx"), ["aria-label=\"Slide canvas\""]],
+  [join(process.cwd(), "packages", "sheet-editor", "src", "SheetEditor.tsx"), ["aria-label=\"Spreadsheet grid.", "aria-rowcount=\"100000\"", "aria-live=\"polite\""]],
+  [join(process.cwd(), "packages", "sheet-editor", "src", "FormulaBar.tsx"), ["aria-label=\"Formula input\""]],
+  [join(process.cwd(), "packages", "slide-editor", "src", "SlideEditor.tsx"), ["aria-label=\"Slide canvas."]],
   [join(process.cwd(), "packages", "ui", "src", "Dialog.tsx"), ["aria-modal=\"true\"", "focusableSelector"]],
-  [join(process.cwd(), "packages", "editor-common", "src", "CommandPalette.tsx"), ["aria-label=\"Command search\""]],
+  [join(process.cwd(), "packages", "editor-common", "src", "CommandPalette.tsx"), ["palette.searchLabel"]],
+  [join(process.cwd(), "packages", "ui", "src", "i18n", "en.ts"), ["searchLabel: \"Command search\""]],
   [join(process.cwd(), "packages", "editor-common", "src", "ContextMenu.tsx"), ["role=\"menu\"", "aria-label=\"Context menu\""]],
   [join(process.cwd(), "packages", "editor-common", "src", "FindBar.tsx"), ["aria-live=\"polite\""]],
   [join(process.cwd(), "packages", "editor-common", "src", "Toolbar.tsx"), ["ArrowLeft", "ArrowRight", "g-toolbar-btn", "tabIndex"]],

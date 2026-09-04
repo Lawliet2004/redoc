@@ -1188,7 +1188,14 @@ fn parse_slide(
                                     element.shape_id,
                                 ),
                                 hyperlink: element.hyperlink.clone(),
-                                kind: ElementKind::Table { rows, cols, data, merges: Vec::new(), header_row: false, table_style: None },
+                                kind: ElementKind::Table {
+                                    rows,
+                                    cols,
+                                    data,
+                                    merges: Vec::new(),
+                                    header_row: false,
+                                    table_style: None,
+                                },
                             });
                             z_index += 1;
                         } else if element.kind == BuilderKind::Chart {
@@ -2409,9 +2416,9 @@ mod tests {
             .elements
             .iter()
             .find_map(|element| match &element.kind {
-                ElementKind::Table { rows, cols, data, .. } => {
-                    Some((element.rotation, *rows, *cols, data.clone()))
-                }
+                ElementKind::Table {
+                    rows, cols, data, ..
+                } => Some((element.rotation, *rows, *cols, data.clone())),
                 _ => None,
             })
             .expect("native table element");
