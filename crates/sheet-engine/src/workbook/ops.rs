@@ -1,7 +1,7 @@
-use crate::cell::SheetCell;
 use super::formula_rewrite::{adjust_formula_references, adjust_formula_references_advanced};
 use super::model::{CellRange, NamedRange, WorkbookModel};
 use super::workbook_core::parse_key;
+use crate::cell::SheetCell;
 use std::collections::BTreeMap;
 
 impl WorkbookModel {

@@ -16,7 +16,8 @@ import {
 import type { GridCanvasProps } from "./sheetTypes";
 
 export function GridCanvas(props: GridCanvasProps) {
-  const { containerRef, canvasRef, scrollTop, scrollLeft, setScrollTop, setScrollLeft, rowHeight, columnWidth, drawGrid, markGridDirtyFull, activeCell, redo, undo, copySelection, cutSelection, pasteValuesOnly, pasteTsv, selectCell, lastUsedCell, jumpToDataEdge, setEditing, setFormulaValue, formulaInputRef, handleCanvasClick, setContextMenu, emitEditorCommand, isFillHandlePoint, setFillDragStart, setSuppressNextClick, startDimensionDrag, updateDimensionDrag, fillDragStart, finishFillDrag, dimensionDrag, setDimensionDrag, getColName, cellsData, cellHyperlink, chartType, chartData, chartMax, pieSlices } = props;
+  const { containerRef, canvasRef, scrollTop, scrollLeft, setScrollTop, setScrollLeft, rowHeight, columnWidth, drawGrid, markGridDirtyFull, activeCell, redo, undo, copySelection, cutSelection, pasteValuesOnly, pasteTsv, selectCell, lastUsedCell, jumpToDataEdge, setEditing, setFormulaValue, formulaInputRef, handleCanvasClick, setContextMenu, emitEditorCommand, isFillHandlePoint, setFillDragStart, setSuppressNextClick, startDimensionDrag, updateDimensionDrag, fillDragStart, finishFillDrag, dimensionDrag, setDimensionDrag, getColName, cellsData, cellHyperlink, onOpenHyperlink, chartType, chartTop, chartLeft, chartData, chartMax, pieSlices } = props;
+  let scrollRafId: number | null = null;
   return (
     <>
       {/* Grid Container */}
@@ -28,7 +29,12 @@ export function GridCanvas(props: GridCanvasProps) {
             markGridDirtyFull?.();
             setScrollTop(Math.max(0, Math.min(100000 * rowHeight(), scrollTop() + event.deltaY)));
             setScrollLeft(Math.max(0, Math.min(1000 * columnWidth(), scrollLeft() + event.deltaX)));
-            drawGrid();
+            if (scrollRafId === null) {
+              scrollRafId = requestAnimationFrame(() => {
+                drawGrid();
+                scrollRafId = null;
+              });
+            }
           }}
           onKeyDown={(event) => {
             const cell = activeCell();
@@ -132,16 +138,27 @@ export function GridCanvas(props: GridCanvasProps) {
             aria-rowindex={activeCell().row}
             aria-colindex={activeCell().col}
             onClick={(event) => {
-              if ((event.ctrlKey || event.metaKey) && cellHyperlink) {
+              if (event.ctrlKey || event.metaKey) {
+                // Resolve the clicked cell before opening its link; activeCell may still refer
+                // to the previous selection when the pointer lands on a different cell.
+                handleCanvasClick(event);
                 const cell = cellsData()[`${activeCell().row}:${activeCell().col}`];
                 const href = cellHyperlink(cell);
                 if (href) {
-                  window.open(href, "_blank", "noopener,noreferrer");
+                  if (!onOpenHyperlink?.(href)) window.open(href, "_blank", "noopener,noreferrer");
                   event.preventDefault();
                   return;
                 }
+                return;
               }
               handleCanvasClick(event);
+            }}
+            onDblClick={(event) => {
+              const cell = activeCell();
+              setFormulaValue(cellsData()[`${cell.row}:${cell.col}`]?.raw || "");
+              setEditing(true);
+              formulaInputRef?.focus();
+              formulaInputRef?.select();
             }}
             onContextMenu={(event) => {
               event.preventDefault();
@@ -149,23 +166,17 @@ export function GridCanvas(props: GridCanvasProps) {
                 { id: "cut", label: "Cut", action: () => void cutSelection() },
                 { id: "copy", label: "Copy", action: () => void copySelection() },
                 { id: "paste", label: "Paste", action: () => void pasteTsv() },
-                { id: "paste-values", label: "Paste Values", action: () => void pasteValuesOnly() },
                 { id: "sep1", label: "", separator: true },
-                { id: "sort-asc", label: "Sort Ascending", action: () => emitEditorCommand("sort-asc") },
-                { id: "sort-multi", label: "Sort…", action: () => emitEditorCommand("sort-multi") },
-                { id: "filter", label: "AutoFilter", action: () => emitEditorCommand("filter") },
+                { id: "insert-row-above", label: "Insert Row Above", action: () => emitEditorCommand("insert-row-above") },
+                { id: "insert-row-below", label: "Insert Row Below", action: () => emitEditorCommand("insert-row-below") },
+                { id: "insert-col-left", label: "Insert Column Left", action: () => emitEditorCommand("insert-col-left") },
+                { id: "insert-col-right", label: "Insert Column Right", action: () => emitEditorCommand("insert-col-right") },
+                { id: "delete-row", label: "Delete Row", action: () => emitEditorCommand("delete-rows") },
+                { id: "delete-col", label: "Delete Column", action: () => emitEditorCommand("delete-cols") },
                 { id: "sep2", label: "", separator: true },
-                { id: "insert-rows", label: "Insert Rows", action: () => emitEditorCommand("insert-rows") },
-                { id: "delete-rows", label: "Delete Rows", action: () => emitEditorCommand("delete-rows") },
-                { id: "insert-cols", label: "Insert Columns", action: () => emitEditorCommand("insert-cols") },
-                { id: "delete-cols", label: "Delete Columns", action: () => emitEditorCommand("delete-cols") },
-                { id: "freeze-from-selection", label: "Freeze Panes", action: () => emitEditorCommand("freeze-from-selection") },
-                { id: "sep3", label: "", separator: true },
-                {
-                  id: "format-hint",
-                  label: "Format: Bold / Currency / Align via toolbar",
-                  disabled: true,
-                },
+                { id: "format-cells", label: "Format Cells...", action: () => emitEditorCommand("format-cells") },
+                { id: "clear-contents", label: "Clear Contents", action: () => emitEditorCommand("clear-contents") },
+                { id: "clear-formatting", label: "Clear Formatting", action: () => emitEditorCommand("clear-formatting") },
               ];
               setContextMenu({ x: event.clientX, y: event.clientY, items });
             }}
@@ -218,7 +229,7 @@ export function GridCanvas(props: GridCanvasProps) {
               height="230"
               role="img"
               aria-label={`${chartType()} chart from selected range`}
-              style={{ position: "absolute", top: "42px", left: "56px", background: "white", border: "1px solid var(--border-color)", "border-radius": "6px", "box-shadow": "var(--shadow-md)" }}
+              style={{ position: "absolute", top: `${chartTop()}px`, left: `${chartLeft()}px`, background: "white", border: "1px solid var(--border-color)", "border-radius": "6px", "box-shadow": "var(--shadow-md)" }}
             >
               <Show when={chartType() === "bar"}>
                 <For each={chartData()}>
@@ -229,6 +240,15 @@ export function GridCanvas(props: GridCanvasProps) {
                   }}
                 </For>
               </Show>
+              <Show when={chartType() === "area"}>
+                <polygon
+                  fill="#8b5cf6"
+                  fill-opacity="0.35"
+                  stroke="#8b5cf6"
+                  stroke-width="2"
+                  points={`20,190 ${chartData().map((item: any, index: any) => `${20 + index * (340 / Math.max(1, chartData().length - 1))},${190 - Math.abs(item.value) / chartMax() * 170}`).join(" ")} 365,190`}
+                />
+              </Show>
               <Show when={chartType() === "line"}>
                 <polyline
                   fill="none"
@@ -236,6 +256,18 @@ export function GridCanvas(props: GridCanvasProps) {
                   stroke-width="3"
                   points={chartData().map((item: any, index: any) => `${20 + index * (340 / Math.max(1, chartData().length - 1)), 190 - Math.abs(item.value) / chartMax() * 170}`).join(" ")}
                 />
+              </Show>
+              <Show when={chartType() === "scatter"}>
+                <For each={chartData()}>
+                  {(item: any, index: any) => (
+                    <circle
+                      cx={20 + index() * (340 / Math.max(1, chartData().length - 1))}
+                      cy={190 - Math.abs(item.value) / chartMax() * 170}
+                      r="4"
+                      fill="#ef4444"
+                    />
+                  )}
+                </For>
               </Show>
               <Show when={chartType() === "pie"}>
                 <For each={pieSlices()}>
@@ -249,11 +281,39 @@ export function GridCanvas(props: GridCanvasProps) {
                   )}
                 </For>
               </Show>
+              <Show when={chartType() === "doughnut"}>
+                <For each={pieSlices()}>
+                  {(slice) => (
+                    <Show
+                      when={!slice.isFullCircle}
+                      fallback={<circle cx="190" cy="115" r="80" fill="none" stroke={slice.color} stroke-width="36" />}
+                    >
+                      <path
+                        d={slice.pathData}
+                        fill={slice.color}
+                        fill-opacity="0.35"
+                        stroke={slice.color}
+                        stroke-width="18"
+                      />
+                    </Show>
+                  )}
+                </For>
+                <circle cx="190" cy="115" r="62" fill="#ffffff" />
+              </Show>
               <line x1="15" y1="190" x2="365" y2="190" stroke="#94a3b8" />
+              <Show when={props.chartTitle && chartType() !== "pie" && chartType() !== "doughnut"}>
+                <text x="190" y="14" text-anchor="middle" font-size="12" font-weight="600" fill="#0f172a">{props.chartTitle}</text>
+                {/* Axis max label for the value scale. */}
+                <text x="12" y="26" font-size="9" fill="#64748b">{Math.round(chartMax())}</text>
+                <text x="12" y="192" font-size="9" fill="#64748b">0</text>
+              </Show>
+              <Show when={props.chartTitle && (chartType() === "pie" || chartType() === "doughnut")}>
+                <text x="190" y="14" text-anchor="middle" font-size="12" font-weight="600" fill="#0f172a">{props.chartTitle}</text>
+              </Show>
             </svg>
           </Show>
         </div>
-        
+
     </>
   );
 }

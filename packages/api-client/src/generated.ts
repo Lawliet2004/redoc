@@ -133,6 +133,14 @@ async inspectExportCompatibility(mode: string, format: string, bodyJson: string)
     else return { status: "error", error: e  as any };
 }
 },
+async applyExportFixups(mode: string, format: string, bodyJson: string) : Promise<Result<ExportFixupResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("apply_export_fixups", { mode, format, bodyJson }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async exportDocumentToFile(path: string, mode: string, format: string, bodyJson: string, title: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("export_document_to_file", { path, mode, format, bodyJson, title }) };
@@ -335,6 +343,31 @@ async presenterSync(payload: PresenterSyncPayload) : Promise<Result<null, string
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Version-history drawer source: rotated autosave snapshots for a doc id.
+ */
+async listDocumentHistory(docId: string) : Promise<Result<HistoryEntry[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_document_history", { docId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Last-write-wins comparison between two on-disk `.redoc` files.
+ * Used by the merge prompt: the newer revision wins, and equal revisions
+ * with different hashes surface both sides via `compare.ts` instead of
+ * silently overwriting.
+ */
+async compareDocumentFiles(currentPath: string, candidatePath: string) : Promise<Result<MergeDecision, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("compare_document_files", { currentPath, candidatePath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -348,15 +381,43 @@ async presenterSync(payload: PresenterSyncPayload) : Promise<Result<null, string
 
 /** user-defined types **/
 
-export type AppSettings = { theme: string; autosaveIntervalMs: number; spellcheckEnabled: boolean; fontSizeDefault: number; telemetryEnabled: boolean; zoomLevel?: number; checkForUpdates?: boolean }
+export type AppSettings = { theme: string; autosaveIntervalMs: number; spellcheckEnabled: boolean; fontSizeDefault: number; telemetryEnabled: boolean; zoomLevel?: number; checkForUpdates?: boolean; author?: AuthorProfile }
+export type ArraySpill = { originRow: number; originCol: number; rows: number; cols: number; values: string[] }
 export type AssetInfo = { hash: string; mime: string; name: string; size: number }
+/**
+ * Local-first author identity stored in app settings.
+ * 
+ * Replaces ad-hoc `author: None` / hardcoded `"You"` / `"Owner: me"`
+ * fallbacks: editors resolve the display name from here and only fall
+ * back to `"You"` for older documents that predate the profile.
+ */
+export type AuthorProfile = { displayName: string; email: string | null; color?: string | null }
 export type AutoFilterState = { enabled: boolean; startRow: number; endRow: number; startCol: number; endCol: number; 
 /**
  * Per-column selected values (empty = show all). Key = column index.
  */
 columnFilters: { [key in number]: string[] } }
+export type CellCommentModel = { id: string; row: number; col: number; author: string; text: string; resolved?: boolean; createdAt?: string }
 export type CellRange = { startRow: number; endRow: number; startCol: number; endCol: number }
-export type CellStyle = { bold: boolean | null; italic: boolean | null; underline: boolean | null; fontColor: string | null; bgColor: string | null; align: string | null; format: string | null; wrap?: boolean | null; vAlign?: string | null; validation?: ListValidation | null; hyperlink?: string | null }
+export type CellStyle = { bold: boolean | null; italic: boolean | null; underline: boolean | null; fontColor: string | null; bgColor: string | null; align: string | null; format: string | null; wrap?: boolean | null; vAlign?: string | null; validation?: ListValidation | null; hyperlink?: string | null; 
+/**
+ * Optional bounded inline image associated with this cell in Redoc.
+ * PNG/JPEG values can round-trip through native XLSX drawings.
+ */
+image?: string | null; 
+/**
+ * Font family name; survives .redoc saves and XLSX export. Older files
+ * deserialize without it (serde default).
+ */
+fontFamily?: string | null; 
+/**
+ * Font size in points.
+ */
+fontSize?: number | null; 
+/**
+ * Digits after the decimal point for numeric display (0-10).
+ */
+decimals?: number | null }
 export type ChartModel = { chartType: string; title?: string | null; startRow: number; endRow: number; startCol: number; endCol: number }
 export type ConditionalFormattingRange = { startRow: number; endRow: number; startCol: number; endCol: number }
 export type ConditionalFormattingRule = { range: ConditionalFormattingRange; type: string; value?: string | null; value2?: string | null; style?: ConditionalFormattingStyle | null; scaleColors?: string[] }
@@ -364,30 +425,96 @@ export type ConditionalFormattingStyle = { fontColor?: string | null; bgColor?: 
 export type DeckModel = { slides: Slide[]; theme: SlideTheme; canvasWidth: number; canvasHeight: number; activeSlideIndex: number; fadeBetweenSlides?: boolean }
 export type DocWordCount = { words: number; characters: number; paragraphs: number }
 export type DocxImportResponse = { document: any; warnings: string[] }
+export type ExportFixupResponse = { body: any; applied: string[]; warnings: string[] }
 export type ElementKind = { Text: { text: string; fontSize: number; fontFamily: string; color: string; align: string; bold?: boolean; italic?: boolean; underline?: boolean; bullets?: boolean } } | { Shape: { shapeType: string; fillColor: string; strokeColor: string; strokeWidth: number; text?: string } } | { Image: { assetHash: string; mime: string } } | { Table: { rows: number; cols: number; data: string[][] } } | { Chart: { chartType: string; data: number[]; labels: string[] } }
-export type ListValidation = { type: string; options: string[] }
+/**
+ * One entry in the local-first version history: a rotated `.bak*`
+ * snapshot plus the attribution captured in its container meta.
+ */
+export type HistoryEntry = { slot: string; path: string; title: string; author: string | null; lastModifiedBy: string | null; updatedAt: number; revision: number; bodyHash: string }
+export type ListValidation = { type: string; options: string[]; formula?: string | null }
+/**
+ * Last-write-wins comparison between the on-disk file and a snapshot.
+ */
+export type MergeDecision = { winner: string; currentRevision: number; candidateRevision: number; currentHash: string; candidateHash: string; changed: boolean }
 export type MergeRange = { startRow: number; endRow: number; startCol: number; endCol: number }
 export type NamedRange = { name: string; rangeStr: string; sheet: string | null }
 export type OpenedDocument = { meta: RedocMeta; body: any }
-export type PivotTableModel = { id: string; sourceRange: CellRange; rowField: number; valueField: number; aggregation: string; outputStartRow: number; outputStartCol: number; outputRowCount?: number | null }
+export type PivotTableModel = { id: string; sourceRange: CellRange; rowField: number; 
+/**
+ * When set, the pivot crosses rows × this column field (multi-field).
+ */
+columnField?: number | null; valueField: number; aggregation: string; outputStartRow: number; outputStartCol: number; outputRowCount?: number | null; outputColCount?: number | null }
 export type PptxImportResponse = { deck: DeckModel; warnings: string[] }
 export type PresenterSyncPayload = { slide_index: number; deck_version: number; elapsed_ms: number; is_playing: boolean }
 export type RecentEntry = { id: string; path: string; title: string; mode: string; lastOpenedAt: number; pinned: boolean }
 export type RecoveredDoc = { id: string; title: string; mode: string; path: string | null; snapshotPath: string; timestamp: number }
-export type RedocMeta = { formatVersion: number; id: string; mode: string; title: string; createdAt: number; updatedAt: number; author: string | null; appVersion: string; assets: AssetInfo[]; dirtyOnCrash: boolean | null; readOnly?: boolean | null; warning?: string | null }
+export type RedocMeta = { formatVersion: number; id: string; mode: string; title: string; createdAt: number; updatedAt: number; author: string | null; 
+/**
+ * Bounded list of collaborator display names that edited this file
+ * on this device (local-first attribution, no server account).
+ */
+collaborators?: string[]; 
+/**
+ * Last-writer-wins marker: unix seconds + author of the winning write.
+ * Readers use it for the merge prompt / history drawer ordering.
+ */
+revision?: number; lastModifiedBy?: string | null; 
+/**
+ * Simple per-document capability list, e.g. `["read","comment"]`
+ * (absence of `"write"` renders the document read-only in the shell).
+ */
+permissions?: string[]; appVersion: string; assets: AssetInfo[]; dirtyOnCrash: boolean | null; readOnly?: boolean | null; warning?: string | null }
+export type ScenarioCellChange = { row: number; col: number; rawValue: string }
+export type ScenarioModel = { id: string; name: string; changes: ScenarioCellChange[] }
 export type SearchMatch = { text: string; index: number; lineNumber: number }
 export type SheetCell = { rawValue: string; displayValue: string; formula: string | null; style: CellStyle | null }
-export type SheetData = { id: string; name: string; cells: { [key in string]: SheetCell }; colWidths: { [key in number]: number }; rowHeights: { [key in number]: number }; freezeRows: number; freezeCols: number; charts?: ChartModel[]; filterQuery?: string | null; merges?: MergeRange[]; autoFilter?: AutoFilterState | null; conditionalFormatting?: ConditionalFormattingRule[]; pivotTables?: PivotTableModel[]; tables?: TableModel[] }
-export type Slide = { id: string; layout: string; elements: SlideElement[]; notes: string; bgOverride: string | null;
+export type SheetData = { id: string; name: string; cells: { [key in string]: SheetCell }; colWidths: { [key in number]: number }; rowHeights: { [key in number]: number }; freezeRows: number; freezeCols: number; charts?: ChartModel[]; filterQuery?: string | null; merges?: MergeRange[]; autoFilter?: AutoFilterState | null; conditionalFormatting?: ConditionalFormattingRule[]; pivotTables?: PivotTableModel[]; tables?: TableModel[]; scenarios?: ScenarioModel[]; slicers?: SlicerModel[]; 
+/**
+ * Bounded materialized results for dynamic-array formulas. The origin
+ * remains the only editable formula cell; values are render metadata.
+ */
+spills?: ArraySpill[]; 
+/**
+ * Cell-anchored review comments (offline collaboration affordance).
+ */
+comments?: CellCommentModel[] }
+export type SlicerModel = { id: string; title: string; sourceRange: CellRange; column: number; selectedValues?: string[] }
+export type Slide = { id: string; layout: string; elements: SlideElement[]; notes: string; bgOverride: string | null; 
 /**
  * Per-slide transition: "none" | "fade" | "slide-left" | "slide-right"
+ * | "wipe-left" | "wipe-right" | "zoom" | "dissolve"
  */
-transition?: string }
-export type SlideElement = { id: string; x: number; y: number; width: number; height: number; rotation: number; zIndex: number;
+transition?: string; 
 /**
- * Per-element entrance animation: "none" | "fade"
+ * Slide-anchored review comments (offline collaboration affordance).
  */
-entrance?: string; kind: ElementKind }
+comments?: SlideCommentModel[] }
+export type SlideCommentModel = { id: string; author: string; text: string; resolved?: boolean; createdAt?: string }
+export type SlideElement = { id: string; x: number; y: number; width: number; height: number; rotation: number; zIndex: number; 
+/**
+ * Per-element entrance animation: "none" | "fade" | "zoom"
+ */
+entrance?: string; 
+/**
+ * Optional timing metadata for the supported entrance-animation subset.
+ * Keeping these fields optional preserves older `.redoc` documents and
+ * avoids serializing defaults when no animation is configured.
+ */
+entranceDelayMs?: number | null; entranceDurationMs?: number | null; entranceOrder?: number | null; 
+/**
+ * Per-element exit animation: "none" | "fade". Played when the slide is
+ * left in presenter view; persisted alongside the entrance metadata.
+ */
+exit?: string; exitDurationMs?: number | null; 
+/**
+ * Optional safe hyperlink target attached to the whole element.
+ * 
+ * The editor accepts bounded http(s), mailto, and tel targets. PPTX
+ * export emits these as external relationship-backed hyperlinks; older
+ * Redoc documents omit this field and continue to deserialize cleanly.
+ */
+hyperlink?: string | null; kind: ElementKind }
 export type SlideTheme = { id: string; name: string; bgColor: string; textColor: string; accentColor: string; fontFamily: string }
 export type TableModel = { id: string; name: string; range: CellRange; columns?: string[]; style?: string | null; showHeaderRow?: boolean; showTotalRow?: boolean }
 export type WorkbookModel = { sheets: SheetData[]; activeSheetIndex: number; namedRanges?: NamedRange[] }

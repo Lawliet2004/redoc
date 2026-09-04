@@ -12,12 +12,15 @@ pub const MARK_TYPES: &[&str] = &[
     "underline",
     "strike",
     "link",
+    "bookmark",
     "color",
     "highlight",
     "fontFamily",
     "fontSize",
     "superscript",
     "subscript",
+    "trackInsert",
+    "trackDelete",
 ];
 
 pub const NODE_TYPES: &[&str] = &[
@@ -34,8 +37,12 @@ pub const NODE_TYPES: &[&str] = &[
     "table",
     "table_row",
     "table_cell",
+    "table_header",
     "page_break",
+    "section_break",
     "hard_break",
+    "field",
+    "footnote_ref",
     "text",
 ];
 
@@ -85,7 +92,14 @@ pub fn estimate_page_count(doc: &Value) -> u32 {
     fn walk(node: &Value, pages: &mut u32, words: &mut u32, lines: &mut u32) {
         let node_type = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-        if node_type == "page_break" {
+        let section_break_counts_page = node_type == "section_break"
+            && node
+                .get("attrs")
+                .and_then(|attrs| attrs.get("pageSetup"))
+                .and_then(|setup| setup.get("breakType"))
+                .and_then(|value| value.as_str())
+                .is_none_or(|break_type| break_type != "continuous" && break_type != "nextColumn");
+        if node_type == "page_break" || section_break_counts_page {
             *pages += 1;
             *words = 0;
             *lines = 0;
@@ -164,14 +178,19 @@ pub fn validate_doc(doc_json: &Value) -> Result<(), Vec<String>> {
             if let Some(children) = content_val.as_array() {
                 for (idx, child) in children.iter().enumerate() {
                     let child_path = format!("{path}.content[{idx}]");
-                    
+
                     if let Some(child_obj) = child.as_object() {
                         if let Some(child_type) = child_obj.get("type").and_then(|t| t.as_str()) {
                             if node_type == "table" && child_type != "table_row" {
                                 errors.push(format!("Node of type 'table' at path '{path}' contains invalid child type '{child_type}' at '{child_path}'. Expected 'table_row'"));
-                            } else if node_type == "table_row" && child_type != "table_cell" {
-                                errors.push(format!("Node of type 'table_row' at path '{path}' contains invalid child type '{child_type}' at '{child_path}'. Expected 'table_cell'"));
-                            } else if (node_type == "bullet_list" || node_type == "ordered_list") && child_type != "list_item" {
+                            } else if node_type == "table_row"
+                                && child_type != "table_cell"
+                                && child_type != "table_header"
+                            {
+                                errors.push(format!("Node of type 'table_row' at path '{path}' contains invalid child type '{child_type}' at '{child_path}'. Expected 'table_cell' or 'table_header'"));
+                            } else if (node_type == "bullet_list" || node_type == "ordered_list")
+                                && child_type != "list_item"
+                            {
                                 errors.push(format!("Node of type '{node_type}' at path '{path}' contains invalid child type '{child_type}' at '{child_path}'. Expected 'list_item'"));
                             }
                         }
@@ -187,12 +206,13 @@ pub fn validate_doc(doc_json: &Value) -> Result<(), Vec<String>> {
         }
 
         if node_type == "heading" {
-            let valid_level = obj.get("attrs")
+            let valid_level = obj
+                .get("attrs")
                 .and_then(|a| a.as_object())
                 .and_then(|a| a.get("level"))
                 .and_then(|l| l.as_u64())
                 .is_some_and(|l| (1..=6).contains(&l));
-            
+
             if !valid_level {
                 errors.push(format!("Node of type 'heading' at path '{path}' must have an 'attrs.level' integer between 1 and 6"));
             }
@@ -242,10 +262,7 @@ pub fn validate_doc(doc_json: &Value) -> Result<(), Vec<String>> {
 /// Remove invalid node types and marks so downstream consumers receive a safe document.
 pub fn prune_doc(doc_json: &Value) -> Value {
     fn prune_content(children: &[Value]) -> Vec<Value> {
-        children
-            .iter()
-            .filter_map(|child| prune_node(child))
-            .collect()
+        children.iter().filter_map(prune_node).collect()
     }
 
     fn prune_marks(marks: &[Value]) -> Vec<Value> {
@@ -312,6 +329,34 @@ mod tests {
     }
 
     #[test]
+    fn table_header_is_a_known_node_type() {
+        assert!(NODE_TYPES.contains(&"table_header"));
+        // A header-row table must validate and survive pruning.
+        let doc = json!({
+            "type": "doc",
+            "content": [{
+                "type": "table",
+                "content": [{
+                    "type": "table_row",
+                    "content": [
+                        { "type": "table_header", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "H1" }] }] },
+                        { "type": "table_cell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "D1" }] }] }
+                    ]
+                }]
+            }]
+        });
+        assert!(validate_doc(&doc).is_ok(), "header-row table must validate");
+        let pruned = prune_doc(&doc);
+        let cell_types: Vec<&str> = pruned["content"][0]["content"][0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(cell_types, vec!["table_header", "table_cell"]);
+    }
+
+    #[test]
     fn page_count_counts_breaks() {
         let doc = json!({
             "type": "doc",
@@ -325,13 +370,42 @@ mod tests {
     }
 
     #[test]
+    fn page_count_counts_section_breaks() {
+        let doc = json!({
+            "type": "doc",
+            "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "a"}]},
+                {"type": "section_break", "attrs": {"pageSetup": {"orientation": "landscape"}}},
+                {"type": "paragraph", "content": [{"type": "text", "text": "b"}]}
+            ]
+        });
+        assert_eq!(estimate_page_count(&doc), 2);
+    }
+
+    #[test]
+    fn continuous_section_break_stays_on_current_page() {
+        let doc = json!({
+            "type": "doc",
+            "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "a"}]},
+                {"type": "section_break", "attrs": {"pageSetup": {"breakType": "continuous"}}},
+                {"type": "paragraph", "content": [{"type": "text", "text": "b"}]}
+            ]
+        });
+        assert_eq!(estimate_page_count(&doc), 1);
+    }
+
+    #[test]
     fn schema_json_includes_new_marks() {
         let s = schema_json();
         let marks = s["marks"].as_array().unwrap();
         assert!(marks.iter().any(|m| m.as_str() == Some("fontFamily")));
         assert!(marks.iter().any(|m| m.as_str() == Some("superscript")));
+        assert!(marks.iter().any(|m| m.as_str() == Some("bookmark")));
         let nodes = s["nodes"].as_array().unwrap();
         assert!(nodes.iter().any(|n| n.as_str() == Some("page_break")));
+        assert!(nodes.iter().any(|n| n.as_str() == Some("section_break")));
+        assert!(nodes.iter().any(|n| n.as_str() == Some("field")));
     }
 
     #[test]
@@ -397,7 +471,10 @@ mod tests {
                 }
             ]
         });
-        assert!(validate_doc(&invalid_table).unwrap_err().iter().any(|e| e.contains("Expected 'table_row'")));
+        assert!(validate_doc(&invalid_table)
+            .unwrap_err()
+            .iter()
+            .any(|e| e.contains("Expected 'table_row'")));
 
         let invalid_list = json!({
             "type": "doc",
@@ -408,7 +485,10 @@ mod tests {
                 }
             ]
         });
-        assert!(validate_doc(&invalid_list).unwrap_err().iter().any(|e| e.contains("Expected 'list_item'")));
+        assert!(validate_doc(&invalid_list)
+            .unwrap_err()
+            .iter()
+            .any(|e| e.contains("Expected 'list_item'")));
 
         let invalid_heading = json!({
             "type": "doc",
@@ -420,7 +500,10 @@ mod tests {
                 }
             ]
         });
-        assert!(validate_doc(&invalid_heading).unwrap_err().iter().any(|e| e.contains("integer between 1 and 6")));
+        assert!(validate_doc(&invalid_heading)
+            .unwrap_err()
+            .iter()
+            .any(|e| e.contains("integer between 1 and 6")));
     }
 
     #[test]
@@ -437,5 +520,41 @@ mod tests {
             }]
         });
         assert!(validate_doc(&doc).is_ok());
+    }
+
+    /// Keeps `packages/doc-editor/src/schema-catalog.json` in sync with the
+    /// authoritative Rust catalog. Run via `cargo test -p redoc-doc-engine`.
+    #[test]
+    fn exports_schema_catalog_json() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/doc-editor/src/schema-catalog.json");
+        let catalog =
+            serde_json::to_string_pretty(&schema_json()).expect("serialize schema catalog");
+        // Normalize to LF so the committed file is stable across platforms.
+        let catalog = catalog.replace("\r\n", "\n");
+        let existing = std::fs::read_to_string(&path);
+        match existing {
+            Ok(current) if current == catalog => {}
+            _ => {
+                std::fs::write(&path, &catalog)
+                    .expect("write schema-catalog.json next to the editor schema");
+            }
+        }
+        // The exported catalog must always contain every mark/node the
+        // exporters and editor rely on.
+        let value: Value = serde_json::from_str(&catalog).expect("catalog is valid JSON");
+        assert_eq!(value["version"], SCHEMA_VERSION);
+        for mark in MARK_TYPES {
+            assert!(
+                value["marks"].as_array().unwrap().iter().any(|m| m == mark),
+                "catalog missing mark {mark}"
+            );
+        }
+        for node in NODE_TYPES {
+            assert!(
+                value["nodes"].as_array().unwrap().iter().any(|n| n == node),
+                "catalog missing node {node}"
+            );
+        }
     }
 }

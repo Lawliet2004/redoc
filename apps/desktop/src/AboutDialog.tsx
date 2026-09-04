@@ -1,4 +1,6 @@
 import { Dialog, Button } from "@redoc/ui";
+import { createSignal, onMount } from "solid-js";
+import { getVersion } from "@tauri-apps/api/app";
 
 interface AboutDialogProps {
   open: boolean;
@@ -6,6 +8,16 @@ interface AboutDialogProps {
 }
 
 export function AboutDialog(props: AboutDialogProps) {
+  const [version, setVersion] = createSignal("0.1.0");
+
+  onMount(async () => {
+    try {
+      const v = await getVersion();
+      if (v) setVersion(v);
+    } catch {
+      // Ignore if outside Tauri
+    }
+  });
   return (
     <Dialog open={props.open} title="About Redoc" onClose={props.onClose}>
       <div style={{ display: "flex", "flex-direction": "column", gap: "16px", "text-align": "center", "align-items": "center" }}>
@@ -26,7 +38,7 @@ export function AboutDialog(props: AboutDialogProps) {
             R
           </div>
           <h2 style={{ "margin-top": "12px", "margin-bottom": "4px", "font-size": "24px", "font-weight": "600", color: "var(--text-primary)" }}>Redoc</h2>
-          <div style={{ "font-size": "13px", color: "var(--text-secondary)" }}>Version 0.1.0</div>
+          <div style={{ "font-size": "13px", color: "var(--text-secondary)" }}>Version {version()}</div>
         </div>
 
         <div style={{

@@ -1,4 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use crate::container::{FileIoError, RedocContainer};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
@@ -11,6 +13,33 @@ fn compute_body_hash(body: &serde_json::Value) -> String {
 
 pub struct SnapshotManager {
     autosave_dir: PathBuf,
+}
+
+/// One entry in the local-first version history: a rotated `.bak*`
+/// snapshot plus the attribution captured in its container meta.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntry {
+    pub slot: String,
+    pub path: String,
+    pub title: String,
+    pub author: Option<String>,
+    pub last_modified_by: Option<String>,
+    pub updated_at: u64,
+    pub revision: u64,
+    pub body_hash: String,
+}
+
+/// Last-write-wins comparison between the on-disk file and a snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeDecision {
+    pub winner: String,
+    pub current_revision: u64,
+    pub candidate_revision: u64,
+    pub current_hash: String,
+    pub candidate_hash: String,
+    pub changed: bool,
 }
 
 impl SnapshotManager {
@@ -68,6 +97,67 @@ impl SnapshotManager {
             }
         }
         Ok(())
+    }
+
+    fn history_slot(&self, doc_id: &str, slot: &str) -> Option<HistoryEntry> {
+        let file = match slot {
+            "current" => self.autosave_dir.join(format!("{}.redoc", doc_id)),
+            "bak1" => self.autosave_dir.join(format!("{}.redoc.bak1", doc_id)),
+            "bak2" => self.autosave_dir.join(format!("{}.redoc.bak2", doc_id)),
+            "bak3" => self.autosave_dir.join(format!("{}.redoc.bak3", doc_id)),
+            _ => return None,
+        };
+        if !file.exists() {
+            return None;
+        }
+        let container = RedocContainer::read_from_file(&file).ok()?;
+        Some(HistoryEntry {
+            slot: slot.to_string(),
+            path: file.to_string_lossy().to_string(),
+            title: container.meta.title.clone(),
+            author: container.meta.author.clone(),
+            last_modified_by: container.meta.last_modified_by.clone(),
+            updated_at: container.meta.updated_at,
+            revision: container.meta.revision,
+            body_hash: compute_body_hash(&container.body),
+        })
+    }
+
+    /// Version-history drawer source: current snapshot + rotated backups,
+    /// newest slot first, skipping missing or unreadable slots.
+    pub fn list_history(&self, doc_id: &str) -> Vec<HistoryEntry> {
+        ["current", "bak1", "bak2", "bak3"]
+            .iter()
+            .filter_map(|slot| self.history_slot(doc_id, slot))
+            .collect()
+    }
+
+    /// Last-write-wins comparison: the higher `revision` (falling back to
+    /// `updated_at`) wins; equal revisions with different hashes surface a
+    /// merge prompt instead of silently overwriting.
+    pub fn merge_decision(
+        current: &RedocContainer,
+        candidate: &RedocContainer,
+    ) -> MergeDecision {
+        let current_stamp = current.meta.revision.max(current.meta.updated_at);
+        let candidate_stamp = candidate.meta.revision.max(candidate.meta.updated_at);
+        let current_hash = compute_body_hash(&current.body);
+        let candidate_hash = compute_body_hash(&candidate.body);
+        let changed = current_hash != candidate_hash;
+        let winner = if candidate_stamp > current_stamp {
+            "candidate"
+        } else {
+            "current"
+        }
+        .to_string();
+        MergeDecision {
+            winner,
+            current_revision: current_stamp,
+            candidate_revision: candidate_stamp,
+            current_hash,
+            candidate_hash,
+            changed,
+        }
     }
 }
 

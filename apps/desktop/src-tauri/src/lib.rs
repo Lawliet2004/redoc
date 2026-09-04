@@ -1,8 +1,8 @@
 #![allow(clippy::redundant_closure_call)]
 
-use redoc_core::{AppSettings, AppState, RecentEntry, RecoveredDoc};
+use redoc_core::{audit_event, sanitize_author_name, AppSettings, AppState, RecentEntry, RecoveredDoc};
 use redoc_doc_engine::{DocWordCount, SearchMatch};
-use redoc_file_io::{RedocContainer, RedocMeta};
+use redoc_file_io::{HistoryEntry, MergeDecision, RedocContainer, RedocMeta};
 use redoc_sheet_engine::{SheetData, WorkbookModel};
 use redoc_slide_engine::DeckModel;
 use serde_json::json;
@@ -135,7 +135,15 @@ fn update_settings(
     new_settings: AppSettings,
 ) -> Result<(), String> {
     handle_panic!({
-        *state.settings.write() = new_settings;
+        let mut normalized = new_settings;
+        normalized.author = normalized.author.normalized();
+        audit_event(
+            &normalized.author.display_name,
+            "settings.update",
+            "app-settings",
+            None,
+        );
+        *state.settings.write() = normalized;
         let _ = state.persist_settings();
         Ok(())
     })
@@ -236,7 +244,7 @@ impl specta::Type for UntypedJson {
 #[tauri::command]
 #[specta::specta]
 fn create_new_document(
-    _state: tauri::State<'_, Arc<AppState>>,
+    state: tauri::State<'_, Arc<AppState>>,
     mode: String,
     title: String,
 ) -> Result<OpenedDocument, String> {
@@ -252,7 +260,9 @@ fn create_new_document(
             _ => return Err("Invalid mode".to_string()),
         };
 
-        let container = RedocContainer::new(&mode, &title, initial_body);
+        let author = state.settings.read().author.display_name.clone();
+        let container = RedocContainer::new_with_author(&mode, &title, initial_body, Some(&author));
+        audit_event(&author, "document.create", &container.meta.id, Some(&mode));
         Ok(OpenedDocument {
             meta: container.meta,
             body: UntypedJson(container.body),
@@ -269,6 +279,8 @@ fn open_document(
     handle_panic!({
         let normalized = normalize_file_path(&path);
         let container = RedocContainer::read_from_file(&normalized).map_err(|e| e.to_string())?;
+        let actor = state.settings.read().author.display_name.clone();
+        audit_event(&actor, "document.open", &container.meta.id, Some(&container.meta.mode));
         let path_str = normalized.to_string_lossy().to_string();
         state.recents.write().add(
             path_str,
@@ -334,14 +346,37 @@ fn save_document(
         let normalized = normalize_file_path(&path);
         let body: serde_json::Value =
             serde_json::from_str(&body_json).map_err(|e| e.to_string())?;
-        let mut container = RedocContainer::new(&mode, &title, body);
+        let author = sanitize_author_name(&state.settings.read().author.display_name);
+        let mut container = RedocContainer::new_with_author(&mode, &title, body, Some(&author));
         container.add_inline_data_uri_assets();
         if let Some(id) = document_id {
             container.meta.id = id;
         }
+        // Preserve author history across saves: merge with the previous meta
+        // when overwriting an existing file (last-write-wins keeps the newest
+        // body, but attribution accumulates for the history drawer).
+        if let Ok(previous) = RedocContainer::read_from_file(&normalized) {
+            for name in previous.meta.collaborators.iter().chain(previous.meta.author.iter()) {
+                let name = sanitize_author_name(name);
+                if !container.meta.collaborators.iter().any(|c| c == &name) {
+                    container.meta.collaborators.push(name);
+                }
+            }
+            container.meta.created_at = previous.meta.created_at;
+            if container.meta.author.is_none() {
+                container.meta.author = previous.meta.author.clone();
+            }
+            container.meta.revision = container.meta.revision.max(previous.meta.revision);
+            if container.meta.permissions.is_empty() {
+                container.meta.permissions = previous.meta.permissions.clone();
+            }
+        }
+        container.meta.collaborators.truncate(16);
+        container.meta.permissions.truncate(8);
         container
             .save_atomic(&normalized)
             .map_err(|e| e.to_string())?;
+        audit_event(&author, "document.save", &container.meta.id, Some(&mode));
         let _ = redoc_file_io::SnapshotManager::new(state.recovery.autosave_dir())
             .remove_snapshot(&container.meta.id);
         let path_str = normalized.to_string_lossy().to_string();
@@ -363,13 +398,15 @@ fn autosave_document(
     handle_panic!({
         let body: serde_json::Value =
             serde_json::from_str(&body_json).map_err(|e| e.to_string())?;
-        let mut container = RedocContainer::new(&mode, &title, body);
+        let author = sanitize_author_name(&state.settings.read().author.display_name);
+        let mut container = RedocContainer::new_with_author(&mode, &title, body, Some(&author));
         container.meta.id = doc_id.clone();
         container.add_inline_data_uri_assets();
         let snapshots = redoc_file_io::SnapshotManager::new(state.recovery.autosave_dir());
         let path = snapshots
             .write_snapshot(&doc_id, &mut container)
             .map_err(|e| e.to_string())?;
+        audit_event(&author, "document.autosave", &doc_id, Some(&mode));
         Ok(path.to_string_lossy().to_string())
     })
 }
@@ -414,6 +451,14 @@ fn export_document(
     })
 }
 
+#[derive(serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+struct ExportFixupResponse {
+    body: UntypedJson,
+    applied: Vec<String>,
+    warnings: Vec<String>,
+}
+
 #[tauri::command]
 #[specta::specta]
 fn inspect_export_compatibility(
@@ -427,6 +472,25 @@ fn inspect_export_compatibility(
         Ok(redoc_export::export_compatibility_warnings(
             &mode, &format, &body,
         ))
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+fn apply_export_fixups(
+    mode: String,
+    format: String,
+    body_json: String,
+) -> Result<ExportFixupResponse, String> {
+    handle_panic!({
+        let body: serde_json::Value =
+            serde_json::from_str(&body_json).map_err(|e| e.to_string())?;
+        let report = redoc_export::apply_export_fixups(&mode, &format, &body);
+        Ok(ExportFixupResponse {
+            body: UntypedJson(report.body),
+            applied: report.applied,
+            warnings: report.warnings,
+        })
     })
 }
 
@@ -839,7 +903,10 @@ fn log_frontend_error(level: String, message: String, stack: Option<String>) -> 
 #[tauri::command]
 #[specta::specta]
 fn paths_exist(paths: Vec<String>) -> Vec<bool> {
-    paths.iter().map(|p| std::path::Path::new(p).is_file()).collect()
+    paths
+        .iter()
+        .map(|p| std::path::Path::new(p).is_file())
+        .collect()
 }
 
 #[derive(serde::Serialize, serde::Deserialize, specta::Type, Debug, Clone)]
@@ -848,6 +915,35 @@ pub struct PresenterSyncPayload {
     pub deck_version: u64,
     pub elapsed_ms: u64,
     pub is_playing: bool,
+}
+
+/// Version-history drawer source: rotated autosave snapshots for a doc id.
+#[tauri::command]
+#[specta::specta]
+fn list_document_history(
+    state: tauri::State<'_, Arc<AppState>>,
+    doc_id: String,
+) -> Result<Vec<HistoryEntry>, String> {
+    handle_panic!({
+        let snapshots = redoc_file_io::SnapshotManager::new(state.recovery.autosave_dir());
+        Ok(snapshots.list_history(&doc_id))
+    })
+}
+
+/// Last-write-wins comparison between two on-disk `.redoc` files.
+/// Used by the merge prompt: the newer revision wins, and equal revisions
+/// with different hashes surface both sides via `compare.ts` instead of
+/// silently overwriting.
+#[tauri::command]
+#[specta::specta]
+fn compare_document_files(current_path: String, candidate_path: String) -> Result<MergeDecision, String> {
+    handle_panic!({
+        let current = RedocContainer::read_from_file(normalize_file_path(&current_path))
+            .map_err(|e| e.to_string())?;
+        let candidate = RedocContainer::read_from_file(normalize_file_path(&candidate_path))
+            .map_err(|e| e.to_string())?;
+        Ok(redoc_file_io::SnapshotManager::merge_decision(&current, &candidate))
+    })
 }
 
 #[tauri::command]
@@ -877,6 +973,7 @@ fn specta_builder() -> SpectaBuilder<tauri::Wry> {
         autosave_document,
         export_document,
         inspect_export_compatibility,
+        apply_export_fixups,
         export_document_to_file,
         compute_doc_word_count,
         search_doc_text,
@@ -903,6 +1000,8 @@ fn specta_builder() -> SpectaBuilder<tauri::Wry> {
         log_frontend_error,
         paths_exist,
         presenter_sync,
+        list_document_history,
+        compare_document_files,
     ])
 }
 

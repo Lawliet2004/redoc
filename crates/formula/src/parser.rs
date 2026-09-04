@@ -139,7 +139,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, FormulaError> {
             'A'..='Z' | 'a'..='z' | '_' | '$' => {
                 let mut ident = String::new();
                 while let Some(&c) = chars.peek() {
-                    if c.is_alphanumeric() || c == '_' || c == '!' || c == '$' {
+                    if c.is_alphanumeric() || c == '_' || c == '!' || c == '$' || c == '.' {
                         ident.push(c);
                         chars.next();
                     } else {
@@ -147,8 +147,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, FormulaError> {
                     }
                 }
 
-                // Check for CellRef or RangeRef or FunctionName
-                if let Some(token) = parse_cell_or_ident(&ident, &mut chars) {
+                // A parenthesized identifier is always a function name, even
+                // when it looks like an A1 reference (for example LOG10).
+                // Resolve this before cell/range parsing so digit-suffixed
+                // Excel functions cannot be mistaken for empty cells.
+                if chars.peek() == Some(&'(') {
+                    tokens.push(Token::Identifier(ident.to_uppercase()));
+                } else if let Some(token) = parse_cell_or_ident(&ident, &mut chars) {
                     tokens.push(token);
                 } else {
                     tokens.push(Token::Identifier(ident.to_uppercase()));
@@ -335,7 +340,7 @@ impl Parser {
                     match name.to_ascii_uppercase().as_str() {
                         "TRUE" => Expr::Literal(FormulaValue::Boolean(true)),
                         "FALSE" => Expr::Literal(FormulaValue::Boolean(false)),
-                        _ => Expr::Literal(FormulaValue::Error(FormulaError::Name)),
+                        _ => Expr::Name(name),
                     }
                 }
             }
@@ -478,6 +483,31 @@ mod tests {
                     Expr::Literal(FormulaValue::Number(2.0)),
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn test_parse_dotted_function_names() {
+        assert_eq!(
+            parse_formula("=STDEV.P(A1:B1)").unwrap(),
+            Expr::FunctionCall {
+                name: "STDEV.P".to_string(),
+                args: vec![Expr::RangeRef {
+                    sheet: None,
+                    start_row: 1,
+                    start_col: 1,
+                    end_row: 1,
+                    end_col: 2,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_named_expression() {
+        assert_eq!(
+            parse_formula("=amount").unwrap(),
+            Expr::Name("AMOUNT".to_string())
         );
     }
 }

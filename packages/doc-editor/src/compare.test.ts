@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareDocContent } from "./compare";
+import { compareDocContent, findCompareSource } from "./compare";
 
 const doc = (text: string) => ({
   type: "doc",
@@ -7,6 +7,13 @@ const doc = (text: string) => ({
 });
 
 describe("document compare", () => {
+  it("resolves only a selected non-empty open-document source", () => {
+    const source = { id: "two", title: "Second", content: doc("Other") };
+    expect(findCompareSource([source], "two")).toBe(source);
+    expect(findCompareSource([{ id: "empty", title: "Empty", content: null }], "empty")).toBeNull();
+    expect(findCompareSource([source], "")).toBeNull();
+  });
+
   it("returns stable word-level insertions and deletions", () => {
     const result = compareDocContent(doc("Hello brave world"), doc("Hello kind world"));
     expect(result.changed).toBe(true);

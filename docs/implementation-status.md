@@ -44,7 +44,7 @@ Evidence-based snapshot of the current repository. Claims below are tied to sour
 - **Find/replace** via `FindBar`.
 - **Page setup** persisted in document JSON (`PageSetupDialog`, `pageSetup` in `buildDocJson`).
 - **Print preview** (`PrintPreview.tsx`).
-- **Headings H1–H6** in toolbar and schema.
+- **Headings H1ï¿½H6** in toolbar and schema.
 - **Image resize** (drag handle) and **drop-to-insert** (`resizeSelectedImage`, `onDrop`).
 - **Paste sanitization** (`pasteSanitizer.ts`, `transformPastedHTML`).
 - **DOCX import**: lists, hyperlinks, highlight/color runs (`export/src/docx.rs` import path).
@@ -54,7 +54,7 @@ Evidence-based snapshot of the current repository. Claims below are tied to sour
 
 - **Slide editor** restored with canvas, sidebar, and element model (`SlideEditor.tsx`).
 - **8-handle resize** (nw/n/ne/e/se/s/sw/w) with shift-aspect lock (`ResizeHandle`, `SlideEditor.css`).
-- **Zoom** control (10–200% scale transform).
+- **Zoom** control (10ï¿½200% scale transform).
 - **Themes/layouts** sidebar with layout masters (`applyLayout`, theme color tokens).
 - **Presenter window** as separate Tauri webview (`PresenterView.tsx`, `open_presenter_window` in `lib.rs`).
 - **Table and chart elements** in slide model and renderer.
@@ -68,17 +68,25 @@ Evidence-based snapshot of the current repository. Claims below are tied to sour
 
 - **Typed Tauri bindings** via `tauri-specta`; `pnpm generate:bindings` produces `packages/api-client/src/generated.ts`; quality gate enforces no direct `@tauri-apps/api` outside generated client.
 - **Panic boundaries** on Tauri commands via `handle_panic!` macro wrapping `catch_unwind` (`lib.rs`).
-- **Daily log rotation** via `tracing_appender::rolling::daily` (`crates/core/src/logging.rs`).
+- **Size-bounded log rotation** via non-blocking `SizeRollingWriter` (5 MiB active-file bound, 4 bounded rotated backups `redoc.log.1..4`; oversized single records stay intact, rotation failure reopens current file) (`crates/core/src/logging.rs`).
 - **Quality gates**: gzipped frontend budget, generated bindings check, installer size gate, optional perf gate (`scripts/quality-gates.mjs`).
 
 ## Known limitations / non-goals
 
-- **PPTX import** deferred — opening `.pptx` shows “not yet supported” toast (`App.tsx`).
-- **No macros, pivot tables, real-time collaboration, or cloud sync** (out of scope for v1).
-- **Chart import from XLSX** skipped with user-visible warnings (`export/src/xlsx.rs`).
-- **`zip` crate versions not unified**: `redoc-core` pins `zip = "8.6.0"` while `redoc-file-io` and `redoc-export` use `zip = "0.6"` (separate major lines in `Cargo.toml` files).
-- **DocEditor schema is hand-mirrored** from ProseMirror basics — not generated from a shared `schema.json`.
-- **Log rotation is calendar daily**, not size-based 5 MB caps (`tracing_appender` daily roller only).
+- **PPTX import is available** for text, shapes, media, notes, transitions, tables, and basic charts; unsupported graphic frames stay visible with compatibility warnings (see `implementation-status-addendum.md`).
+- **No macros, pivot charts, real-time collaboration, or cloud sync** (out of scope for v1).
+- **`zip` crate unified at 2.4** across `redoc-core`, `redoc-file-io`, and `redoc-export` (single major line in the workspace).
+- **DocEditor ProseMirror schema is parity-checked** against `crates/doc-engine` via the generated `schema-catalog.json` (`cargo test -p redoc-doc-engine` regenerates it; `schemaCatalog.test.ts` fails on drift).
+- **Log rotation is size-bounded** (5 MiB active file + 4 rotated backups), not calendar-daily.
+
+## Addendum (production-readiness pass)
+
+- **Spell check**: the Settings toggle now drives the platform (WebView2) spellchecker on the Writer editing surface and the Calc cell input via the `spellcheck` DOM attribute â€” no bundled dictionary, native squiggles and suggestions.
+- **Auto-TOC**: Insert â†’ Table of Contents (toolbar, context menu, palette) generates bounded, deduplicated heading entries with bookmark anchors and `internal:` links, so DOCX/PDF/print export the TOC through existing paths.
+- **Multi-field pivots**: the Calc pivot panel accepts an optional Column field producing a rows Ã— columns cross-tab with grand totals, slicer-aware refresh, and a 500-group bound.
+- **Chart designer**: six chart types (bar, line, area, scatter, pie, doughnut) render in the sheet SVG panel with title/axis labels and round-trip through native XLSX chart parts (`chart_type_for` covers all six; import sniffs doughnut/scatter/area markers).
+- **Review comments in Calc and Slides**: cell-anchored comments in the spreadsheet (red corner-triangle markers, sidebar add/resolve/reopen/delete) and slide-anchored comments in the presentation notes pane â€” both persisted in `.redoc` and the Rust models (`CellCommentModel`, `SlideCommentModel`), and slide comments round-trip through native PPTX `p:cmLst` parts with `p:cmAuthorLst` attribution (export and import).
+- **Theme v2**: deduplicated design tokens (spacing/radius/motion/shadows) with correct dark-default and light-theme overrides; the Home screen is fully class-based with modern micro-interactions (hover lift, focus rings, tokenized filters and file rows).
 
 ## QA checklist pointers
 

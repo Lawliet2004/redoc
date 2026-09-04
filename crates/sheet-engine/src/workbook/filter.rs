@@ -1,5 +1,5 @@
-use crate::cell::{AutoFilterState, MergeRange};
 use super::model::{CellRange, WorkbookModel};
+use crate::cell::{AutoFilterState, MergeRange};
 use std::collections::{BTreeMap, HashSet};
 
 impl WorkbookModel {

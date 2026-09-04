@@ -52,7 +52,7 @@ export function ToolbarRow(props: ToolbarRowProps) {
   });
 
   return (
-    <div ref={rowRef} class={`g-toolbar-row g-no-print ${props.class || ""}`} role="toolbar">
+    <div ref={rowRef} data-pane="toolbar" class={`g-toolbar-row g-no-print ${props.class || ""}`} role="toolbar" aria-label="Formatting toolbar">
       {props.children}
     </div>
   );

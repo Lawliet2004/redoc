@@ -16,6 +16,26 @@
   animation: slideInRight 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+.slide-transition-wipe-left,
+.g-slide-anim-wipe-left {
+  animation: slideWipeLeft 0.4s ease-out;
+}
+
+.slide-transition-wipe-right,
+.g-slide-anim-wipe-right {
+  animation: slideWipeRight 0.4s ease-out;
+}
+
+.slide-transition-zoom,
+.g-slide-anim-zoom {
+  animation: slideZoomIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.slide-transition-dissolve,
+.g-slide-anim-dissolve {
+  animation: slideDissolve 0.5s ease-in-out;
+}
+
 @keyframes slideFadeIn {
   from {
     opacity: 0;
@@ -44,6 +64,46 @@
   to {
     transform: translateX(0);
     opacity: 1;
+  }
+}
+
+@keyframes slideWipeLeft {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@keyframes slideWipeRight {
+  from {
+    clip-path: inset(0 0 0 100%);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@keyframes slideZoomIn {
+  from {
+    transform: scale(0.82);
+    opacity: 0.2;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes slideDissolve {
+  from {
+    opacity: 0;
+    filter: blur(3px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
   }
 }
 

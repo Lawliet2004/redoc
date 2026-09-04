@@ -30,4 +30,36 @@ describe("conditional formatting", () => {
     expect(conditionalStyleForCell(cell("50"), 1, 1, [rule])?.bgColor).toBe("#fef08a");
     expect(conditionalStyleForCell(cell("100"), 1, 1, [rule])?.bgColor).toBe("#dcfce7");
   });
+
+  it("scales color-scale against the configured min/max domain, not raw /100", () => {
+    const rule = {
+      range,
+      type: "colorScale" as const,
+      value: "1000",
+      value2: "2000",
+      scaleColors: ["#fee2e2", "#fef08a", "#dcfce7"],
+    };
+    // 1500 is the midpoint of 1000..2000 — must map to the middle bucket,
+    // which the old value/100 heuristic (1500/100 clamped to 1) got wrong.
+    expect(conditionalStyleForCell(cell("1500"), 1, 1, [rule])?.bgColor).toBe("#fef08a");
+    // 1200 → 20% of the domain → lowest bucket.
+    expect(conditionalStyleForCell(cell("1200"), 1, 1, [rule])?.bgColor).toBe("#fee2e2");
+    // 2000 → top of the domain → highest bucket.
+    expect(conditionalStyleForCell(cell("2000"), 1, 1, [rule])?.bgColor).toBe("#dcfce7");
+  });
+
+  it("returns bounded data-bar render metadata", () => {
+    const rule = {
+      range,
+      type: "dataBar" as const,
+      style: { bgColor: "#2563eb" },
+    };
+    expect(conditionalStyleForCell(cell("40"), 1, 1, [rule])).toMatchObject({
+      conditionalBarPercent: 0.4,
+      conditionalBarColor: "#2563eb",
+    });
+    expect(conditionalStyleForCell(cell("250"), 1, 1, [rule])?.conditionalBarPercent).toBe(1);
+    expect(conditionalStyleForCell(cell("-5"), 1, 1, [rule])?.conditionalBarPercent).toBe(0);
+    expect(conditionalStyleForCell(cell("30"), 1, 1, [{ ...rule, value: "10", value2: "50" }])?.conditionalBarPercent).toBe(0.5);
+  });
 });

@@ -1,4 +1,4 @@
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, createMemo, For, Show } from "solid-js";
 import {
   IconDoc,
   IconSheet,
@@ -7,7 +7,8 @@ import {
   IconPin,
   IconSearch,
 } from "@redoc/icons";
-import { RecentEntry } from "@redoc/api-client";
+import { t } from "@redoc/ui";
+import { commands, RecentEntry } from "@redoc/api-client";
 import { formatDate } from "@redoc/utils";
 
 interface HomeScreenProps {
@@ -19,6 +20,8 @@ interface HomeScreenProps {
   onDropFile?: (file: File) => void;
 }
 
+type RailId = "new" | "recent" | "shared" | "templates";
+
 function TemplateTile(props: {
   label: string;
   sublabel: string;
@@ -29,457 +32,293 @@ function TemplateTile(props: {
 }) {
   const Icon = props.icon;
   return (
-    <button
-      type="button"
-      onClick={props.onClick}
-      style={{
-        display: "flex",
-        "flex-direction": "column",
-        "align-items": "stretch",
-        width: "148px",
-        background: "transparent",
-        border: "none",
-        cursor: "pointer",
-        "text-align": "left",
-        gap: "10px",
-        padding: "0",
-      }}
-    >
-      <div
-        style={{
-          height: "186px",
-          background: "#fff",
-          border: "1px solid var(--border-color)",
-          "border-radius": "4px",
-          display: "flex",
-          "align-items": "center",
-          "justify-content": "center",
-          transition: "border-color 0.15s ease, box-shadow 0.15s ease",
-          position: "relative",
-          overflow: "hidden",
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.borderColor = props.accent;
-          e.currentTarget.style.boxShadow = "var(--shadow-sm)";
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.borderColor = "var(--border-color)";
-          e.currentTarget.style.boxShadow = "none";
-        }}
-      >
-        <div
-          style={{
-            width: "56px",
-            height: "56px",
-            "border-radius": "8px",
-            background: props.iconBg,
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "center",
-            color: props.accent,
-          }}
-        >
+    <button type="button" class="home-tile" onClick={props.onClick}>
+      <div class="home-tile-canvas" style={{ "--tile-accent": props.accent }}>
+        <div class="home-tile-icon" style={{ background: props.iconBg, color: props.accent }}>
           <Icon width="32" height="32" />
         </div>
       </div>
       <div>
-        <div style={{ "font-size": "13px", color: "var(--text-primary)", "font-weight": "500" }}>
-          {props.label}
-        </div>
-        <div style={{ "font-size": "12px", color: "var(--text-muted)", "margin-top": "2px" }}>
-          {props.sublabel}
-        </div>
+        <div class="home-tile-label">{props.label}</div>
+        <div class="home-tile-sublabel">{props.sublabel}</div>
       </div>
     </button>
   );
 }
 
+const TILES = (onNewDoc: HomeScreenProps["onNewDoc"]) => [
+  { label: t("home.tiles.blankDoc"), sub: t("home.tileKind.docs"), accent: "var(--doc-accent)", bg: "var(--g-blue-light)", icon: IconDoc, run: () => onNewDoc("doc") },
+  { label: t("home.tiles.resume"), sub: t("home.tileKind.docs"), accent: "var(--doc-accent)", bg: "var(--g-blue-light)", icon: IconDoc, run: () => onNewDoc("doc", "resume") },
+  { label: t("home.tiles.report"), sub: t("home.tileKind.docs"), accent: "var(--doc-accent)", bg: "var(--g-blue-light)", icon: IconDoc, run: () => onNewDoc("doc", "report") },
+  { label: t("home.tiles.blankSheet"), sub: t("home.tileKind.sheets"), accent: "var(--sheet-accent)", bg: "var(--g-green-light)", icon: IconSheet, run: () => onNewDoc("sheet") },
+  { label: t("home.tiles.budget"), sub: t("home.tileKind.sheets"), accent: "var(--sheet-accent)", bg: "var(--g-green-light)", icon: IconSheet, run: () => onNewDoc("sheet", "budget") },
+  { label: t("home.tiles.plan"), sub: t("home.tileKind.sheets"), accent: "var(--sheet-accent)", bg: "var(--g-green-light)", icon: IconSheet, run: () => onNewDoc("sheet", "project_plan") },
+  { label: t("home.tiles.blankDeck"), sub: t("home.tileKind.slides"), accent: "var(--slide-accent)", bg: "var(--g-yellow-light)", icon: IconSlide, run: () => onNewDoc("slide") },
+  { label: t("home.tiles.pitch"), sub: t("home.tileKind.slides"), accent: "var(--slide-accent)", bg: "var(--g-yellow-light)", icon: IconSlide, run: () => onNewDoc("slide", "pitch_deck") },
+];
+
 export function HomeScreen(props: HomeScreenProps) {
   const [searchQuery, setSearchQuery] = createSignal("");
+  const [rail, setRail] = createSignal<RailId>("recent");
   const [filterCategory, setFilterCategory] = createSignal("All");
   const [sortBy, setSortBy] = createSignal("Last opened");
+  const [selectedId, setSelectedId] = createSignal<string | null>(null);
+  const [fileExists, setFileExists] = createSignal<Record<string, boolean>>({});
 
-  const filteredRecents = () => {
+  const checkMissing = async () => {
+    const recents = props.recents;
+    const known = fileExists();
+    const pending = recents.filter((r) => r.path && known[r.id] === undefined);
+    if (!pending.length) return;
+    try {
+      const flags = await commands.pathsExist(pending.map((r) => r.path!));
+      const updates = { ...known };
+      for (let i = 0; i < pending.length; i++) updates[pending[i].id] = flags[i] ?? false;
+      setFileExists(updates);
+    } catch {
+      const updates = { ...known };
+      for (const r of pending) updates[r.id] = false;
+      setFileExists(updates);
+    }
+  };
+  void checkMissing();
+
+  const filteredRecents = createMemo(() => {
     let list = props.recents;
     const cat = filterCategory();
     if (cat === "Documents") list = list.filter((r) => r.mode === "doc");
     else if (cat === "Spreadsheets") list = list.filter((r) => r.mode === "sheet");
     else if (cat === "Presentations") list = list.filter((r) => r.mode === "slide");
     else if (cat === "Pinned") list = list.filter((r) => r.pinned);
-
+    if (rail() === "recent" || rail() === "new") {
+      // rail scopes: "new" shows templates only (empty recents), handled in center
+    }
+    if (rail() === "shared") return [];
     const q = searchQuery().toLowerCase().trim();
-    if (q) {
-      list = list.filter(
-        (r) => r.title.toLowerCase().includes(q) || r.path.toLowerCase().includes(q)
-      );
-    }
-
+    if (q) list = list.filter((r) => r.title?.toLowerCase().includes(q) || r.path?.toLowerCase().includes(q));
     const sorted = [...list];
-    const sort = sortBy();
-    if (sort === "Title") {
-      sorted.sort((a, b) => a.title.localeCompare(b.title));
-    } else if (sort === "Mode") {
-      sorted.sort((a, b) => a.mode.localeCompare(b.mode));
-    } else {
-      sorted.sort((a, b) => new Date(b.lastOpenedAt).getTime() - new Date(a.lastOpenedAt).getTime());
-    }
-
+    if (sortBy() === "Title") sorted.sort((a, b) => a.title.localeCompare(b.title));
+    else if (sortBy() === "Mode") sorted.sort((a, b) => a.mode.localeCompare(b.mode));
+    else sorted.sort((a, b) => new Date(b.lastOpenedAt).getTime() - new Date(a.lastOpenedAt).getTime());
     return sorted;
-  };
+  });
+
+  const selected = createMemo(() => {
+    const list = filteredRecents();
+    if (!list.length) return null;
+    return list.find((r) => r.id === selectedId()) ?? list[0];
+  });
+
+  const modeIcon = (mode: string) =>
+    mode === "sheet" ? <IconSheet color="var(--sheet-accent)" /> : mode === "slide" ? <IconSlide color="var(--slide-accent)" /> : <IconDoc color="var(--doc-accent)" />;
+
+  const tiles = TILES(props.onNewDoc);
 
   return (
     <div
+      class="home-root"
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => {
         e.preventDefault();
-        if (e.dataTransfer?.files?.length && props.onDropFile) {
-          props.onDropFile(e.dataTransfer.files[0]);
-        }
-      }}
-      style={{
-        flex: 1,
-        display: "flex",
-        "flex-direction": "column",
-        background: "var(--bg-home)",
-        overflow: "auto",
-        height: "100%",
+        if (e.dataTransfer?.files?.length && props.onDropFile) props.onDropFile(e.dataTransfer.files[0]);
       }}
     >
-      {/* Google Docs–style top search bar */}
-      <div
-        style={{
-          display: "flex",
-          "align-items": "center",
-          "justify-content": "center",
-          padding: "12px 24px",
-          background: "var(--bg-surface)",
-          "border-bottom": "1px solid var(--border-color)",
-          gap: "16px",
-        }}
-      >
-        <div style={{ display: "flex", "align-items": "center", gap: "10px", "min-width": "160px" }}>
-          <div
-            style={{
-              width: "40px",
-              height: "40px",
-              "border-radius": "8px",
-              background: "var(--g-blue-light)",
-              display: "flex",
-              "align-items": "center",
-              "justify-content": "center",
-              color: "var(--doc-accent)",
-            }}
-          >
+      {/* Collaborative topbar: brand + search + avatar stub */}
+      <div class="home-topbar">
+        <div class="home-brand">
+          <div class="home-brand-badge">
             <IconDoc width="24" height="24" />
           </div>
-          <span style={{ "font-size": "22px", color: "var(--text-secondary)", "font-weight": "400" }}>
-            Redoc
-          </span>
+          <div>
+            <div class="home-brand-name">{t("home.brand")}</div>
+            <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>{t("home.tagline")}</div>
+          </div>
         </div>
-        <div
-          style={{
-            flex: 1,
-            "max-width": "720px",
-            display: "flex",
-            "align-items": "center",
-            gap: "12px",
-            background: "var(--bg-tertiary)",
-            "border-radius": "8px",
-            padding: "10px 16px",
-            height: "48px",
-          }}
-        >
+        <div class="home-search">
           <IconSearch color="var(--text-secondary)" />
           <input
             type="search"
-            placeholder="Search"
-            aria-label="Search documents"
+            placeholder={t("home.searchPlaceholder")}
+            aria-label={t("home.search")}
             value={searchQuery()}
             onInput={(e) => setSearchQuery(e.currentTarget.value)}
-            style={{
-              flex: 1,
-              border: "none",
-              background: "transparent",
-              "font-size": "16px",
-              color: "var(--text-primary)",
-            }}
           />
         </div>
-        <button
-          type="button"
-          onClick={props.onOpenFile}
-          style={{
-            display: "inline-flex",
-            "align-items": "center",
-            gap: "8px",
-            padding: "8px 16px",
-            "border-radius": "24px",
-            border: "1px solid var(--border-color)",
-            background: "var(--bg-surface)",
-            color: "var(--text-primary)",
-            "font-size": "14px",
-            "font-weight": "500",
-          }}
-        >
-          <IconFolderOpen /> Open
+        <div class="g-avatar-stack" role="group" aria-label={t("shell.titlebar.avatarStack")} title={t("shell.titlebar.avatarStack")}>
+          <span class="g-avatar" style={{ background: "#5b9bd5" }} title="You (offline stub)">Y</span>
+          <span class="g-avatar" style={{ background: "#70ad47" }} title="Teammate (offline stub)">T</span>
+        </div>
+        <button type="button" class="home-open-btn" onClick={props.onOpenFile}>
+          <IconFolderOpen /> {t("home.open")}
         </button>
       </div>
 
-      {/* Start a new document */}
-      <section style={{ background: "var(--bg-secondary)", padding: "28px 0 32px" }}>
-        <div style={{ "max-width": "1080px", margin: "0 auto", padding: "0 24px" }}>
-          <div
-            style={{
-              display: "flex",
-              "align-items": "center",
-              "justify-content": "space-between",
-              "margin-bottom": "16px",
-            }}
-          >
-            <h2 style={{ "font-size": "16px", "font-weight": "500", color: "var(--text-primary)" }}>
-              Start a new document
-            </h2>
-          </div>
-          <div style={{ display: "flex", gap: "20px", "flex-wrap": "wrap" }}>
-            <TemplateTile
-              label="Blank document"
-              sublabel="Docs"
-              accent="var(--doc-accent)"
-              iconBg="var(--g-blue-light)"
-              icon={IconDoc}
-              onClick={() => props.onNewDoc("doc")}
-            />
-            <TemplateTile
-              label="Resume / CV"
-              sublabel="Docs"
-              accent="var(--doc-accent)"
-              iconBg="var(--g-blue-light)"
-              icon={IconDoc}
-              onClick={() => props.onNewDoc("doc", "resume")}
-            />
-            <TemplateTile
-              label="Project Report"
-              sublabel="Docs"
-              accent="var(--doc-accent)"
-              iconBg="var(--g-blue-light)"
-              icon={IconDoc}
-              onClick={() => props.onNewDoc("doc", "report")}
-            />
-            <TemplateTile
-              label="Blank spreadsheet"
-              sublabel="Sheets"
-              accent="var(--sheet-accent)"
-              iconBg="var(--g-green-light)"
-              icon={IconSheet}
-              onClick={() => props.onNewDoc("sheet")}
-            />
-            <TemplateTile
-              label="Monthly Budget"
-              sublabel="Sheets"
-              accent="var(--sheet-accent)"
-              iconBg="var(--g-green-light)"
-              icon={IconSheet}
-              onClick={() => props.onNewDoc("sheet", "budget")}
-            />
-            <TemplateTile
-              label="Project Plan"
-              sublabel="Sheets"
-              accent="var(--sheet-accent)"
-              iconBg="var(--g-green-light)"
-              icon={IconSheet}
-              onClick={() => props.onNewDoc("sheet", "project_plan")}
-            />
-            <TemplateTile
-              label="Blank presentation"
-              sublabel="Slides"
-              accent="var(--slide-accent)"
-              iconBg="var(--g-yellow-light)"
-              icon={IconSlide}
-              onClick={() => props.onNewDoc("slide")}
-            />
-            <TemplateTile
-              label="Pitch Deck"
-              sublabel="Slides"
-              accent="var(--slide-accent)"
-              iconBg="var(--g-yellow-light)"
-              icon={IconSlide}
-              onClick={() => props.onNewDoc("slide", "pitch_deck")}
-            />
-          </div>
-        </div>
-      </section>
-
-      {/* Recent documents */}
-      <section style={{ "max-width": "1080px", width: "100%", margin: "0 auto", padding: "28px 24px 48px" }}>
-        <div style={{ display: "flex", "align-items": "center", "justify-content": "space-between", "margin-bottom": "16px" }}>
-          <h2
-            style={{
-              "font-size": "16px",
-              "font-weight": "500",
-              color: "var(--text-primary)",
-              margin: 0,
-            }}
-          >
-            Recent documents
-          </h2>
-          
-          <div style={{ display: "flex", gap: "12px", "align-items": "center" }}>
-            <select 
-              aria-label="Sort recent documents"
-              value={sortBy()} 
-              onChange={(e) => setSortBy(e.currentTarget.value)}
-              style={{
-                padding: "6px 12px",
-                "border-radius": "4px",
-                border: "1px solid var(--border-color)",
-                background: "var(--bg-surface)",
-                color: "var(--text-primary)",
-                "font-size": "14px",
-              }}
-            >
-              <option value="Last opened">Last opened</option>
-              <option value="Title">Title</option>
-              <option value="Mode">Mode</option>
-            </select>
-          </div>
-        </div>
-
-        <div style={{ display: "flex", gap: "16px", "margin-bottom": "16px", "border-bottom": "1px solid var(--border-color)", "padding-bottom": "8px" }}>
-          <For each={["All", "Documents", "Spreadsheets", "Presentations", "Pinned"]}>
-            {(cat) => (
+      {/* 3-zone: left rail / center / right preview+activity */}
+      <div class="home-3zone">
+        <nav class="home-rail" aria-label="Home sections">
+          <For each={[{ id: "new", label: t("home.rail.new") }, { id: "recent", label: t("home.rail.recent") }, { id: "shared", label: t("home.rail.shared") }, { id: "templates", label: t("home.rail.templates") }] as Array<{ id: RailId; label: string }>}>
+            {(item) => (
               <button
                 type="button"
-                onClick={() => setFilterCategory(cat)}
-                style={{
-                  background: "transparent",
-                  border: "none",
-                  "border-bottom": filterCategory() === cat ? "2px solid var(--accent-color)" : "2px solid transparent",
-                  color: filterCategory() === cat ? "var(--accent-color)" : "var(--text-muted)",
-                  "font-size": "14px",
-                  "font-weight": filterCategory() === cat ? "500" : "400",
-                  cursor: "pointer",
-                  padding: "0 4px 8px",
-                  "margin-bottom": "-10px",
-                }}
+                class="home-rail-btn"
+                aria-pressed={rail() === item.id}
+                onClick={() => setRail(item.id)}
               >
-                {cat}
+                {item.label}
               </button>
             )}
           </For>
-        </div>
+        </nav>
 
-        <Show
-          when={filteredRecents().length > 0}
-          fallback={
-            <div
-              style={{
-                padding: "48px 24px",
-                "text-align": "center",
-                color: "var(--text-muted)",
-                "font-size": "14px",
-                border: "1px dashed var(--border-color)",
-                "border-radius": "8px",
-                background: "var(--bg-surface)",
-              }}
-            >
-              No recent files. Create a blank document to get started.
+        <main class="home-center" aria-label="Documents">
+          <Show when={rail() === "new" || rail() === "templates"}>
+            <h2 class="home-section-title">{t("home.templatesSection")}</h2>
+            <div class="home-tile-grid">
+              <For each={tiles}>{(tile) => <TemplateTile label={tile.label} sublabel={tile.sub} accent={tile.accent} iconBg={tile.bg} icon={tile.icon} onClick={tile.run} />}</For>
             </div>
-          }
-        >
-          <div
-            style={{
-              background: "var(--bg-surface)",
-              "border-radius": "8px",
-              overflow: "hidden",
-              border: "1px solid var(--border-color)",
-            }}
-          >
-            <div
-              style={{
-                display: "grid",
-                "grid-template-columns": "1fr 180px 160px 40px",
-                padding: "10px 16px",
-                "font-size": "12px",
-                color: "var(--text-muted)",
-                "border-bottom": "1px solid var(--border-color)",
-                "font-weight": "500",
-              }}
-            >
-              <span>Name</span>
-              <span>Owner</span>
-              <span>Last opened</span>
-              <span />
+          </Show>
+          <Show when={rail() === "recent"}>
+            <h2 class="home-section-title">{t("home.newSection")}</h2>
+            <div class="home-tile-grid">
+              <For each={tiles}>{(tile) => <TemplateTile label={tile.label} sublabel={tile.sub} accent={tile.accent} iconBg={tile.bg} icon={tile.icon} onClick={tile.run} />}</For>
             </div>
-            <For each={filteredRecents()}>
-              {(entry) => (
-                <div
-                  role="button"
-                  tabindex="0"
-                  onClick={() => props.onOpenRecent(entry)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") props.onOpenRecent(entry);
-                  }}
-                  style={{
-                    display: "grid",
-                    "grid-template-columns": "1fr 180px 160px 40px",
-                    "align-items": "center",
-                    padding: "10px 16px",
-                    "border-bottom": "1px solid var(--border-color)",
-                    cursor: "pointer",
-                    "font-size": "14px",
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = "var(--bg-tertiary)";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = "transparent";
-                  }}
-                >
-                  <div style={{ display: "flex", "align-items": "center", gap: "12px", "min-width": "0" }}>
-                    <Show when={entry.mode === "doc"}>
-                      <IconDoc color="var(--doc-accent)" />
-                    </Show>
-                    <Show when={entry.mode === "sheet"}>
-                      <IconSheet color="var(--sheet-accent)" />
-                    </Show>
-                    <Show when={entry.mode === "slide"}>
-                      <IconSlide color="var(--slide-accent)" />
-                    </Show>
-                    <div style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
-                      <div style={{ "font-weight": "500", color: "var(--text-primary)" }}>{entry.title}</div>
+            <div class="home-recent-header">
+              <h2 class="home-section-title">{t("home.recentSection")}</h2>
+              <select class="home-recent-sort" aria-label={t("home.sort.label")} value={sortBy()} onChange={(e) => setSortBy(e.currentTarget.value)}>
+                <option value="Last opened">{t("home.sort.lastOpened")}</option>
+                <option value="Title">{t("home.sort.title")}</option>
+                <option value="Mode">{t("home.sort.mode")}</option>
+              </select>
+            </div>
+            <div role="tablist" aria-label="File filters" class="home-filter-tabs">
+              <For each={["All", "Documents", "Spreadsheets", "Presentations", "Pinned"]}>
+                {(cat) => (
+                  <button type="button" role="tab" class="home-filter-tab" aria-selected={filterCategory() === cat} onClick={() => setFilterCategory(cat)}>
+                    {cat}
+                  </button>
+                )}
+              </For>
+            </div>
+            <Show
+              when={filteredRecents().length > 0}
+              fallback={<div class="home-empty">{searchQuery() ? t("home.emptySearch", { query: searchQuery() }) : t("home.empty")}</div>}
+            >
+              <div class="home-file-card" role="listbox" aria-label={t("home.recentSection")}>
+                <div class="home-file-row-head" aria-hidden="true">
+                  <span>{t("home.table.name")}</span>
+                  <span>{t("home.table.owner")}</span>
+                  <span>{t("home.table.lastOpened")}</span>
+                  <span />
+                </div>
+                <For each={filteredRecents()}>
+                  {(entry) => {
+                    const missing = entry.path && fileExists()[entry.id] === false;
+                    return (
                       <div
-                        style={{
-                          "font-size": "12px",
-                          color: "var(--text-muted)",
-                          overflow: "hidden",
-                          "text-overflow": "ellipsis",
+                        role="option"
+                        aria-selected={selected()?.id === entry.id}
+                        tabindex="0"
+                        class="home-file-row"
+                        data-missing={missing ? "true" : undefined}
+                        title={missing ? t("home.missingFile") : entry.path}
+                        onClick={() => {
+                          if (missing) return;
+                          setSelectedId(entry.id);
+                          props.onOpenRecent(entry);
                         }}
+                        onKeyDown={(e) => {
+                          if (missing) return;
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setSelectedId(entry.id);
+                            props.onOpenRecent(entry);
+                          }
+                          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                            e.preventDefault();
+                            const list = filteredRecents();
+                            const i = list.findIndex((r) => r.id === entry.id);
+                            const n = e.key === "ArrowDown" ? list[i + 1] : list[i - 1];
+                            if (n) {
+                              setSelectedId(n.id);
+                              (e.currentTarget.parentElement?.querySelector(`[data-entry="${n.id}"]`) as HTMLElement)?.focus();
+                            }
+                          }
+                        }}
+                        data-entry={entry.id}
+                        onFocus={() => setSelectedId(entry.id)}
                       >
-                        {entry.path}
+                        <div class="home-file-name">
+                          {modeIcon(entry.mode)}
+                          <div style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
+                            <div class="home-file-title">{entry.title}</div>
+                            <div class="home-file-path">{entry.path}</div>
+                          </div>
+                        </div>
+                        <span class="home-file-meta">{t("home.ownerMe")}</span>
+                        <span class="home-file-meta">{formatDate(entry.lastOpenedAt)}</span>
+                        <button
+                          type="button"
+                          title={entry.pinned ? t("home.unpin") : t("home.pin")}
+                          aria-label={`${entry.pinned ? t("home.unpin") : t("home.pin")}: ${entry.title}`}
+                          aria-pressed={entry.pinned}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            props.onTogglePin(entry.id);
+                          }}
+                          class="g-icon-btn"
+                        >
+                          <IconPin color={entry.pinned ? "var(--accent-color)" : "var(--text-muted)"} />
+                        </button>
                       </div>
-                    </div>
+                    );
+                  }}
+                </For>
+              </div>
+            </Show>
+          </Show>
+          <Show when={rail() === "shared"}>
+            <h2 class="home-section-title">{t("home.sharedSection")}</h2>
+            <div class="home-empty">{t("home.sharedEmpty")}</div>
+          </Show>
+        </main>
+
+        <aside class="home-right" aria-label="Preview and activity">
+          <section aria-label={t("home.previewSection")}>
+            <h2 class="home-section-title" style={{ "margin-bottom": "8px" }}>{t("home.previewSection")}</h2>
+            <Show
+              when={selected()}
+              fallback={<div class="home-empty">{t("home.previewEmpty")}</div>}
+            >
+              {(entry) => (
+                <div style={{ border: "1px solid var(--border-color)", "border-radius": "8px", padding: "12px", background: "var(--bg-tertiary)" }}>
+                  <div style={{ display: "flex", gap: "8px", "align-items": "center", "margin-bottom": "8px" }}>
+                    {modeIcon(entry().mode)}
+                    <strong style={{ "font-size": "13px" }}>{entry().title}</strong>
                   </div>
-                  <span style={{ color: "var(--text-secondary)", "font-size": "13px" }}>me</span>
-                  <span style={{ color: "var(--text-secondary)", "font-size": "13px" }}>
-                    {formatDate(entry.lastOpenedAt)}
-                  </span>
-                  <button
-                    type="button"
-                    title={entry.pinned ? "Unpin" : "Pin"}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      props.onTogglePin(entry.id);
-                    }}
-                    class="g-icon-btn"
-                  >
-                    <IconPin color={entry.pinned ? "var(--accent-color)" : "var(--text-muted)"} />
+                  <div style={{ "font-size": "12px", color: "var(--text-muted)", "margin-bottom": "10px", overflow: "hidden", "text-overflow": "ellipsis" }}>{entry().path}</div>
+                  <button type="button" class="home-open-btn" onClick={() => props.onOpenRecent(entry())}>
+                    {t("home.previewOpen")}
                   </button>
                 </div>
               )}
-            </For>
-          </div>
-        </Show>
-      </section>
+            </Show>
+          </section>
+          <section aria-label={t("home.activitySection")}>
+            <h2 class="home-section-title" style={{ "margin-bottom": "8px" }}>{t("home.activitySection")}</h2>
+            <Show when={props.recents.length > 0} fallback={<div class="home-empty">{t("home.activityEmpty")}</div>}>
+              <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+                <For each={props.recents.slice(0, 5)}>
+                  {(r) => (
+                    <div style={{ "font-size": "12px", color: "var(--text-secondary)" }}>
+                      {r.title} · {formatDate(r.lastOpenedAt)}
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </section>
+        </aside>
+      </div>
     </div>
   );
 }

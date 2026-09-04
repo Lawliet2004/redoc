@@ -5,7 +5,7 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 
 #[derive(Debug)]
@@ -19,6 +19,7 @@ const MAX_DOCX_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_DOCX_XML_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DOCX_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_DOCX_TOTAL_MEDIA_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_DOCX_FOOTNOTE_TEXT_CHARS: usize = 2_000;
 
 fn read_docx_xml(
     archive: &mut zip::ZipArchive<std::fs::File>,
@@ -770,6 +771,85 @@ fn read_docx_comments(
     Ok(comments)
 }
 
+/// Parse `word/footnotes.xml` into word-id -> { id, label, text } entries.
+/// Separator / continuation footnotes (ids 0 and 1) are skipped.
+fn read_docx_footnotes(archive: &mut zip::ZipArchive<std::fs::File>) -> HashMap<u32, Value> {
+    let Ok(mut entry) = archive.by_name("word/footnotes.xml") else {
+        return HashMap::new();
+    };
+    if entry.size() > MAX_DOCX_XML_BYTES {
+        return HashMap::new();
+    }
+    let mut bytes = Vec::new();
+    if entry.read_to_end(&mut bytes).is_err() {
+        return HashMap::new();
+    }
+    drop(entry);
+    let mut reader = Reader::from_reader(bytes.as_slice());
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut current: Option<(u32, String)> = None; // (word id, text)
+    let mut in_text = false;
+    let mut label = 0u64;
+    let mut notes: Vec<(u32, Value)> = Vec::new();
+    while let Ok(event) = reader.read_event_into(&mut buffer) {
+        match event {
+            Event::Start(element) | Event::Empty(element)
+                if docx_local_name(element.name().as_ref()) == b"footnote" =>
+            {
+                let id = docx_attr(&element, b"id")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or_default();
+                // Separator notes carry w:type; real notes do not.
+                let is_real = id >= 2 && docx_attr(&element, b"type").is_none();
+                if is_real {
+                    label += 1;
+                    current = Some((id, String::new()));
+                }
+            }
+            Event::Start(element)
+                if current.is_some() && docx_local_name(element.name().as_ref()) == b"t" =>
+            {
+                in_text = true;
+            }
+            Event::Text(text) if in_text => {
+                if let Ok(value) = text.unescape() {
+                    if let Some((_, note_text)) = current.as_mut() {
+                        note_text.push_str(&value);
+                    }
+                }
+            }
+            Event::End(element) if docx_local_name(element.name().as_ref()) == b"t" => {
+                in_text = false;
+            }
+            Event::End(element) if docx_local_name(element.name().as_ref()) == b"footnote" => {
+                if let Some((word_id, note_text)) = current.take() {
+                    // Strip the leading superscript number Word writes into notes.
+                    let text = note_text
+                        .trim()
+                        .trim_start_matches(|c: char| c.is_ascii_digit())
+                        .trim()
+                        .chars()
+                        .take(MAX_DOCX_FOOTNOTE_TEXT_CHARS)
+                        .collect::<String>();
+                    notes.push((
+                        word_id,
+                        json!({
+                            "id": format!("fn-docx-{word_id}"),
+                            "label": label,
+                            "text": text,
+                        }),
+                    ));
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    notes.into_iter().collect()
+}
+
 fn build_run(child: &serde_json::Value, override_font: Option<&str>) -> (Run, Option<String>) {
     let mut link_url = None;
     let mut run = Run::new();
@@ -914,6 +994,23 @@ fn add_runs_to_paragraph(
             }
         }
         return p;
+    }
+
+    // Footnote reference: emit a marker run that the post-pack surgery
+    // rewrites into a native <w:footnoteReference> with the footnotes part.
+    if child.get("type").and_then(Value::as_str) == Some("footnote_ref") {
+        let attrs = child.get("attrs");
+        let id = attrs
+            .and_then(|attrs| attrs.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let label = attrs
+            .and_then(|attrs| attrs.get("label"))
+            .map(|value| value.to_string().replace('"', ""))
+            .unwrap_or_default();
+        let mut run = Run::new().add_text(format!("[[FN:{id}|{label}]]"));
+        run.run_property = run.run_property.vert_align(VertAlignType::SuperScript);
+        return p.add_run(run);
     }
 
     let Some(text) = child.get("text").and_then(|t| t.as_str()) else {
@@ -1401,6 +1498,17 @@ pub fn export_doc_to_docx(
                     6 => "Heading6",
                     _ => "Heading1",
                 });
+            } else {
+                // Named paragraph style: recognized built-ins map to Word
+                // styles; custom names round-trip verbatim as pStyle ids.
+                let style_name = node
+                    .get("attrs")
+                    .and_then(|attrs| attrs.get("styleName"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                if !style_name.is_empty() && style_name != "Normal" {
+                    p = p.style(style_name);
+                }
             }
 
             if let Some(attrs) = node.get("attrs") {
@@ -1467,7 +1575,285 @@ pub fn export_doc_to_docx(
     docx.build()
         .pack(std::io::Cursor::new(&mut buf))
         .map_err(|e| ExportError::Docx(format!("{:?}", e)))?;
+    inject_table_header_row_flags(&mut buf)?;
+    inject_footnotes(&mut buf, doc_json)?;
     Ok(buf)
+}
+
+/// docx-rs 0.4 cannot emit `w:tblHeader`. Header rows are identifiable by the
+/// header-cell shading fill (`D9E2F3`); inject `<w:tblHeader/>` into their
+/// `<w:trPr>` by rewriting the packed `word/document.xml` entry.
+fn inject_table_header_row_flags(buf: &mut Vec<u8>) -> Result<(), ExportError> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&*buf))
+        .map_err(|e| ExportError::Docx(e.to_string()))?;
+    let mut document = String::new();
+    archive
+        .by_name("word/document.xml")
+        .map_err(|e| ExportError::Docx(e.to_string()))?
+        .read_to_string(&mut document)
+        .map_err(|e| ExportError::Docx(e.to_string()))?;
+    if !document.contains("D9E2F3") {
+        return Ok(());
+    }
+    let mut rebuilt = String::with_capacity(document.len());
+    let mut rest = document.as_str();
+    while let Some(open) = rest.find("<w:tr>") {
+        rebuilt.push_str(&rest[..open + "<w:tr>".len()]);
+        rest = &rest[open + "<w:tr>".len()..];
+        let row_end = rest.find("</w:tr>").unwrap_or(rest.len());
+        let row_xml = &rest[..row_end];
+        let is_header = row_xml.contains("D9E2F3");
+        if is_header {
+            if let Some(pr) = row_xml.find("<w:trPr>") {
+                let after = &row_xml[pr + "<w:trPr>".len()..];
+                rebuilt.push_str(&row_xml[..pr + "<w:trPr>".len()]);
+                rebuilt.push_str("<w:tblHeader/>");
+                rebuilt.push_str(after);
+            } else if let Some(pr) = row_xml.find("<w:trPr />") {
+                rebuilt.push_str(&row_xml[..pr]);
+                rebuilt.push_str("<w:trPr><w:tblHeader/></w:trPr>");
+                rebuilt.push_str(&row_xml[pr + "<w:trPr />".len()..]);
+            } else {
+                rebuilt.push_str(row_xml);
+            }
+        } else {
+            rebuilt.push_str(row_xml);
+        }
+        rebuilt.push_str("</w:tr>");
+        if row_end + "</w:tr>".len() <= rest.len() {
+            rest = &rest[row_end + "</w:tr>".len()..];
+        } else {
+            rest = "";
+        }
+    }
+    rebuilt.push_str(rest);
+
+    // Rewrite the package with the patched document.xml.
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| ExportError::Docx(e.to_string()))?;
+        let name = entry.name().to_string();
+        // Skip explicit directory entries; OOXML readers do not need them and
+        // duplicating them changes the media-entry layout between runs.
+        if entry.is_dir() || name.ends_with('/') {
+            continue;
+        }
+        let mut data = Vec::new();
+        entry
+            .read_to_end(&mut data)
+            .map_err(|e| ExportError::Docx(e.to_string()))?;
+        drop(entry);
+        if name == "word/document.xml" {
+            data = rebuilt.clone().into_bytes();
+        }
+        writer
+            .start_file(name, options)
+            .map_err(|e| ExportError::Docx(e.to_string()))?;
+        writer
+            .write_all(&data)
+            .map_err(|e| ExportError::Docx(e.to_string()))?;
+    }
+    let cursor = writer
+        .finish()
+        .map_err(|e| ExportError::Docx(e.to_string()))?;
+    *buf = cursor.into_inner();
+    Ok(())
+}
+
+/// Rewrite the packed DOCX with native footnote parts when the document has
+/// `footnote_ref` nodes. Marker runs `[[FN:id|label]]` emitted by
+/// `add_runs_to_paragraph` become `<w:footnoteReference w:id>` runs; a real
+/// `word/footnotes.xml` part replaces the docx-rs default with the texts
+/// from `doc_json.footnotes`.
+fn inject_footnotes(buf: &mut Vec<u8>, doc_json: &Value) -> Result<(), ExportError> {
+    let notes = doc_json
+        .get("footnotes")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if notes.is_empty() {
+        return Ok(());
+    }
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&*buf))
+        .map_err(|e| ExportError::Docx(e.to_string()))?;
+    let mut document = String::new();
+    archive
+        .by_name("word/document.xml")
+        .map_err(|e| ExportError::Docx(e.to_string()))?
+        .read_to_string(&mut document)
+        .map_err(|e| ExportError::Docx(e.to_string()))?;
+    if !document.contains("[[FN:") {
+        return Ok(());
+    }
+
+    // Word footnote ids: 0=separator, 1=continuationSeparator, notes at 2+.
+    let id_by_note: HashMap<&str, usize> = notes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, note)| {
+            note.get("id")
+                .and_then(Value::as_str)
+                .map(|id| (id, index + 2))
+        })
+        .collect();
+    if id_by_note.is_empty() {
+        return Ok(());
+    }
+
+    // Replace marker runs with footnote references. Marker runs are emitted as
+    // <w:r><w:rPr>...</w:rPr><w:t xml:space="preserve">[[FN:id|label]]</w:t></w:r>.
+    let mut rebuilt = String::with_capacity(document.len());
+    let mut rest = document.as_str();
+    while let Some(marker_start) = rest.find("[[FN:") {
+        let prefix_end = marker_start + "[[FN:".len();
+        let Some(close) = rest[prefix_end..].find("]]") else {
+            break;
+        };
+        let body = &rest[prefix_end..prefix_end + close];
+        let Some((id, _label)) = body.split_once('|') else {
+            break;
+        };
+        rebuilt.push_str(&rest[..marker_start]);
+        let after_marker = &rest[prefix_end + close + 2..];
+        match id_by_note.get(id) {
+            Some(word_id) => {
+                // Everything up to the marker text was just emitted; rewind
+                // to the opening tag of the run that carries the marker and
+                // replace the whole run with a footnoteReference run.
+                let run_open = rest[..marker_start].rfind("<w:r>").unwrap_or(0);
+                rebuilt.truncate(rebuilt.len() - (marker_start - run_open));
+                let run_close = after_marker.find("</w:r>").unwrap_or(0);
+                rebuilt.push_str(&format!(
+                    "<w:r><w:rPr><w:vertAlign w:val=\"superscript\"/></w:rPr><w:footnoteReference w:id=\"{word_id}\"/></w:r>"
+                ));
+                rest = &after_marker[run_close + "</w:r>".len()..];
+            }
+            None => {
+                // Unknown note id: drop just the marker text, keep the run.
+                rest = after_marker;
+            }
+        }
+    }
+    rebuilt.push_str(rest);
+
+    // Build word/footnotes.xml.
+    let escape = |value: &str| -> String {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    let mut footnotes_xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:footnotes xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
+    );
+    footnotes_xml.push_str("<w:footnote w:type=\"separator\" w:id=\"0\"><w:p><w:pPr><w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/></w:pPr><w:r><w:separator/></w:r></w:p></w:footnote>");
+    footnotes_xml.push_str("<w:footnote w:type=\"continuationSeparator\" w:id=\"1\"><w:p><w:pPr><w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>");
+    for (index, note) in notes.iter().enumerate() {
+        let text = note.get("text").and_then(Value::as_str).unwrap_or_default();
+        let label = note
+            .get("label")
+            .and_then(Value::as_u64)
+            .unwrap_or(index as u64 + 1);
+        footnotes_xml.push_str(&format!(
+            "<w:footnote w:id=\"{}\"><w:p><w:pPr><w:pStyle w:val=\"FootnoteText\"/></w:pPr><w:r><w:rPr><w:vertAlign w:val=\"superscript\"/></w:rPr><w:t xml:space=\"preserve\">{} </w:t></w:r><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p></w:footnote>",
+            index + 2,
+            label,
+            escape(text),
+        ));
+    }
+    footnotes_xml.push_str("</w:footnotes>");
+
+    // Patch content types and document relationships, then rewrite the package.
+    let mut content_types = String::new();
+    archive
+        .by_name("[Content_Types].xml")
+        .map_err(|e| ExportError::Docx(e.to_string()))?
+        .read_to_string(&mut content_types)
+        .map_err(|e| ExportError::Docx(e.to_string()))?;
+    let mut document_rels = String::new();
+    archive
+        .by_name("word/_rels/document.xml.rels")
+        .map_err(|e| ExportError::Docx(e.to_string()))?
+        .read_to_string(&mut document_rels)
+        .map_err(|e| ExportError::Docx(e.to_string()))?;
+
+    let footnotes_type =
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml";
+    let content_types = if content_types.contains("footnotes+xml") {
+        content_types
+    } else {
+        content_types.replacen(
+            "</Types>",
+            &format!(
+                "<Override PartName=\"/word/footnotes.xml\" ContentType=\"{footnotes_type}\"/></Types>"
+            ),
+            1,
+        )
+    };
+    let next_id = document_rels
+        .match_indices("Id=\"rId")
+        .filter_map(|(offset, _)| {
+            let tail = &document_rels[offset + 8..];
+            let end = tail.find('"')?;
+            tail[..end].parse::<u32>().ok()
+        })
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let document_rels = if document_rels.contains("footnotes.xml") {
+        document_rels
+    } else {
+        document_rels.replacen(
+            "</Relationships>",
+            &format!(
+                "<Relationship Id=\"rId{next_id}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes\" Target=\"footnotes.xml\"/></Relationships>"
+            ),
+            1,
+        )
+    };
+
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| ExportError::Docx(e.to_string()))?;
+        let name = entry.name().to_string();
+        if entry.is_dir() || name.ends_with('/') {
+            continue;
+        }
+        let mut data = Vec::new();
+        entry
+            .read_to_end(&mut data)
+            .map_err(|e| ExportError::Docx(e.to_string()))?;
+        drop(entry);
+        // docx-rs already ships a default word/footnotes.xml; replace it.
+        let data = match name.as_str() {
+            "word/document.xml" => rebuilt.clone().into_bytes(),
+            "[Content_Types].xml" => content_types.clone().into_bytes(),
+            "word/_rels/document.xml.rels" => document_rels.clone().into_bytes(),
+            "word/footnotes.xml" => footnotes_xml.clone().into_bytes(),
+            _ => data,
+        };
+        writer
+            .start_file(name, options)
+            .map_err(|e| ExportError::Docx(e.to_string()))?;
+        writer
+            .write_all(&data)
+            .map_err(|e| ExportError::Docx(e.to_string()))?;
+    }
+    let cursor = writer
+        .finish()
+        .map_err(|e| ExportError::Docx(e.to_string()))?;
+    *buf = cursor.into_inner();
+    Ok(())
 }
 
 pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, ExportError> {
@@ -1486,6 +1872,8 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
     }
     let document = read_docx_xml(&mut archive, "word/document.xml")?;
     let imported_comments = read_docx_comments(&mut archive)?;
+    // Native footnotes: word/footnotes.xml word-id -> { id, label, text }.
+    let imported_footnotes = read_docx_footnotes(&mut archive);
 
     let mut image_data: HashMap<String, String> = HashMap::new();
     let mut hyperlink_data: HashMap<String, String> = HashMap::new();
@@ -1817,6 +2205,18 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                     }
                 }
                 b"w:commentReference" => {}
+                b"w:footnoteReference" => {
+                    // Map the Word footnote id back to a footnote_ref node.
+                    if let Some(note) = docx_attr(&event, b"id")
+                        .and_then(|id| id.parse::<u32>().ok())
+                        .and_then(|id| imported_footnotes.get(&id).cloned())
+                    {
+                        current_content.push(json!({
+                            "type": "footnote_ref",
+                            "attrs": { "id": note["id"], "label": note["label"] }
+                        }));
+                    }
+                }
                 b"w:br" => {
                     if docx_attr(&event, b"type").as_deref() == Some("page") {
                         pending_page_break = true;
@@ -1945,7 +2345,10 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                             .unwrap_or(1);
                         json!({ "type": "heading", "attrs": { "level": level.clamp(1, 6) }, "content": current_content })
                     } else {
-                        json!({ "type": "paragraph", "content": current_content })
+                        let style_name = paragraph_style
+                            .as_deref()
+                            .filter(|style| !style.is_empty() && *style != "Normal");
+                        json!({ "type": "paragraph", "attrs": { "styleName": style_name }, "content": current_content })
                     };
                     if let Some(image) = pending_image.take() {
                         if let Some(content) = node.get_mut("content").and_then(Value::as_array_mut)
@@ -2062,6 +2465,13 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
     if !comments.is_empty() {
         raw_document["comments"] = Value::Array(comments);
     }
+    if !imported_footnotes.is_empty() {
+        // Preserve footnotes.xml order (word ids ascending).
+        let mut ordered: Vec<(&u32, &Value)> = imported_footnotes.iter().collect();
+        ordered.sort_by_key(|(word_id, _)| **word_id);
+        raw_document["footnotes"] =
+            Value::Array(ordered.into_iter().map(|(_, note)| note.clone()).collect());
+    }
     let document = redoc_doc_engine::prune_doc(&raw_document);
 
     Ok(DocxImportResult { document, warnings })
@@ -2085,7 +2495,10 @@ mod tests {
     fn rejects_unsafe_docx_relationship_targets() {
         assert_eq!(docx_part_path("../../outside.xml"), None);
         assert_eq!(docx_part_path("/word/../outside.xml"), None);
-        assert_eq!(docx_part_path("media/image.png"), Some("word/media/image.png".to_string()));
+        assert_eq!(
+            docx_part_path("media/image.png"),
+            Some("word/media/image.png".to_string())
+        );
     }
 
     #[test]
@@ -2110,6 +2523,102 @@ mod tests {
         assert_eq!(imported["content"][1]["type"], "heading");
         assert_eq!(imported["content"][1]["attrs"]["level"], 6);
         assert_eq!(imported["content"][2]["type"], "page_break");
+        std::fs::remove_file(path).expect("cleanup docx");
+    }
+
+    #[test]
+    fn round_trips_named_paragraph_styles() {
+        let path = std::env::temp_dir().join(format!(
+            "redoc-docx-styles-{}-{}.docx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = json!({ "type": "doc", "content": [
+            { "type": "paragraph", "attrs": { "styleName": "Title" }, "content": [{ "type": "text", "text": "Report" }] },
+            { "type": "paragraph", "attrs": { "styleName": "Quote" }, "content": [{ "type": "text", "text": "Quoted line" }] },
+            { "type": "paragraph", "content": [{ "type": "text", "text": "Body" }] }
+        ] });
+        std::fs::write(
+            &path,
+            export_doc_to_docx(&source, "Styles Test").expect("export docx"),
+        )
+        .expect("write docx");
+        let imported = import_docx_to_doc(&path).expect("import docx");
+        assert_eq!(imported["content"][0]["attrs"]["styleName"], "Title");
+        assert_eq!(imported["content"][1]["attrs"]["styleName"], "Quote");
+        // Normal paragraphs import with a null styleName, not "Normal".
+        assert!(imported["content"][2]["attrs"]["styleName"].is_null());
+        std::fs::remove_file(path).expect("cleanup docx");
+    }
+
+    #[test]
+    fn round_trips_native_footnotes() {
+        let path = std::env::temp_dir().join(format!(
+            "redoc-docx-footnotes-{}-{}.docx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = json!({
+            "type": "doc",
+            "content": [
+                { "type": "paragraph", "content": [
+                    { "type": "text", "text": "Claim one" },
+                    { "type": "footnote_ref", "attrs": { "id": "fn-a", "label": 1 } },
+                    { "type": "text", "text": " and claim two" },
+                    { "type": "footnote_ref", "attrs": { "id": "fn-b", "label": 2 } }
+                ] }
+            ],
+            "footnotes": [
+                { "id": "fn-a", "label": 1, "text": "First source." },
+                { "id": "fn-b", "label": 2, "text": "Second source & detail." }
+            ]
+        });
+        let bytes = export_doc_to_docx(&source, "Footnotes Test").expect("export docx");
+        {
+            let mut archive =
+                zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("read docx zip");
+            let mut footnotes_xml = String::new();
+            archive
+                .by_name("word/footnotes.xml")
+                .expect("footnotes part")
+                .read_to_string(&mut footnotes_xml)
+                .expect("read footnotes");
+            assert!(footnotes_xml.contains("First source."));
+            assert!(footnotes_xml.contains("Second source &amp; detail."));
+            let mut document = String::new();
+            archive
+                .by_name("word/document.xml")
+                .expect("document part")
+                .read_to_string(&mut document)
+                .expect("read document");
+            assert!(document.contains("<w:footnoteReference w:id=\"2\"/>"));
+            assert!(document.contains("<w:footnoteReference w:id=\"3\"/>"));
+            assert!(!document.contains("[[FN:"));
+        }
+        std::fs::write(&path, bytes).expect("write docx");
+
+        let imported = import_docx_to_doc(&path).expect("import docx");
+        let notes = imported["footnotes"].as_array().expect("footnotes array");
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0]["id"], "fn-docx-2");
+        assert_eq!(notes[0]["text"], "First source.");
+        assert_eq!(notes[1]["text"], "Second source & detail.");
+        let body = imported["content"][0]["content"]
+            .as_array()
+            .expect("paragraph content");
+        let refs: Vec<&Value> = body
+            .iter()
+            .filter(|n| n["type"] == "footnote_ref")
+            .collect();
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0]["attrs"]["label"], 1);
+        assert_eq!(refs[1]["attrs"]["label"], 2);
         std::fs::remove_file(path).expect("cleanup docx");
     }
 
@@ -2196,10 +2705,8 @@ mod tests {
             .expect("read document xml");
         assert!(document_xml.contains("<w:cols") && document_xml.contains("w:num=\"3\""));
 
-        let path = std::env::temp_dir().join(format!(
-            "redoc-docx-columns-{}.docx",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("redoc-docx-columns-{}.docx", std::process::id()));
         std::fs::write(
             &path,
             export_doc_to_docx(&source, "Columns").expect("export columns"),
@@ -2295,7 +2802,10 @@ mod tests {
         let cursor = std::io::Cursor::new(Vec::new());
         let mut archive = zip::ZipWriter::new(cursor);
         archive
-            .start_file("word/document.xml", zip::write::FileOptions::default())
+            .start_file(
+                "word/document.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
             .expect("start document");
         archive
             .write_all(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:hyperlink><w:p><w:r><w:t>Link</w:t></w:r></w:p></w:hyperlink></w:body></w:document>"#)
@@ -2318,7 +2828,10 @@ mod tests {
         let cursor = std::io::Cursor::new(Vec::new());
         let mut archive = zip::ZipWriter::new(cursor);
         archive
-            .start_file("word/document.xml", zip::write::FileOptions::default())
+            .start_file(
+                "word/document.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
             .expect("start document");
         archive
             .write_all(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Keep </w:t></w:r><w:ins w:id="7" w:author="Alice" w:date="2026-08-31T10:00:00Z"><w:r><w:t>new</w:t></w:r></w:ins><w:del w:id="8" w:author="Bob"><w:r><w:delText>old</w:delText></w:r></w:del></w:p></w:body></w:document>"#)
@@ -2379,7 +2892,7 @@ mod tests {
             archive
                 .start_file(
                     format!("word/extra-{index}.xml"),
-                    zip::write::FileOptions::default(),
+                    zip::write::SimpleFileOptions::default(),
                 )
                 .expect("start entry");
         }
@@ -2455,7 +2968,7 @@ mod tests {
             std::env::temp_dir().join(format!("redoc-docx-image-{}.docx", std::process::id()));
         let file = std::fs::File::create(&path).expect("create fixture");
         let mut archive = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default();
+        let options = zip::write::SimpleFileOptions::default();
         archive
             .start_file("word/document.xml", options)
             .expect("document entry");

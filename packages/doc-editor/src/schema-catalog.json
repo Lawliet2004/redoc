@@ -1,0 +1,45 @@
+{
+  "markAliases": {
+    "em": "italic",
+    "strong": "bold"
+  },
+  "marks": [
+    "bold",
+    "italic",
+    "underline",
+    "strike",
+    "link",
+    "bookmark",
+    "color",
+    "highlight",
+    "fontFamily",
+    "fontSize",
+    "superscript",
+    "subscript",
+    "trackInsert",
+    "trackDelete"
+  ],
+  "nodes": [
+    "doc",
+    "paragraph",
+    "heading",
+    "blockquote",
+    "code_block",
+    "horizontal_rule",
+    "image",
+    "bullet_list",
+    "ordered_list",
+    "list_item",
+    "table",
+    "table_row",
+    "table_cell",
+    "table_header",
+    "page_break",
+    "section_break",
+    "hard_break",
+    "field",
+    "footnote_ref",
+    "text"
+  ],
+  "version": 1
+}

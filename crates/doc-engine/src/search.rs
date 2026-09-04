@@ -60,7 +60,7 @@ pub fn search_doc(
     for (line_idx, text) in lines.iter().enumerate() {
         let mut target = String::new();
         let mut map = Vec::with_capacity(text.len());
-        
+
         for (i, c) in text.char_indices() {
             let len = c.len_utf8();
             if case_sensitive {
@@ -95,13 +95,13 @@ pub fn search_doc(
 
                 let orig_start = map[actual_idx].0;
                 let orig_end = map[end_idx - 1].1;
-                
+
                 matches.push(SearchMatch {
                     text: text[orig_start..orig_end].to_string(),
                     index: orig_start,
                     line_number: line_idx + 1,
                 });
-                
+
                 start = end_idx;
             } else {
                 break;

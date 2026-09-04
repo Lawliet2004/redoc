@@ -1,4 +1,5 @@
 export * from "./Button";
+export * from "./ConfirmDialog";
 export * from "./Dialog";
 export * from "./SegmentedControl";
 export * from "./Toast";

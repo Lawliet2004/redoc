@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+use redoc_core::sanitize_author_name;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use specta::Type;
@@ -6,11 +8,11 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-pub const CURRENT_FORMAT_VERSION: u32 = 1;
-const MAX_ARCHIVE_ENTRIES: usize = 10_000;
-const MAX_JSON_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_ASSET_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_TOTAL_ASSET_BYTES: u64 = 256 * 1024 * 1024;
+pub const CURRENT_FORMAT_VERSION: u32 = 2;
+pub const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+pub const MAX_JSON_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_ASSET_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_TOTAL_ASSET_BYTES: u64 = 256 * 1024 * 1024;
 
 struct TempPathGuard(Option<PathBuf>);
 
@@ -81,6 +83,20 @@ pub struct RedocMeta {
     pub created_at: u64,
     pub updated_at: u64,
     pub author: Option<String>,
+    /// Bounded list of collaborator display names that edited this file
+    /// on this device (local-first attribution, no server account).
+    #[serde(default)]
+    pub collaborators: Vec<String>,
+    /// Last-writer-wins marker: unix seconds + author of the winning write.
+    /// Readers use it for the merge prompt / history drawer ordering.
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub last_modified_by: Option<String>,
+    /// Simple per-document capability list, e.g. `["read","comment"]`
+    /// (absence of `"write"` renders the document read-only in the shell).
+    #[serde(default)]
+    pub permissions: Vec<String>,
     pub app_version: String,
     pub assets: Vec<AssetInfo>,
     pub dirty_on_crash: Option<bool>,
@@ -97,13 +113,37 @@ pub struct RedocContainer {
     pub assets_data: std::collections::HashMap<String, Vec<u8>>, // hash -> bytes
 }
 
+/// Friendly, non-fatal report attached to a container read: missing assets,
+/// future-version notices, and migration notes are surfaced inline instead
+/// of silently rejecting the document.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerRepairReport {
+    pub warnings: Vec<String>,
+    pub read_only: bool,
+    pub migrated: bool,
+    pub missing_assets: Vec<String>,
+}
+
 impl RedocContainer {
     pub fn new(mode: &str, title: &str, body: serde_json::Value) -> Self {
+        Self::new_with_author(mode, title, body, None)
+    }
+
+    /// Create a container attributed to `author` (local-first identity).
+    /// `None` preserves the legacy `author: None` shape for older tests.
+    pub fn new_with_author(
+        mode: &str,
+        title: &str,
+        body: serde_json::Value,
+        author: Option<&str>,
+    ) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
+        let attributed = author.map(sanitize_author_name);
         let meta = RedocMeta {
             format_version: CURRENT_FORMAT_VERSION,
             id: uuid::Uuid::now_v7().to_string(),
@@ -111,7 +151,11 @@ impl RedocContainer {
             title: title.to_string(),
             created_at: now,
             updated_at: now,
-            author: None,
+            author: attributed.clone(),
+            collaborators: attributed.clone().into_iter().collect(),
+            revision: now,
+            last_modified_by: attributed,
+            permissions: vec!["read".to_string(), "write".to_string(), "comment".to_string()],
             app_version: "0.1.0".to_string(),
             assets: Vec::new(),
             dirty_on_crash: Some(false),
@@ -322,7 +366,7 @@ impl RedocContainer {
         {
             let file = File::create(&temp_path)?;
             let mut zip = zip::ZipWriter::new(file);
-            let options = zip::write::FileOptions::default()
+            let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
 
             // Write meta.json

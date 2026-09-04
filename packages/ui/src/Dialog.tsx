@@ -1,4 +1,4 @@
-import { createEffect, onCleanup, ParentProps, Show } from "solid-js";
+import { createEffect, createUniqueId, onCleanup, ParentProps, Show } from "solid-js";
 import { Button } from "./Button";
 
 interface DialogProps {
@@ -10,6 +10,7 @@ interface DialogProps {
 export function Dialog(props: ParentProps<DialogProps>) {
   let dialogRef!: HTMLDivElement;
   let previouslyFocused: HTMLElement | null = null;
+  const titleId = createUniqueId();
   const focusableSelector =
     'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -65,8 +66,9 @@ export function Dialog(props: ParentProps<DialogProps>) {
           display: "flex",
           "align-items": "center",
           "justify-content": "center",
-          "z-index": 1000,
+          "z-index": "var(--z-modal, 1000)",
           "backdrop-filter": "blur(4px)",
+          animation: "fadeIn 0.2s ease-out",
         }}
         onClick={(e) => {
           if (e.target === e.currentTarget) props.onClose();
@@ -76,24 +78,25 @@ export function Dialog(props: ParentProps<DialogProps>) {
           ref={dialogRef}
           role="dialog"
           aria-modal="true"
-          aria-label={props.title}
+          aria-labelledby={titleId}
           tabindex="-1"
           onKeyDown={handleDialogKeyDown}
           style={{
             background: "var(--bg-surface)",
             border: "1px solid var(--border-color)",
-            "border-radius": "var(--radius-lg)",
-            padding: "20px",
+            "border-radius": "var(--radius-lg, 8px)",
+            padding: "var(--space-5, 20px)",
             width: "480px",
             "max-width": "90vw",
             "box-shadow": "var(--shadow-lg)",
             display: "flex",
             "flex-direction": "column",
-            gap: "16px",
+            gap: "var(--space-4, 16px)",
+            animation: "fadeInScale 0.2s ease-out",
           }}
         >
           <div style={{ display: "flex", "justify-content": "space-between", "align-items": "center" }}>
-            <h3 style={{ "font-size": "18px", "font-weight": "600", color: "var(--text-primary)" }}>
+            <h3 id={titleId} style={{ "font-size": "var(--font-xl, 18px)", "font-weight": "600", color: "var(--text-primary)" }}>
               {props.title}
             </h3>
             <Button variant="ghost" size="sm" aria-label="Close dialog" onClick={props.onClose}>✕</Button>
@@ -104,3 +107,4 @@ export function Dialog(props: ParentProps<DialogProps>) {
     </Show>
   );
 }
+

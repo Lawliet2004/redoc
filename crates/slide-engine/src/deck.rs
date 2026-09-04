@@ -16,8 +16,24 @@ pub struct Slide {
     pub notes: String,
     pub bg_override: Option<String>,
     /// Per-slide transition: "none" | "fade" | "slide-left" | "slide-right"
+    /// | "wipe-left" | "wipe-right" | "zoom" | "dissolve"
     #[serde(default = "default_transition")]
     pub transition: String,
+    /// Slide-anchored review comments (offline collaboration affordance).
+    #[serde(default)]
+    pub comments: Vec<SlideCommentModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideCommentModel {
+    pub id: String,
+    pub author: String,
+    pub text: String,
+    #[serde(default)]
+    pub resolved: bool,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -47,6 +63,12 @@ impl DeckModel {
                     rotation: 0.0,
                     z_index: 1,
                     entrance: "none".to_string(),
+                    entrance_delay_ms: None,
+                    entrance_duration_ms: None,
+                    entrance_order: None,
+                    exit: "none".to_string(),
+                    exit_duration_ms: None,
+                    hyperlink: None,
                     kind: ElementKind::Text {
                         text: "Click to add title".to_string(),
                         font_size: 44.0,
@@ -68,6 +90,12 @@ impl DeckModel {
                     rotation: 0.0,
                     z_index: 2,
                     entrance: "none".to_string(),
+                    entrance_delay_ms: None,
+                    entrance_duration_ms: None,
+                    entrance_order: None,
+                    exit: "none".to_string(),
+                    exit_duration_ms: None,
+                    hyperlink: None,
                     kind: ElementKind::Text {
                         text: "Click to add subtitle".to_string(),
                         font_size: 24.0,
@@ -84,6 +112,7 @@ impl DeckModel {
             notes: "".to_string(),
             bg_override: None,
             transition: default_transition(),
+            comments: Vec::new(),
         };
 
         Self {
@@ -105,6 +134,7 @@ impl DeckModel {
             notes: "".to_string(),
             bg_override: None,
             transition: default_transition(),
+            comments: Vec::new(),
         };
         self.slides.push(slide);
         self.active_slide_index = self.slides.len() - 1;
@@ -170,6 +200,65 @@ mod tests {
         let from_legacy: DeckModel =
             serde_json::from_value(legacy_value).expect("legacy element without entrance");
         assert_eq!(from_legacy.slides[0].elements[0].entrance, "none");
+    }
+
+    #[test]
+    fn entrance_timing_metadata_defaults_and_round_trips() {
+        let mut deck = DeckModel::new_default();
+        let element = &mut deck.slides[0].elements[0];
+        element.entrance = "fade".to_string();
+        element.entrance_delay_ms = Some(120);
+        element.entrance_duration_ms = Some(900);
+        element.entrance_order = Some(3);
+
+        let value = serde_json::to_value(&deck).expect("serialize deck timing");
+        assert_eq!(value["slides"][0]["elements"][0]["entranceDelayMs"], 120);
+        let restored: DeckModel = serde_json::from_value(value).expect("deserialize deck timing");
+        let restored_element = &restored.slides[0].elements[0];
+        assert_eq!(restored_element.entrance_delay_ms, Some(120));
+        assert_eq!(restored_element.entrance_duration_ms, Some(900));
+        assert_eq!(restored_element.entrance_order, Some(3));
+
+        let mut legacy_value = serde_json::to_value(&restored).expect("serialize legacy timing");
+        let object = legacy_value["slides"][0]["elements"][0]
+            .as_object_mut()
+            .expect("element object");
+        object.remove("entranceDelayMs");
+        object.remove("entranceDurationMs");
+        object.remove("entranceOrder");
+        let legacy: DeckModel = serde_json::from_value(legacy_value).expect("legacy timing");
+        let legacy_element = &legacy.slides[0].elements[0];
+        assert_eq!(legacy_element.entrance_delay_ms, None);
+        assert_eq!(legacy_element.entrance_duration_ms, None);
+        assert_eq!(legacy_element.entrance_order, None);
+    }
+
+    #[test]
+    fn exit_animation_metadata_defaults_and_round_trips() {
+        let mut deck = DeckModel::new_default();
+        let element = &mut deck.slides[0].elements[0];
+        element.exit = "fade".to_string();
+        element.exit_duration_ms = Some(400);
+
+        let value = serde_json::to_value(&deck).expect("serialize deck exit");
+        assert_eq!(value["slides"][0]["elements"][0]["exit"], "fade");
+        assert_eq!(value["slides"][0]["elements"][0]["exitDurationMs"], 400);
+        let restored: DeckModel = serde_json::from_value(value).expect("deserialize deck exit");
+        let restored_element = &restored.slides[0].elements[0];
+        assert_eq!(restored_element.exit, "fade");
+        assert_eq!(restored_element.exit_duration_ms, Some(400));
+
+        // Older elements without exit fields still deserialize as "none".
+        let mut legacy_value = serde_json::to_value(&restored).expect("serialize legacy exit");
+        let object = legacy_value["slides"][0]["elements"][0]
+            .as_object_mut()
+            .expect("element object");
+        object.remove("exit");
+        object.remove("exitDurationMs");
+        let legacy: DeckModel = serde_json::from_value(legacy_value).expect("legacy exit");
+        let legacy_element = &legacy.slides[0].elements[0];
+        assert_eq!(legacy_element.exit, "none");
+        assert_eq!(legacy_element.exit_duration_ms, None);
     }
 
     #[test]

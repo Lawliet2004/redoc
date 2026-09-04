@@ -122,7 +122,7 @@ export function matchShortcut(e: KeyboardEvent, shortcut: string): boolean {
     (e.ctrlKey || e.metaKey) === ctrl &&
     e.altKey === alt &&
     e.shiftKey === shift &&
-    e.key.toLowerCase() === key
+    (e.key.toLowerCase() === key || e.code.replace(/Key|Digit/, '').toLowerCase() === key)
   );
 }
 

@@ -1,23 +1,50 @@
 import { createSignal, createEffect, onCleanup, JSX } from "solid-js";
+import type { PageSetupConfig } from "./PageSetupDialog";
+import {
+  DEFAULT_PAGE_SETUP,
+  formatPrintHeaderFooter,
+  normalizePageSetupConfig,
+  normalizePreviewPageCount,
+} from "./pageSetup";
 
 export interface PrintPreviewProps {
   onClose: () => void;
   content: string; // HTML string or similar content to preview/print
+  pageSetup?: PageSetupConfig;
+  pageCount?: number;
 }
 
 export function PrintPreview(props: PrintPreviewProps) {
-  const [pageSize, setPageSize] = createSignal("A4");
-  const [orientation, setOrientation] = createSignal("portrait");
-  const [margins, setMargins] = createSignal("normal");
+  const initialSetup = normalizePageSetupConfig(props.pageSetup ?? DEFAULT_PAGE_SETUP);
+  const [pageSize, setPageSize] = createSignal<PageSetupConfig["paperSize"]>(initialSetup.paperSize);
+  const [orientation, setOrientation] = createSignal<PageSetupConfig["orientation"]>(initialSetup.orientation);
+  const [marginValues, setMarginValues] = createSignal(initialSetup.margins);
+  const pageCount = normalizePreviewPageCount(props.pageCount);
+
+  const marginPreset = () => {
+    const value = marginValues();
+    if (value.top === 1 && value.bottom === 1 && value.left === 1 && value.right === 1) return "normal";
+    if (value.top === 0.5 && value.bottom === 0.5 && value.left === 0.5 && value.right === 0.5) return "narrow";
+    if (value.top === 1 && value.bottom === 1 && value.left === 2 && value.right === 2) return "wide";
+    return "custom";
+  };
+
+  const applyMarginPreset = (preset: string) => {
+    if (preset === "narrow") setMarginValues({ top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 });
+    else if (preset === "wide") setMarginValues({ top: 1, bottom: 1, left: 2, right: 2 });
+    else if (preset === "normal") setMarginValues({ top: 1, bottom: 1, left: 1, right: 1 });
+  };
 
   const getPageDimensions = () => {
     let width, height;
     switch (pageSize()) {
-      case "Letter":
+      case "letter":
         width = "8.5in"; height = "11in"; break;
-      case "Legal":
+      case "legal":
         width = "8.5in"; height = "14in"; break;
-      case "A4":
+      case "executive":
+        width = "7.25in"; height = "10.5in"; break;
+      case "a4":
       default:
         width = "210mm"; height = "297mm"; break;
     }
@@ -25,12 +52,8 @@ export function PrintPreview(props: PrintPreviewProps) {
   };
 
   const getMargins = () => {
-    switch (margins()) {
-      case "narrow": return "0.5in";
-      case "wide": return "2in";
-      case "normal":
-      default: return "1in";
-    }
+    const value = marginValues();
+    return `${value.top}in ${value.right}in ${value.bottom}in ${value.left}in`;
   };
 
   const handlePrint = () => {
@@ -112,7 +135,25 @@ export function PrintPreview(props: PrintPreviewProps) {
           overflow: hidden;
         }
 
+        .print-page-header, .print-page-footer {
+          position: absolute;
+          left: 0;
+          right: 0;
+          padding: 0 0.5in;
+          color: #475569;
+          font-size: 10pt;
+          text-align: center;
+          pointer-events: none;
+        }
+
+        .print-page-header { top: 0.3in; }
+        .print-page-footer { bottom: 0.3in; }
+
         @media print {
+          @page {
+            size: ${pageSize()} ${orientation()};
+            margin: 0;
+          }
           body * {
             visibility: hidden;
           }
@@ -143,16 +184,17 @@ export function PrintPreview(props: PrintPreviewProps) {
       <div class="print-preview-toolbar">
         <div>
           <label>Size: </label>
-          <select value={pageSize()} onInput={(e) => setPageSize(e.currentTarget.value)}>
-            <option value="A4">A4</option>
-            <option value="Letter">Letter</option>
-            <option value="Legal">Legal</option>
+          <select value={pageSize()} onInput={(e) => setPageSize(e.currentTarget.value as PageSetupConfig["paperSize"])}>
+            <option value="a4">A4</option>
+            <option value="letter">Letter</option>
+            <option value="legal">Legal</option>
+            <option value="executive">Executive</option>
           </select>
         </div>
         
         <div>
           <label>Orientation: </label>
-          <select value={orientation()} onInput={(e) => setOrientation(e.currentTarget.value)}>
+          <select value={orientation()} onInput={(e) => setOrientation(e.currentTarget.value as PageSetupConfig["orientation"])}>
             <option value="portrait">Portrait</option>
             <option value="landscape">Landscape</option>
           </select>
@@ -160,7 +202,8 @@ export function PrintPreview(props: PrintPreviewProps) {
         
         <div>
           <label>Margins: </label>
-          <select value={margins()} onInput={(e) => setMargins(e.currentTarget.value)}>
+          <select value={marginPreset()} onInput={(e) => applyMarginPreset(e.currentTarget.value)}>
+            <option value="custom">Custom</option>
             <option value="normal">Normal</option>
             <option value="narrow">Narrow</option>
             <option value="wide">Wide</option>
@@ -188,6 +231,8 @@ export function PrintPreview(props: PrintPreviewProps) {
             }}
             innerHTML={props.content}
           />
+          {initialSetup.header && <div class="print-page-header">{formatPrintHeaderFooter(initialSetup.header, pageCount)}</div>}
+          {initialSetup.footer && <div class="print-page-footer">{formatPrintHeaderFooter(initialSetup.footer, pageCount)}</div>}
         </div>
       </div>
     </div>

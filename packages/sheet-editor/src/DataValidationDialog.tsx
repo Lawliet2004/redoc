@@ -4,6 +4,7 @@ import { Dialog } from "@redoc/ui";
 export interface ListValidation {
   type: "list";
   options: string[];
+  formula?: string;
 }
 
 interface DataValidationDialogProps {
@@ -15,11 +16,13 @@ interface DataValidationDialogProps {
 
 export function DataValidationDialog(props: DataValidationDialogProps) {
   const [optionsText, setOptionsText] = createSignal("");
+  const [formulaText, setFormulaText] = createSignal("");
 
   createEffect(() => {
     if (props.open) {
       const opts = props.value?.options ?? [];
       setOptionsText(opts.join("\n"));
+      setFormulaText(props.value?.formula ?? "");
     }
   });
 
@@ -28,7 +31,12 @@ export function DataValidationDialog(props: DataValidationDialogProps) {
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean);
-    props.onApply(lines.length ? { type: "list", options: lines } : null);
+    const formula = formulaText().trim();
+    props.onApply(lines.length || formula ? {
+      type: "list",
+      options: lines,
+      ...(formula ? { formula } : {}),
+    } : null);
     props.onClose();
   };
 
@@ -51,6 +59,16 @@ export function DataValidationDialog(props: DataValidationDialogProps) {
           placeholder="Option 1&#10;Option 2&#10;Option 3"
           style={{ padding: "8px", "font-family": "var(--font-sans)", "font-size": "13px" }}
         />
+        <label style={{ display: "flex", "flex-direction": "column", gap: "5px", "font-size": "12px" }}>
+          Source range or formula (optional)
+          <input
+            class="g-toolbar-input"
+            value={formulaText()}
+            onInput={(e) => setFormulaText(e.currentTarget.value)}
+            placeholder="=$B$1:$B$3 or =MyOptions"
+            aria-label="Validation source range or formula"
+          />
+        </label>
         <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
           <button type="button" class="g-toolbar-btn" onClick={handleClear}>Clear</button>
           <button type="button" class="g-toolbar-btn" onClick={props.onClose}>Cancel</button>

@@ -1,9 +1,10 @@
 use crate::base64_util::decode_base64;
 use crate::pdf::ExportError;
 use redoc_slide_engine::{DeckModel, ElementKind};
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::io::Write as IoWrite;
-use zip::write::FileOptions;
+use zip::write::SimpleFileOptions;
 
 fn xml_escape(value: &str) -> String {
     value
@@ -65,6 +66,237 @@ fn native_chart_type(chart_type: &str) -> Option<&'static str> {
         "pie" => Some("pie"),
         _ => None,
     }
+}
+
+/// Keep the editor's small, stable layout vocabulary interoperable with the
+/// corresponding PresentationML layout types. Unknown values intentionally
+/// fall back to `blank` so malformed metadata cannot create invalid OOXML.
+fn canonical_layout_name(layout: &str) -> &'static str {
+    match layout.trim().to_ascii_lowercase().as_str() {
+        "title" => "title",
+        "title_body" | "title-body" | "titlebody" => "title_body",
+        "section" | "section_header" | "section-header" => "section",
+        "two_col" | "two-column" | "twocol" => "two_col",
+        "image_caption" | "image-caption" | "imagecaption" => "image_caption",
+        _ => "blank",
+    }
+}
+
+fn layout_type_and_name(layout: &str) -> (&'static str, &'static str) {
+    match canonical_layout_name(layout) {
+        "title" => ("title", "Title Slide"),
+        "title_body" => ("obj", "Title and Content"),
+        "section" => ("secHead", "Section Header"),
+        "two_col" => ("twoObj", "Two Content"),
+        "image_caption" => ("pic", "Picture with Caption"),
+        _ => ("blank", "Blank"),
+    }
+}
+
+fn layout_placeholder_xml(
+    id: u32,
+    name: &str,
+    placeholder_type: &str,
+    index: Option<u32>,
+    geometry: (f64, f64, f64, f64),
+) -> String {
+    let (x, y, width, height) = geometry;
+    let idx = index
+        .map(|value| format!(r#" idx="{value}""#))
+        .unwrap_or_default();
+    format!(
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="{}"/><p:cNvSpPr/><p:nvPr><p:ph type="{placeholder_type}"{idx}/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="{}" y="{}"/><a:ext cx="{}" cy="{}"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>"#,
+        xml_escape(name),
+        emu(x),
+        emu(y),
+        emu(width),
+        emu(height),
+    )
+}
+
+fn layout_placeholders(layout: &str) -> String {
+    match canonical_layout_name(layout) {
+        "title" => format!(
+            "{}{}",
+            layout_placeholder_xml(
+                2,
+                "Title Placeholder 1",
+                "title",
+                None,
+                (100.0, 170.0, 760.0, 80.0)
+            ),
+            layout_placeholder_xml(
+                3,
+                "Body Placeholder 2",
+                "body",
+                Some(1),
+                (150.0, 270.0, 660.0, 50.0)
+            ),
+        ),
+        "title_body" => format!(
+            "{}{}",
+            layout_placeholder_xml(
+                2,
+                "Title Placeholder 1",
+                "title",
+                None,
+                (80.0, 45.0, 800.0, 60.0)
+            ),
+            layout_placeholder_xml(
+                3,
+                "Body Placeholder 2",
+                "body",
+                Some(1),
+                (100.0, 150.0, 760.0, 60.0)
+            ),
+        ),
+        "section" => layout_placeholder_xml(
+            2,
+            "Title Placeholder 1",
+            "title",
+            None,
+            (100.0, 220.0, 760.0, 60.0),
+        ),
+        "two_col" => format!(
+            "{}{}{}",
+            layout_placeholder_xml(
+                2,
+                "Title Placeholder 1",
+                "title",
+                None,
+                (80.0, 40.0, 800.0, 60.0)
+            ),
+            layout_placeholder_xml(
+                3,
+                "Body Placeholder 2",
+                "body",
+                Some(1),
+                (70.0, 160.0, 360.0, 60.0)
+            ),
+            layout_placeholder_xml(
+                4,
+                "Body Placeholder 3",
+                "body",
+                Some(2),
+                (530.0, 160.0, 360.0, 60.0)
+            ),
+        ),
+        "image_caption" => format!(
+            "{}{}",
+            layout_placeholder_xml(
+                2,
+                "Picture Placeholder 1",
+                "pic",
+                Some(1),
+                (180.0, 80.0, 600.0, 320.0)
+            ),
+            layout_placeholder_xml(
+                3,
+                "Body Placeholder 2",
+                "body",
+                Some(1),
+                (150.0, 430.0, 660.0, 60.0)
+            ),
+        ),
+        _ => String::new(),
+    }
+}
+
+fn slide_layout_xml(layout: &str) -> String {
+    let (layout_type, name) = layout_type_and_name(layout);
+    let placeholders = layout_placeholders(layout);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="{layout_type}" preserve="1"><p:cSld name="{name}"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{placeholders}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"#
+    )
+}
+
+/// Map the editor's bounded shape vocabulary to DrawingML preset geometry.
+///
+/// The editor deliberately exposes a small, stable set of shape names while
+/// PPTX uses different casing and names for some of the same geometries. Keep
+/// this mapping centralized so export and compatibility warnings agree about
+/// which shapes are lossless. Unknown values continue to use the historical
+/// rectangle fallback and are reported by the compatibility inspector.
+fn native_shape_preset(shape_type: &str) -> Option<&'static str> {
+    match shape_type.to_ascii_lowercase().as_str() {
+        "rect" => Some("rect"),
+        "roundedrect" | "roundrect" => Some("roundRect"),
+        "ellipse" => Some("ellipse"),
+        "triangle" => Some("triangle"),
+        "diamond" => Some("diamond"),
+        "star" | "star5" => Some("star5"),
+        _ => None,
+    }
+}
+
+const MAX_HYPERLINK_CHARS: usize = 2_048;
+
+fn safe_external_hyperlink_target(target: &str) -> Option<String> {
+    let target = target.trim();
+    if target.is_empty()
+        || target.chars().count() > MAX_HYPERLINK_CHARS
+        || target.chars().any(|ch| ch.is_control())
+    {
+        return None;
+    }
+    let lower = target.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        let authority = target
+            .split_once("://")
+            .and_then(|(_, rest)| rest.split(['/', '?', '#']).next())
+            .unwrap_or_default()
+            .trim();
+        if !authority.is_empty() && !authority.chars().any(char::is_whitespace) {
+            return Some(target.to_string());
+        }
+        return None;
+    }
+    if lower.starts_with("mailto:") {
+        let address = target["mailto:".len()..].split('?').next()?.trim();
+        if address.contains('@') && !address.starts_with('@') && !address.ends_with('@') {
+            return Some(target.to_string());
+        }
+        return None;
+    }
+    if lower.starts_with("tel:") {
+        let number = target["tel:".len()..]
+            .chars()
+            .filter(|ch| !ch.is_ascii_whitespace() && *ch != '-' && *ch != '(' && *ch != ')')
+            .collect::<String>();
+        if !number.is_empty()
+            && number
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || ch == '+' || ch == '.')
+        {
+            return Some(target.to_string());
+        }
+    }
+    None
+}
+
+fn hyperlink_xml(hyperlink_rel: Option<&str>) -> String {
+    hyperlink_rel
+        .map(|relationship| {
+            format!(
+                r#"<a:hlinkClick xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:id="{}"/>"#,
+                xml_escape(relationship)
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn text_placeholder_xml(text: &str, x: f64) -> String {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case("Click to add Title") {
+        return r#"<p:ph type="title"/>"#.to_string();
+    }
+    if text.eq_ignore_ascii_case("Click to add Text")
+        || text.eq_ignore_ascii_case("Click to add Subtitle")
+    {
+        let index = if x >= 500.0 { 2 } else { 1 };
+        return format!(r#"<p:ph type="body" idx="{index}"/>"#);
+    }
+    String::new()
 }
 
 fn image_bytes(element: &redoc_slide_engine::SlideElement) -> Option<Vec<u8>> {
@@ -145,8 +377,10 @@ fn shape_xml(
     element: &redoc_slide_engine::SlideElement,
     image_rel: Option<&str>,
     chart_rel: Option<&str>,
+    hyperlink_rel: Option<&str>,
 ) -> String {
     let xfrm = xfrm_xml(element);
+    let hyperlink = hyperlink_xml(hyperlink_rel);
     match &element.kind {
         ElementKind::Text {
             text,
@@ -201,9 +435,10 @@ fn shape_xml(
                 .collect();
 
             let tx_body_content = paragraphs.join("");
+            let placeholder = text_placeholder_xml(text, element.x);
 
             format!(
-                r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Text {id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>{xfrm}</p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>{tx_body_content}</p:txBody></p:sp>"#
+                r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Text {id}">{hyperlink}</p:cNvPr><p:cNvSpPr/><p:nvPr>{placeholder}</p:nvPr></p:nvSpPr><p:spPr>{xfrm}</p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>{tx_body_content}</p:txBody></p:sp>"#
             )
         }
         ElementKind::Shape {
@@ -211,7 +446,8 @@ fn shape_xml(
             fill_color,
             stroke_color,
             stroke_width,
-            text: _,
+            text,
+            ..
         } => {
             let stroke_color_clean = stroke_color.trim_start_matches('#');
             let stroke_w_emu = (stroke_width.max(0.0) * 12_700.0) as u64;
@@ -244,14 +480,21 @@ fn shape_xml(
                     };
 
                     format!(
-                        r#"<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="{id}" name="{name_prefix} {id}"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr><p:spPr>{xfrm}<a:prstGeom prst="line"><a:avLst/></a:prstGeom>{stroke_xml}</p:spPr></p:cxnSp>"#
+                        r#"<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="{id}" name="{name_prefix} {id}">{hyperlink}</p:cNvPr><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr><p:spPr>{xfrm}<a:prstGeom prst="line"><a:avLst/></a:prstGeom>{stroke_xml}</p:spPr></p:cxnSp>"#
                     )
                 }
                 _ => {
-                    let preset = if shape_type == "ellipse" {
-                        "ellipse"
+                    let preset = native_shape_preset(shape_type).unwrap_or("rect");
+                    // Unknown shapes stay editable rectangles; the original
+                    // shape name is preserved as DrawingML alt-text (descr)
+                    // so assistive tech and round-trips keep the intent.
+                    let alt_text = if native_shape_preset(shape_type).is_some() {
+                        String::new()
                     } else {
-                        "rect"
+                        format!(
+                            r#" descr="Original shape: {}""#,
+                            xml_escape(shape_type)
+                        )
                     };
                     let fill_color_clean = fill_color.trim_start_matches('#');
                     let fill_xml = if !fill_color_clean.is_empty() {
@@ -268,25 +511,37 @@ fn shape_xml(
                     } else {
                         String::new()
                     };
+                    let tx_body_content = if text.is_empty() {
+                        r#"<a:p/>"#.to_string()
+                    } else {
+                        text.split('\n')
+                            .map(|line| {
+                                format!(
+                                    r#"<a:p><a:r><a:rPr/><a:t>{}</a:t></a:r></a:p>"#,
+                                    xml_escape(line)
+                                )
+                            })
+                            .collect::<String>()
+                    };
 
                     format!(
-                        r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Shape {id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>{xfrm}<a:prstGeom prst="{preset}"><a:avLst/></a:prstGeom>{fill_xml}{stroke_xml}</p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>"#
+                        r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Shape {id}"{alt_text}>{hyperlink}</p:cNvPr><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>{xfrm}<a:prstGeom prst="{preset}"><a:avLst/></a:prstGeom>{fill_xml}{stroke_xml}</p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>{tx_body_content}</p:txBody></p:sp>"#
                     )
                 }
             }
         }
         ElementKind::Image { asset_hash, .. } => match image_rel {
             Some(relationship) => format!(
-                r#"<p:pic><p:nvPicPr><p:cNvPr id="{id}" name="Image {id}"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="{relationship}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>{xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>"#
+                r#"<p:pic><p:nvPicPr><p:cNvPr id="{id}" name="Image {id}">{hyperlink}</p:cNvPr><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="{relationship}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>{xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>"#
             ),
             None => {
                 let warning_text = format!("[Image unavailable: {}]", xml_escape(asset_hash));
                 format!(
-                    r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Image Warning {id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>{xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FEF2F2"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="EF4444"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="1200"><a:solidFill><a:srgbClr val="991B1B"/></a:solidFill></a:rPr><a:t>{warning_text}</a:t></a:r></a:p></p:txBody></p:sp>"#
+                    r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Image Warning {id}">{hyperlink}</p:cNvPr><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>{xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FEF2F2"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="EF4444"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="1200"><a:solidFill><a:srgbClr val="991B1B"/></a:solidFill></a:rPr><a:t>{warning_text}</a:t></a:r></a:p></p:txBody></p:sp>"#
                 )
             }
         },
-        ElementKind::Table { rows, cols, data } => {
+        ElementKind::Table { rows, cols, data, .. } => {
             let rows = (*rows).max(1);
             let cols = (*cols).max(1);
             let row_height = emu(element.height / rows as f64);
@@ -328,17 +583,18 @@ fn shape_xml(
                 })
                 .collect::<String>();
             format!(
-                r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{id}" name="Table {id}"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>{xfrm}<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>{{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}}</a:tableStyleId></a:tblPr><a:tblGrid>{grid}</a:tblGrid>{rows_xml}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+                r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{id}" name="Table {id}">{hyperlink}</p:cNvPr><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>{xfrm}<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>{{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}}</a:tableStyleId></a:tblPr><a:tblGrid>{grid}</a:tblGrid>{rows_xml}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
             )
         }
         ElementKind::Chart {
             chart_type,
             data,
             labels,
+            ..
         } => {
             if let Some(chart_rel) = chart_rel {
                 return format!(
-                    r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{id}" name="Chart {id}"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>{}<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="{chart_rel}"/></a:graphicData></a:graphic></p:graphicFrame>"#,
+                    r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{id}" name="Chart {id}">{hyperlink}</p:cNvPr><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>{}<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="{chart_rel}"/></a:graphicData></a:graphic></p:graphicFrame>"#,
                     graphic_xfrm_xml(element)
                 );
             }
@@ -365,7 +621,7 @@ fn shape_xml(
                 xml_escape(chart_type)
             );
             format!(
-                r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Chart {id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>{xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="F8FAFC"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="94A3B8"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>{body}</p:txBody></p:sp>"#
+                r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Chart {id}">{hyperlink}</p:cNvPr><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>{xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="F8FAFC"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="94A3B8"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>{body}</p:txBody></p:sp>"#
             )
         }
     }
@@ -418,24 +674,84 @@ fn transition_xml(transition: &str) -> String {
         "fade" => r#"<p:transition><p:fade/></p:transition>"#.to_string(),
         "slide-left" => r#"<p:transition><p:push dir="l"/></p:transition>"#.to_string(),
         "slide-right" => r#"<p:transition><p:push dir="r"/></p:transition>"#.to_string(),
+        "wipe-left" => r#"<p:transition><p:wipe dir="l"/></p:transition>"#.to_string(),
+        "wipe-right" => r#"<p:transition><p:wipe dir="r"/></p:transition>"#.to_string(),
+        "zoom" => r#"<p:transition><p:zoom dir="in"/></p:transition>"#.to_string(),
+        "dissolve" => r#"<p:transition><p:dissolve/></p:transition>"#.to_string(),
         _ => String::new(),
     }
 }
 
-/// Emit the supported entrance-animation subset as native PresentationML timing.
+/// Emit the supported animation subset as native PresentationML timing.
 ///
-/// The editor currently supports a fade entrance.  PowerPoint identifies targets
-/// by the shape's `cNvPr/@id`; the shape ids below intentionally mirror the ids
-/// emitted by `shape_xml` (element index + 2).  We use a deterministic sequence
-/// so exported files play in document order and remain stable for round trips.
+/// The editor supports bounded fade and zoom entrances plus fade exits.
+/// PowerPoint identifies targets by the shape's `cNvPr/@id`; the shape ids
+/// below intentionally mirror the ids emitted by `shape_xml` (element
+/// index plus two). Timing values are bounded to the same range accepted
+/// by the editor so malformed documents cannot create an unreasonably
+/// long or negative timeline. Exit effects are emitted with
+/// `transition="out"` after all entrance effects in the same main sequence.
 fn animation_timing_xml(slide: &redoc_slide_engine::Slide) -> String {
-    let animated: Vec<u32> = slide
+    struct AnimatedElement {
+        shape_id: u32,
+        index: usize,
+        delay_ms: u32,
+        duration_ms: u32,
+        order: u32,
+        filter: &'static str,
+        transition: &'static str,
+    }
+
+    let mut animated: Vec<AnimatedElement> = slide
         .elements
         .iter()
         .enumerate()
-        .filter(|(_, element)| element.entrance.eq_ignore_ascii_case("fade"))
-        .map(|(index, _)| (index + 2) as u32)
+        .filter_map(
+            |(index, element)| match element.entrance.to_ascii_lowercase().as_str() {
+                "fade" => Some(AnimatedElement {
+                    shape_id: (index + 2) as u32,
+                    index,
+                    delay_ms: element.entrance_delay_ms.unwrap_or(0).min(60_000),
+                    duration_ms: element
+                        .entrance_duration_ms
+                        .unwrap_or(350)
+                        .clamp(50, 60_000),
+                    order: element.entrance_order.unwrap_or(index as u32),
+                    filter: "fade",
+                    transition: "in",
+                }),
+                "zoom" => Some(AnimatedElement {
+                    shape_id: (index + 2) as u32,
+                    index,
+                    delay_ms: element.entrance_delay_ms.unwrap_or(0).min(60_000),
+                    duration_ms: element
+                        .entrance_duration_ms
+                        .unwrap_or(350)
+                        .clamp(50, 60_000),
+                    order: element.entrance_order.unwrap_or(index as u32),
+                    filter: "zoom(in)",
+                    transition: "in",
+                }),
+                _ => None,
+            },
+        )
         .collect();
+    let entrance_count = animated.len();
+    // Fade exits run after every entrance, in entrance order.
+    for (index, element) in slide.elements.iter().enumerate() {
+        if element.exit.eq_ignore_ascii_case("fade") {
+            animated.push(AnimatedElement {
+                shape_id: (index + 2) as u32,
+                index,
+                delay_ms: 0,
+                duration_ms: element.exit_duration_ms.unwrap_or(350).clamp(50, 60_000),
+                order: element.entrance_order.unwrap_or(index as u32),
+                filter: "fade",
+                transition: "out",
+            });
+        }
+    }
+    animated.sort_by_key(|element| (element.transition == "out", element.order, element.index));
     if animated.is_empty() {
         return String::new();
     }
@@ -443,14 +759,20 @@ fn animation_timing_xml(slide: &redoc_slide_engine::Slide) -> String {
     let children = animated
         .iter()
         .enumerate()
-        .map(|(index, shape_id)| {
+        .map(|(index, element)| {
             let sequence_id = 10 + (index as u32 * 3);
             let behavior_id = sequence_id + 1;
             format!(
-                r#"<p:par><p:cTn id="{sequence_id}" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:animEffect transition="in" filter="fade"><p:cBhvr><p:cTn id="{behavior_id}" dur="350" fill="hold"/><p:tgtEl><p:spTgt spid="{shape_id}"/></p:tgtEl></p:cBhvr></p:animEffect></p:childTnLst></p:cTn></p:par>"#
+                r#"<p:par><p:cTn id="{sequence_id}" fill="hold"><p:stCondLst><p:cond delay="{delay_ms}"/></p:stCondLst><p:childTnLst><p:animEffect transition="{transition}" filter="{filter}"><p:cBhvr><p:cTn id="{behavior_id}" dur="{duration_ms}" fill="hold"/><p:tgtEl><p:spTgt spid="{shape_id}"/></p:tgtEl></p:cBhvr></p:animEffect></p:childTnLst></p:cTn></p:par>"#,
+                delay_ms = element.delay_ms,
+                duration_ms = element.duration_ms,
+                shape_id = element.shape_id,
+                filter = element.filter,
+                transition = element.transition,
             )
         })
         .collect::<String>();
+    let _ = entrance_count;
 
     format!(
         r#"<p:timing><p:tnLst><p:par><p:cTn id="1" dur="indefinite" nodeType="tmRoot"><p:childTnLst><p:seq concurrent="1" nextAc="seek"><p:cTn id="2" dur="indefinite" nodeType="mainSeq"><p:childTnLst>{children}</p:childTnLst></p:cTn></p:seq></p:childTnLst></p:cTn></p:par></p:tnLst></p:timing>"#
@@ -466,6 +788,12 @@ fn slide_xml(slide: &redoc_slide_engine::Slide) -> String {
         .filter(|element| image_bytes(element).is_some())
         .count();
     let mut chart_index = 0usize;
+    let mut hyperlink_index = 0usize;
+    let chart_count = slide
+        .elements
+        .iter()
+        .filter(|element| matches!(&element.kind, ElementKind::Chart { chart_type, .. } if native_chart_type(chart_type).is_some()))
+        .count();
     for (index, element) in slide.elements.iter().enumerate() {
         let relationship = if image_bytes(element).is_some() {
             image_index += 1;
@@ -480,11 +808,19 @@ fn slide_xml(slide: &redoc_slide_engine::Slide) -> String {
         } else {
             None
         };
+        let hyperlink_relationship = safe_external_hyperlink_target(
+            element.hyperlink.as_deref().unwrap_or_default(),
+        )
+        .map(|_| {
+            hyperlink_index += 1;
+            format!("rId{}", image_count + chart_count + hyperlink_index + 1)
+        });
         shapes.push_str(&shape_xml(
             (index + 2) as u32,
             element,
             relationship.as_deref(),
             chart_relationship.as_deref(),
+            hyperlink_relationship.as_deref(),
         ));
     }
     let transition = transition_xml(&slide.transition);
@@ -499,16 +835,41 @@ fn slide_xml(slide: &redoc_slide_engine::Slide) -> String {
 pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
     let cursor = std::io::Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(cursor);
-    let options = FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let mut add = |path: &str, contents: String| -> Result<(), ExportError> {
         zip.start_file(path, options)?;
         zip.write_all(contents.as_bytes())?;
         Ok(())
     };
 
+    // Emit one deterministic layout part per layout kind used by the deck.
+    // This keeps slide relationships valid while avoiding unbounded metadata
+    // from malformed or user-supplied layout names.
+    let mut layout_indices = BTreeMap::<String, usize>::new();
+    let mut layouts = Vec::<String>::new();
+    for slide in &deck.slides {
+        let layout = canonical_layout_name(&slide.layout).to_string();
+        if !layout_indices.contains_key(&layout) {
+            let index = layouts.len() + 1;
+            layout_indices.insert(layout.clone(), index);
+            layouts.push(layout);
+        }
+    }
+    if layouts.is_empty() {
+        layouts.push("blank".to_string());
+        layout_indices.insert("blank".to_string(), 1);
+    }
+
     let mut overrides = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/ppt/notesMasters/notesMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"/>"#,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/ppt/notesMasters/notesMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"/>"#,
     );
+    for index in 1..=layouts.len() {
+        write!(
+            overrides,
+            r#"<Override PartName="/ppt/slideLayouts/slideLayout{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>"#
+        )
+        .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
+    }
     for index in 1..=deck.slides.len() {
         write!(
             overrides,
@@ -522,6 +883,14 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
             write!(
                 overrides,
                 r#"<Override PartName="/ppt/notesSlides/notesSlide{notes_index}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>"#
+            )
+            .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
+        }
+        if !slide.comments.is_empty() {
+            write!(
+                overrides,
+                r#"<Override PartName="/ppt/comments/comment{index}comment.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.comments+xml"/>"#,
+                index = index + 1
             )
             .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
         }
@@ -573,30 +942,93 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
     )
     .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
 
+    // Unique comment authors across the deck, emitted as p:cmAuthorLst so
+    // PowerPoint can attribute comments on reopened files.
+    let mut comment_authors: Vec<&str> = Vec::new();
+    for slide in &deck.slides {
+        for comment in &slide.comments {
+            let author = comment.author.trim();
+            if !author.is_empty() && !comment_authors.contains(&author) {
+                comment_authors.push(author);
+            }
+        }
+    }
+    let cm_author_lst = if comment_authors.is_empty() {
+        String::new()
+    } else {
+        let mut entries = String::new();
+        for (position, author) in comment_authors.iter().enumerate() {
+            let author_id = position;
+            let initials: String = author
+                .chars()
+                .filter(|c| c.is_alphabetic())
+                .take(3)
+                .collect::<String>()
+                .to_uppercase();
+            write!(
+                entries,
+                r#"<p:cmAuthor id="{author_id}" name="{}" initials="{}"/>"#,
+                xml_escape(author),
+                xml_escape(&initials)
+            )
+            .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
+        }
+        format!(r#"<p:cmAuthorLst>{entries}</p:cmAuthorLst>"#)
+    };
     presentation_rels.push_str("</Relationships>");
     add(
         "ppt/presentation.xml",
         format!(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:notesMasterIdLst><p:notesMasterId r:id="rId{notes_master_rid}"/></p:notesMasterIdLst><p:sldIdLst>{slide_ids}</p:sldIdLst><p:sldSz cx="9144000" cy="5143500"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>"#
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:notesMasterIdLst><p:notesMasterId r:id="rId{notes_master_rid}"/></p:notesMasterIdLst><p:sldIdLst>{slide_ids}</p:sldIdLst>{cm_author_lst}<p:sldSz cx="9144000" cy="5143500"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>"#
         ),
     )?;
     add("ppt/_rels/presentation.xml.rels", presentation_rels)?;
+    let mut master_layout_ids = String::new();
+    let mut master_relationships = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    );
+    for index in 1..=layouts.len() {
+        let relationship_id = index;
+        write!(
+            master_layout_ids,
+            r#"<p:sldLayoutId id="{}" r:id="rId{}"/>"#,
+            255 + index,
+            relationship_id
+        )
+        .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
+        write!(
+            master_relationships,
+            r#"<Relationship Id="rId{relationship_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout{index}.xml"/>"#
+        )
+        .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
+    }
+    let theme_relationship_id = layouts.len() + 1;
+    write!(
+        master_relationships,
+        r#"<Relationship Id="rId{theme_relationship_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/></Relationships>"#
+    )
+    .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
     add(
         "ppt/slideMasters/slideMaster1.xml",
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:sldLayoutIdLst><p:sldLayoutId id="1" r:id="rId1"/></p:sldLayoutIdLst><p:txStyles/><p:clrMap accent1="accent1" bg1="lt1" tx1="dk1"/></p:sldMaster>"#.to_string(),
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:sldLayoutIdLst>{master_layout_ids}</p:sldLayoutIdLst><p:txStyles/><p:clrMap accent1="accent1" bg1="lt1" tx1="dk1"/></p:sldMaster>"#
+        ),
     )?;
     add(
         "ppt/slideMasters/_rels/slideMaster1.xml.rels",
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/></Relationships>"#.to_string(),
+        master_relationships,
     )?;
-    add(
-        "ppt/slideLayouts/slideLayout1.xml",
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank"><p:cSld name="Blank"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"#.to_string(),
-    )?;
-    add(
-        "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#.to_string(),
-    )?;
+    for (index, layout) in layouts.iter().enumerate() {
+        let layout_index = index + 1;
+        add(
+            &format!("ppt/slideLayouts/slideLayout{layout_index}.xml"),
+            slide_layout_xml(layout),
+        )?;
+        add(
+            &format!("ppt/slideLayouts/_rels/slideLayout{layout_index}.xml.rels"),
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#.to_string(),
+        )?;
+    }
     add("ppt/theme/theme1.xml", theme1_xml(&deck.theme))?;
     add("ppt/notesMasters/notesMaster1.xml", notes_master_xml())?;
     add(
@@ -611,8 +1043,12 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
             &format!("ppt/slides/slide{slide_number}.xml"),
             slide_xml(slide),
         )?;
-        let mut relationships = String::from(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>"#,
+        let layout_index = layout_indices
+            .get(canonical_layout_name(&slide.layout))
+            .copied()
+            .unwrap_or(1);
+        let mut relationships = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout{layout_index}.xml"/>"#
         );
         let mut next_rel = 2usize;
         for element in &slide.elements {
@@ -634,6 +1070,7 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
                 chart_type,
                 data,
                 labels,
+                ..
             } = &element.kind
             {
                 if native_chart_type(chart_type).is_some() {
@@ -651,11 +1088,35 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
                 }
             }
         }
+        for element in &slide.elements {
+            if let Some(target) = element
+                .hyperlink
+                .as_deref()
+                .and_then(safe_external_hyperlink_target)
+            {
+                write!(
+                    relationships,
+                    r#"<Relationship Id="rId{next_rel}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{}" TargetMode="External"/>"#,
+                    xml_escape(&target)
+                )
+                .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
+                next_rel += 1;
+            }
+        }
         let has_notes = !slide.notes.trim().is_empty();
         if has_notes {
             write!(
                 relationships,
                 r#"<Relationship Id="rId{next_rel}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide{slide_number}.xml"/>"#
+            )
+            .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
+            next_rel += 1;
+        }
+        let has_comments = !slide.comments.is_empty();
+        if has_comments {
+            write!(
+                relationships,
+                r#"<Relationship Id="rId{next_rel}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment{slide_number}comment.xml"/>"#
             )
             .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
         }
@@ -664,6 +1125,34 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
             &format!("ppt/slides/_rels/slide{slide_number}.xml.rels"),
             relationships,
         )?;
+        if has_comments {
+            let mut comment_entries = String::new();
+            for (position, comment) in slide.comments.iter().take(200).enumerate() {
+                let author_index = comment_authors
+                    .iter()
+                    .position(|author| *author == comment.author.trim())
+                    .unwrap_or(0);
+                // ISO 8601-ish timestamp; PowerPoint accepts "Z" form.
+                let created = if comment.created_at.trim().is_empty() {
+                    "1970-01-01T00:00:00Z".to_string()
+                } else {
+                    xml_escape(comment.created_at.trim())
+                };
+                write!(
+                    comment_entries,
+                    r#"<p:cm id="{position}" authorId="{author_index}" dt="{created}"{}><p:text>{}</p:text></p:cm>"#,
+                    if comment.resolved { " resolved=\"1\"" } else { "" },
+                    xml_escape(&comment.text)
+                )
+                .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
+            }
+            add(
+                &format!("ppt/comments/comment{slide_number}comment.xml"),
+                format!(
+                    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:cmLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">{comment_entries}</p:cmLst>"#
+                ),
+            )?;
+        }
         if has_notes {
             add(
                 &format!("ppt/notesSlides/notesSlide{slide_number}.xml"),
@@ -717,6 +1206,31 @@ mod tests {
     }
 
     #[test]
+    fn exports_safe_element_hyperlinks_as_external_relationships() {
+        let mut deck = DeckModel::new_default();
+        deck.slides[0].elements[0].hyperlink = Some("https://example.com/docs".to_string());
+        let bytes = export_deck_to_pptx(&deck).expect("export hyperlink pptx");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read pptx zip");
+        let mut slide = String::new();
+        archive
+            .by_name("ppt/slides/slide1.xml")
+            .expect("slide xml")
+            .read_to_string(&mut slide)
+            .expect("read slide xml");
+        assert!(slide.contains("a:hlinkClick") && slide.contains("r:id=\"rId2\""));
+        let mut rels = String::new();
+        archive
+            .by_name("ppt/slides/_rels/slide1.xml.rels")
+            .expect("slide relationships")
+            .read_to_string(&mut rels)
+            .expect("read relationships");
+        assert!(
+            rels.contains("relationships/hyperlink")
+                && rels.contains("Target=\"https://example.com/docs\"")
+        );
+    }
+
+    #[test]
     fn embeds_data_uri_images() {
         let mut deck = DeckModel::new_default();
         deck.slides[0]
@@ -730,6 +1244,12 @@ mod tests {
                 rotation: 0.0,
                 z_index: 3,
                 entrance: "none".to_string(),
+                entrance_delay_ms: None,
+                entrance_duration_ms: None,
+                entrance_order: None,
+                exit: "none".to_string(),
+                exit_duration_ms: None,
+                hyperlink: None,
                 kind: ElementKind::Image {
                     asset_hash: "data:image/png;base64,aGVsbG8=".to_string(),
                     mime: "image/png".to_string(),
@@ -763,9 +1283,43 @@ mod tests {
     }
 
     #[test]
+    fn writes_extended_native_transitions() {
+        let cases = [
+            ("wipe-left", "<p:wipe dir=\"l\"/>"),
+            ("wipe-right", "<p:wipe dir=\"r\"/>"),
+            ("zoom", "<p:zoom dir=\"in\"/>"),
+            ("dissolve", "<p:dissolve/>"),
+        ];
+        for (transition, expected) in cases {
+            let mut deck = DeckModel::new_default();
+            deck.slides[0].transition = transition.to_string();
+            let bytes = export_deck_to_pptx(&deck).expect("export transition pptx");
+            let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+                .expect("read transition pptx zip");
+            let mut xml = String::new();
+            archive
+                .by_name("ppt/slides/slide1.xml")
+                .expect("slide1")
+                .read_to_string(&mut xml)
+                .expect("read slide xml");
+            assert!(
+                xml.contains(expected),
+                "missing {expected} for {transition}"
+            );
+        }
+    }
+
+    #[test]
     fn writes_native_fade_entrance_timing() {
         let mut deck = DeckModel::new_default();
         deck.slides[0].elements[0].entrance = "fade".to_string();
+        deck.slides[0].elements[0].entrance_delay_ms = Some(125);
+        deck.slides[0].elements[0].entrance_duration_ms = Some(900);
+        deck.slides[0].elements[0].entrance_order = Some(2);
+        deck.slides[0].elements[1].entrance = "fade".to_string();
+        deck.slides[0].elements[1].entrance_delay_ms = Some(15);
+        deck.slides[0].elements[1].entrance_duration_ms = Some(700);
+        deck.slides[0].elements[1].entrance_order = Some(1);
         let bytes = export_deck_to_pptx(&deck).expect("export animated pptx");
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read pptx zip");
         let mut xml = String::new();
@@ -777,6 +1331,74 @@ mod tests {
         assert!(xml.contains("<p:timing>"));
         assert!(xml.contains("<p:animEffect transition=\"in\" filter=\"fade\">"));
         assert!(xml.contains("<p:spTgt spid=\"2\"/>"));
+        assert!(xml.contains("<p:spTgt spid=\"3\"/>"));
+        assert!(xml.contains("<p:cond delay=\"15\"/>"));
+        assert!(xml.contains("dur=\"700\""));
+        assert!(xml.contains("<p:cond delay=\"125\"/>"));
+        assert!(xml.contains("dur=\"900\""));
+        assert!(
+            xml.find("spid=\"3\"").expect("first shape target")
+                < xml.find("spid=\"2\"").expect("second shape target")
+        );
+    }
+
+    #[test]
+    fn writes_native_zoom_entrance_timing() {
+        let mut deck = DeckModel::new_default();
+        deck.slides[0].elements[0].entrance = "zoom".to_string();
+        let bytes = export_deck_to_pptx(&deck).expect("export zoom animation pptx");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read pptx zip");
+        let mut xml = String::new();
+        archive
+            .by_name("ppt/slides/slide1.xml")
+            .expect("slide1")
+            .read_to_string(&mut xml)
+            .expect("read slide xml");
+        assert!(xml.contains("<p:animEffect transition=\"in\" filter=\"zoom(in)\">"));
+    }
+
+    #[test]
+    fn writes_native_fade_exit_timing_and_round_trips() {
+        let mut deck = DeckModel::new_default();
+        deck.slides[0].elements[0].entrance = "fade".to_string();
+        deck.slides[0].elements[0].entrance_order = Some(0);
+        deck.slides[0].elements[1].exit = "fade".to_string();
+        deck.slides[0].elements[1].exit_duration_ms = Some(450);
+        let bytes = export_deck_to_pptx(&deck).expect("export exit animation pptx");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read pptx zip");
+        let mut xml = String::new();
+        archive
+            .by_name("ppt/slides/slide1.xml")
+            .expect("slide1")
+            .read_to_string(&mut xml)
+            .expect("read slide xml");
+        assert!(xml.contains("<p:animEffect transition=\"in\" filter=\"fade\">"));
+        assert!(xml.contains("<p:animEffect transition=\"out\" filter=\"fade\">"));
+        // Exit (spid 3) is sequenced after the entrance (spid 2).
+        assert!(
+            xml.find("spid=\"2\"").expect("entrance target")
+                < xml.find("spid=\"3\"").expect("exit target")
+        );
+
+        // Round-trip through the importer.
+        let path = std::env::temp_dir().join(format!(
+            "redoc-pptx-exit-{}-{}.pptx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, export_deck_to_pptx(&deck).expect("rewrite pptx"))
+            .expect("write pptx");
+        let imported = crate::pptx_import::import_deck_from_pptx_with_report(&path)
+            .expect("import pptx with exit");
+        let elements = &imported.deck.slides[0].elements;
+        assert_eq!(elements[0].entrance, "fade");
+        assert_eq!(elements[0].exit, "none");
+        assert_eq!(elements[1].exit, "fade");
+        assert_eq!(elements[1].exit_duration_ms, Some(450));
+        std::fs::remove_file(path).expect("cleanup pptx");
     }
 
     #[test]
@@ -795,10 +1417,19 @@ mod tests {
                 rotation: 0.0,
                 z_index: 1,
                 entrance: "none".to_string(),
+                entrance_delay_ms: None,
+                entrance_duration_ms: None,
+                entrance_order: None,
+                exit: "none".to_string(),
+                exit_duration_ms: None,
+                hyperlink: None,
                 kind: ElementKind::Chart {
                     chart_type: "bar".to_string(),
                     data: vec![1.0, 2.5],
                     labels: vec!["Revenue".to_string(), "Q1".to_string(), "Q2".to_string()],
+                    legend: true,
+                    show_labels: true,
+                    show_axes: true,
                 },
             });
         let bytes = export_deck_to_pptx(&deck).expect("export chart pptx");
@@ -846,6 +1477,12 @@ mod tests {
                 rotation: 45.0,
                 z_index: 1,
                 entrance: "none".to_string(),
+                entrance_delay_ms: None,
+                entrance_duration_ms: None,
+                entrance_order: None,
+                exit: "none".to_string(),
+                exit_duration_ms: None,
+                hyperlink: None,
                 kind: ElementKind::Text {
                     text: "Tilted".to_string(),
                     font_size: 28.0,
@@ -911,6 +1548,12 @@ mod tests {
                 rotation: 0.0,
                 z_index: 1,
                 entrance: "none".to_string(),
+                entrance_delay_ms: None,
+                entrance_duration_ms: None,
+                entrance_order: None,
+                exit: "none".to_string(),
+                exit_duration_ms: None,
+                hyperlink: None,
                 kind: ElementKind::Text {
                     text: "Line 1\nLine 2".to_string(),
                     font_size: 32.0,
@@ -958,12 +1601,24 @@ mod tests {
                 rotation: 0.0,
                 z_index: 1,
                 entrance: "none".to_string(),
+                entrance_delay_ms: None,
+                entrance_duration_ms: None,
+                entrance_order: None,
+                exit: "none".to_string(),
+                exit_duration_ms: None,
+                hyperlink: None,
                 kind: ElementKind::Shape {
                     shape_type: "line".to_string(),
                     fill_color: "".to_string(),
                     stroke_color: "#00FF00".to_string(),
                     stroke_width: 2.0,
                     text: String::new(),
+                    fill_gradient: None,
+                    shadow: false,
+                    font_family: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
                 },
             });
         deck.slides[0]
@@ -977,12 +1632,24 @@ mod tests {
                 rotation: 0.0,
                 z_index: 2,
                 entrance: "none".to_string(),
+                entrance_delay_ms: None,
+                entrance_duration_ms: None,
+                entrance_order: None,
+                exit: "none".to_string(),
+                exit_duration_ms: None,
+                hyperlink: None,
                 kind: ElementKind::Shape {
                     shape_type: "arrow".to_string(),
                     fill_color: "".to_string(),
                     stroke_color: "#FF0000".to_string(),
                     stroke_width: 3.0,
                     text: String::new(),
+                    fill_gradient: None,
+                    shadow: false,
+                    font_family: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
                 },
             });
 
@@ -1000,6 +1667,111 @@ mod tests {
         assert!(slide_xml.contains(r#"val="00FF00""#));
         assert!(slide_xml.contains(r#"val="FF0000""#));
         assert!(slide_xml.contains(r#"<a:tailEnd type="triangle"/>"#));
+    }
+
+    #[test]
+    fn exports_common_shape_presets_as_native_geometry() {
+        let mut deck = DeckModel::new_default();
+        deck.slides[0].elements.clear();
+        for (index, shape_type) in ["roundedRect", "triangle", "diamond", "star"]
+            .into_iter()
+            .enumerate()
+        {
+            deck.slides[0]
+                .elements
+                .push(redoc_slide_engine::SlideElement {
+                    id: format!("shape-{shape_type}"),
+                    x: 40.0 + index as f64 * 120.0,
+                    y: 80.0,
+                    width: 100.0,
+                    height: 80.0,
+                    rotation: 0.0,
+                    z_index: index as i32 + 1,
+                    entrance: "none".to_string(),
+                    entrance_delay_ms: None,
+                    entrance_duration_ms: None,
+                    entrance_order: None,
+                    exit: "none".to_string(),
+                    exit_duration_ms: None,
+                    hyperlink: None,
+                    kind: ElementKind::Shape {
+                        shape_type: shape_type.to_string(),
+                        fill_color: "#336699".to_string(),
+                        stroke_color: "#112233".to_string(),
+                        stroke_width: 1.0,
+                        text: String::new(),
+                        fill_gradient: None,
+                        shadow: false,
+                        font_family: None,
+                        bold: false,
+                        italic: false,
+                        underline: false,
+                    },
+                });
+        }
+
+        let bytes = export_deck_to_pptx(&deck).expect("export shape presets");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read pptx zip");
+        let mut slide_xml = String::new();
+        archive
+            .by_name("ppt/slides/slide1.xml")
+            .expect("slide1")
+            .read_to_string(&mut slide_xml)
+            .expect("read slide xml");
+
+        assert!(slide_xml.contains(r#"prst="roundRect""#));
+        assert!(slide_xml.contains(r#"prst="triangle""#));
+        assert!(slide_xml.contains(r#"prst="diamond""#));
+        assert!(slide_xml.contains(r#"prst="star5""#));
+    }
+
+    #[test]
+    fn exports_shape_text_as_editable_text_body() {
+        let mut deck = DeckModel::new_default();
+        deck.slides[0].elements.clear();
+        deck.slides[0]
+            .elements
+            .push(redoc_slide_engine::SlideElement {
+                id: "labeled-shape".to_string(),
+                x: 40.0,
+                y: 80.0,
+                width: 220.0,
+                height: 100.0,
+                rotation: 0.0,
+                z_index: 1,
+                entrance: "none".to_string(),
+                entrance_delay_ms: None,
+                entrance_duration_ms: None,
+                entrance_order: None,
+                exit: "none".to_string(),
+                exit_duration_ms: None,
+                hyperlink: None,
+                kind: ElementKind::Shape {
+                    shape_type: "roundedRect".to_string(),
+                    fill_color: "#336699".to_string(),
+                    stroke_color: "#112233".to_string(),
+                    stroke_width: 1.0,
+                    text: "First line & <second>".to_string(),
+                    fill_gradient: None,
+                    shadow: false,
+                    font_family: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                },
+            });
+
+        let bytes = export_deck_to_pptx(&deck).expect("export labeled shape");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read pptx zip");
+        let mut slide_xml = String::new();
+        archive
+            .by_name("ppt/slides/slide1.xml")
+            .expect("slide1")
+            .read_to_string(&mut slide_xml)
+            .expect("read slide xml");
+
+        assert!(slide_xml.contains("First line &amp; &lt;second&gt;"));
+        assert!(slide_xml.contains(r#"<p:txBody><a:bodyPr/><a:lstStyle/><a:p>"#));
     }
 
     #[test]
@@ -1046,6 +1818,12 @@ mod tests {
                 rotation: 0.0,
                 z_index: 1,
                 entrance: "none".to_string(),
+                entrance_delay_ms: None,
+                entrance_duration_ms: None,
+                entrance_order: None,
+                exit: "none".to_string(),
+                exit_duration_ms: None,
+                hyperlink: None,
                 kind: ElementKind::Image {
                     asset_hash: "https://example.com/test.png".to_string(),
                     mime: "image/png".to_string(),
@@ -1063,5 +1841,85 @@ mod tests {
 
         assert!(slide_xml.contains("[Image unavailable: https://example.com/test.png]"));
         assert!(slide_xml.contains("Image Warning"));
+    }
+
+    #[test]
+    fn round_trips_slide_comments_with_author_metadata() {
+        use redoc_slide_engine::SlideCommentModel;
+        let mut deck = DeckModel::new_default();
+        deck.slides[0].comments = vec![
+            SlideCommentModel {
+                id: "c1".to_string(),
+                author: "Alice".to_string(),
+                text: "Tighten this headline".to_string(),
+                resolved: false,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            SlideCommentModel {
+                id: "c2".to_string(),
+                author: "Bob".to_string(),
+                text: "Reviewed".to_string(),
+                resolved: true,
+                created_at: "2026-01-02T00:00:00Z".to_string(),
+            },
+        ];
+        let bytes = export_deck_to_pptx(&deck).expect("export commented pptx");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read pptx zip");
+        let names = archive.file_names().map(str::to_string).collect::<Vec<_>>();
+        assert!(
+            names.contains(&"ppt/comments/comment1comment.xml".to_string()),
+            "comment part must exist: {names:?}"
+        );
+        let mut comment_xml = String::new();
+        archive
+            .by_name("ppt/comments/comment1comment.xml")
+            .expect("comment part")
+            .read_to_string(&mut comment_xml)
+            .expect("read comment xml");
+        assert!(comment_xml.contains("Tighten this headline"));
+        assert!(comment_xml.contains("resolved=\"1\""));
+        let mut presentation = String::new();
+        archive
+            .by_name("ppt/presentation.xml")
+            .expect("presentation")
+            .read_to_string(&mut presentation)
+            .expect("read presentation");
+        assert!(presentation.contains("p:cmAuthorLst"));
+        assert!(presentation.contains("Alice"));
+        let mut rels = String::new();
+        archive
+            .by_name("ppt/slides/_rels/slide1.xml.rels")
+            .expect("slide rels")
+            .read_to_string(&mut rels)
+            .expect("read rels");
+        assert!(rels.contains("relationships/comments"));
+        let mut content_types = String::new();
+        archive
+            .by_name("[Content_Types].xml")
+            .expect("content types")
+            .read_to_string(&mut content_types)
+            .expect("read content types");
+        assert!(content_types.contains("presentationml.comments"));
+
+        // Round-trip: import the exported file and recover both comments.
+        let path = std::env::temp_dir().join(format!(
+            "redoc-pptx-comments-{}-{}.pptx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, export_deck_to_pptx(&deck).expect("re-export")).expect("write pptx");
+        let imported = crate::pptx_import::import_deck_from_pptx_with_report(&path)
+            .expect("import commented pptx");
+        std::fs::remove_file(&path).expect("cleanup pptx");
+        let comments = &imported.deck.slides[0].comments;
+        assert_eq!(comments.len(), 2, "both comments must round-trip");
+        assert_eq!(comments[0].author, "Alice");
+        assert_eq!(comments[0].text, "Tighten this headline");
+        assert!(!comments[0].resolved);
+        assert_eq!(comments[1].author, "Bob");
+        assert!(comments[1].resolved);
     }
 }

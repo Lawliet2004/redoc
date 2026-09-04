@@ -1,4 +1,4 @@
-import { createSignal, For, Show, onCleanup, onMount } from "solid-js";
+import { createSignal, For, Show, onCleanup, onMount, createEffect } from "solid-js";
 
 export interface MenuAction {
   id: string;
@@ -32,6 +32,34 @@ export function MenuBar(props: MenuBarProps) {
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close();
+      if (!openId()) return;
+      
+      const menus = props.menus;
+      const currentIndex = menus.findIndex(m => m.id === openId());
+      if (currentIndex === -1) return;
+      
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        setOpenId(menus[(currentIndex + 1) % menus.length].id);
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setOpenId(menus[(currentIndex - 1 + menus.length) % menus.length].id);
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const menuEl = document.querySelector(`[role="menu"]`);
+        if (!menuEl) return;
+        const items = Array.from(menuEl.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])'));
+        if (items.length === 0) return;
+        
+        const focusedIndex = items.findIndex(el => el === document.activeElement);
+        if (e.key === "ArrowDown") {
+          const next = focusedIndex < items.length - 1 ? focusedIndex + 1 : 0;
+          items[next]?.focus();
+        } else {
+          const prev = focusedIndex > 0 ? focusedIndex - 1 : items.length - 1;
+          items[prev]?.focus();
+        }
+      }
     };
     document.addEventListener("mousedown", onDocClick);
     document.addEventListener("keydown", onKey);
@@ -39,6 +67,16 @@ export function MenuBar(props: MenuBarProps) {
       document.removeEventListener("mousedown", onDocClick);
       document.removeEventListener("keydown", onKey);
     });
+  });
+
+  createEffect(() => {
+    if (openId()) {
+      queueMicrotask(() => {
+        const menuEl = document.querySelector(`[role="menu"]`);
+        const first = menuEl?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])');
+        first?.focus();
+      });
+    }
   });
 
   return (

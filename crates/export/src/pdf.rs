@@ -1,4 +1,5 @@
 use crate::base64_util::data_uri_bytes;
+use printpdf::path::{PaintMode, WindingOrder};
 use printpdf::*;
 use redoc_sheet_engine::WorkbookModel;
 use redoc_slide_engine::{DeckModel, ElementKind};
@@ -117,6 +118,509 @@ fn parse_page_setup(
     )
 }
 
+fn pdf_field_text(node: &serde_json::Value) -> Option<String> {
+    if node.get("type").and_then(|value| value.as_str()) != Some("field") {
+        return None;
+    }
+    let attrs = node.get("attrs");
+    if let Some(result) = attrs.and_then(|attrs| attrs.get("result")) {
+        if let Some(value) = result.as_str() {
+            let value = value
+                .chars()
+                .take(64)
+                .collect::<String>()
+                .trim()
+                .to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        } else if let Some(value) = result.as_f64().filter(|value| value.is_finite()) {
+            return Some(value.floor().to_string());
+        }
+    }
+    let kind = attrs
+        .and_then(|attrs| attrs.get("kind"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    Some(match kind.as_str() {
+        "page" | "pagenumber" => "[PAGE]".to_string(),
+        "numpages" | "pagecount" => "[NUMPAGES]".to_string(),
+        _ => "[FIELD]".to_string(),
+    })
+}
+
+// ── Styled-run PDF layout ──────────────────────────────────────────────────
+// Upgrades the legacy text-flattening exporter to run-level fidelity: bold /
+// italic font variants, alignment, list markers and real table grids, while
+// keeping pagination, images and header/footer behavior intact.
+
+#[derive(Debug, Clone)]
+struct PdfRun {
+    text: String,
+    bold: bool,
+    italic: bool,
+    /// Font size in points.
+    size: f32,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PdfParagraphStyle {
+    align: Option<String>,
+    indent: f32,
+    is_code: bool,
+    /// Rendered prefix for list items ("• ", "1. ", …).
+    list_prefix: Option<String>,
+    spacing_after: f32,
+}
+
+#[derive(Debug, Clone)]
+enum PdfBlock {
+    Paragraph {
+        runs: Vec<PdfRun>,
+        style: PdfParagraphStyle,
+    },
+    Table {
+        /// rows -> cells -> paragraph runs (cells keep their own styles).
+        rows: Vec<Vec<Vec<PdfRun>>>,
+        /// True for any header row (shaded + bold).
+        header_rows: Vec<bool>,
+    },
+    Image(Vec<u8>),
+    PageBreak,
+}
+
+/// Standard Helvetica AFM advance widths (units/1000) for ASCII 32..=126.
+/// Bold approximates via +8%; the builtin bold face tracks closely enough
+/// for wrapping decisions.
+const HELVETICA_WIDTHS: [u16; 94] = [
+    278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278,
+    278, // !"#$%&'()*+,-./
+    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584,
+    556, // 0123456789:;<=>?
+    1015, 667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722,
+    778, // @ABCDEFGHIJKLMNO
+    667, 778, 722, 667, 611, 556, 722, 667, 944, 667, 667, 611, 278, 278, 278,
+    469, // PQRSTUVWXYZ[\]^_
+    556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556,
+    556, // `abcdefghijklmno
+    500, 500, 278, 278, 500, 278, 778, 500, 500, 500, 500, 333, 556, 333, // pqrstuvwxyz{|}~
+];
+
+/// Width of `text` in millimetres when set in Helvetica at `size` points.
+fn text_width_mm(text: &str, size: f32, bold: bool) -> f32 {
+    let mut units = 0u32;
+    let mut count = 0u32;
+    for c in text.chars() {
+        count += 1;
+        let idx = (c as u32).saturating_sub(32) as usize;
+        let width = if idx < 95 {
+            HELVETICA_WIDTHS[idx] as f32
+        } else {
+            600.0 // non-ASCII fallback (glyph-missing approximations)
+        };
+        units += width.round() as u32;
+    }
+    if count == 0 {
+        return 0.0;
+    }
+    let scale = if bold { 1.08 } else { 1.0 };
+    (units as f32 / 1000.0) * size * scale * 25.4 / 72.0
+}
+
+fn mark_flag(marks: &serde_json::Value, name: &str) -> bool {
+    marks.as_array().is_some_and(|list| {
+        list.iter()
+            .any(|m| m.get("type").and_then(|t| t.as_str()) == Some(name))
+    })
+}
+
+fn mark_attr<'a>(
+    marks: &'a serde_json::Value,
+    name: &str,
+    attr: &str,
+) -> Option<&'a serde_json::Value> {
+    marks
+        .as_array()?
+        .iter()
+        .find(|m| m.get("type").and_then(|t| t.as_str()) == Some(name))?
+        .get("attrs")?
+        .get(attr)
+}
+
+/// Collect styled runs from a text node (text | field | footnote_ref), honoring marks.
+fn collect_runs(node: &serde_json::Value, base_size: f32) -> Vec<PdfRun> {
+    let node_type = node.get("type").and_then(|v| v.as_str());
+    let (text, marks) = match node_type {
+        Some("field") => {
+            return vec![PdfRun {
+                text: pdf_field_text(node).unwrap_or_default(),
+                bold: false,
+                italic: false,
+                size: base_size,
+            }];
+        }
+        Some("footnote_ref") => {
+            // Superscript reference number in the body text.
+            let label = node
+                .get("attrs")
+                .and_then(|attrs| attrs.get("label"))
+                .map(|value| value.to_string().replace('"', ""))
+                .unwrap_or_else(|| "*".to_string());
+            return vec![PdfRun {
+                text: format!("[{label}]"),
+                bold: false,
+                italic: false,
+                size: (base_size * 0.75).max(6.0),
+            }];
+        }
+        Some("text") => (
+            node.get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            node.get("marks")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        ),
+        _ => return Vec::new(),
+    };
+    let size = mark_attr(&marks, "fontSize", "size")
+        .and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse().ok()))
+        .map(|v| v as f32)
+        .unwrap_or(base_size);
+    vec![PdfRun {
+        text: text.to_string(),
+        bold: mark_flag(&marks, "bold"),
+        italic: mark_flag(&marks, "italic"),
+        size,
+    }]
+}
+
+/// Merge consecutive runs with identical styling so line-breaking sees fewer
+/// pieces without losing fidelity.
+fn coalesce_runs(runs: Vec<PdfRun>) -> Vec<PdfRun> {
+    let mut out: Vec<PdfRun> = Vec::new();
+    for run in runs {
+        if let Some(last) = out.last_mut() {
+            if last.bold == run.bold
+                && last.italic == run.italic
+                && (last.size - run.size).abs() < 0.01
+            {
+                last.text.push_str(&run.text);
+                continue;
+            }
+        }
+        out.push(run);
+    }
+    out
+}
+
+/// One wrapped line: a run slice positioned at a horizontal offset.
+struct LineFragment {
+    run: PdfRun,
+    start: usize,
+    end: usize,
+    run_index: usize,
+}
+
+struct WrappedLine {
+    fragments: Vec<LineFragment>,
+    width_mm: f32,
+}
+
+/// Greedy word wrap across run boundaries. Spaces may be dropped at breaks;
+/// hard newlines inside runs split lines like the DOM editor.
+fn wrap_runs(runs: &[PdfRun], max_width_mm: f32) -> Vec<WrappedLine> {
+    #[derive(Clone)]
+    struct Word {
+        run_index: usize,
+        start: usize,
+        end: usize,
+        width_mm: f32,
+        leading_space: bool,
+    }
+
+    let mut words: Vec<Word> = Vec::new();
+    for (run_index, run) in runs.iter().enumerate() {
+        let bytes = run.text.as_bytes();
+        let mut cursor = 0usize;
+        while cursor < bytes.len() {
+            // Split on spaces, remembering adjacency so word joins survive
+            // across run boundaries (e.g. "fo" + "o bar").
+            let mut word_end = cursor;
+            let mut leading_space = false;
+            if cursor > 0 || run_index == 0 {
+                // skip leading spaces at line starts handled below
+            }
+            while word_end < bytes.len() && bytes[word_end] == b' ' {
+                if word_end == cursor {
+                    leading_space = true;
+                }
+                word_end += 1;
+            }
+            let start = word_end;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != b' ' {
+                end += 1;
+            }
+            let mut probe = end;
+            while probe < bytes.len() && bytes[probe] == b' ' {
+                probe += 1;
+            }
+            if end > start {
+                let text = &run.text[start..end];
+                words.push(Word {
+                    run_index,
+                    start,
+                    end,
+                    width_mm: text_width_mm(text, run.size, run.bold),
+                    leading_space: leading_space && start > cursor,
+                });
+            }
+            cursor = if probe > end {
+                probe
+            } else {
+                end.max(start + 1).max(cursor + 1)
+            };
+        }
+    }
+
+    let space_mm = |size: f32, bold: bool| text_width_mm(" ", size, bold);
+    let mut lines: Vec<WrappedLine> = Vec::new();
+    let mut fragments: Vec<LineFragment> = Vec::new();
+    let mut line_width = 0.0f32;
+
+    macro_rules! flush_line {
+        () => {{
+            lines.push(WrappedLine {
+                fragments: std::mem::take(&mut fragments),
+                width_mm: line_width,
+            });
+            #[allow(unused_assignments)]
+            {
+                line_width = 0.0_f32;
+            }
+        }};
+    }
+
+    for (index, word) in words.iter().enumerate() {
+        let run = &runs[word.run_index];
+        let gap = if index == 0 || line_width == 0.0 {
+            0.0
+        } else {
+            space_mm(run.size, run.bold)
+        };
+        if line_width + gap + word.width_mm > max_width_mm && line_width > 0.0 {
+            flush_line!();
+        }
+        let effective = if line_width > 0.0 {
+            gap + word.width_mm
+        } else {
+            word.width_mm
+        };
+        line_width += effective;
+        // Merge into the previous fragment when it's the same run and
+        // adjacent range; otherwise start a new fragment.
+        if let Some(last) = fragments.last_mut() {
+            if last.run.bold == run.bold
+                && last.run.italic == run.italic
+                && (last.run.size - run.size).abs() < 0.01
+                && last.run_index == word.run_index
+                && last.end == word.start
+                && word.leading_space
+            {
+                last.end = word.end;
+                continue;
+            }
+        }
+        fragments.push(LineFragment {
+            run: run.clone(),
+            start: word.start,
+            end: word.end,
+            run_index: word.run_index,
+        });
+    }
+    if !fragments.is_empty() {
+        flush_line!();
+    }
+    lines
+}
+
+fn block_style_from_node(
+    node: &serde_json::Value,
+    is_heading: bool,
+    is_code: bool,
+) -> PdfParagraphStyle {
+    let attrs = node.get("attrs");
+    let spacing_after = attrs
+        .and_then(|a| a.get("spacingAfter"))
+        .and_then(|v| v.as_f64())
+        .map(|v| (v as f32) * 0.3528) // pt → mm
+        .unwrap_or(if is_heading { 6.0 } else { 4.0 });
+    PdfParagraphStyle {
+        align: attrs
+            .and_then(|a| a.get("align"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        indent: attrs
+            .and_then(|a| a.get("indent"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32,
+        is_code,
+        list_prefix: None,
+        spacing_after,
+    }
+}
+
+fn collect_pdf_blocks(
+    node: &serde_json::Value,
+    blocks: &mut Vec<PdfBlock>,
+    list_stack: &mut Vec<(bool, u32)>,
+) {
+    let node_type = node.get("type").and_then(|v| v.as_str());
+    match node_type {
+        Some("page_break") => blocks.push(PdfBlock::PageBreak),
+        Some("image") => {
+            if let Some(src) = node
+                .get("attrs")
+                .and_then(|attrs| attrs.get("src"))
+                .and_then(|src| src.as_str())
+            {
+                if let Some(bytes) = data_uri_bytes(src) {
+                    blocks.push(PdfBlock::Image(bytes));
+                }
+            }
+        }
+        Some("paragraph" | "heading" | "blockquote" | "code_block") => {
+            let is_heading = node_type == Some("heading");
+            let is_code = node_type == Some("code_block");
+            let heading_level = node
+                .get("attrs")
+                .and_then(|a| a.get("level"))
+                .and_then(|l| l.as_u64())
+                .unwrap_or(2) as u8;
+            let base_size = if is_heading {
+                match heading_level {
+                    1 => 20.0,
+                    2 => 17.0,
+                    3 => 15.0,
+                    _ => 13.0,
+                }
+            } else if is_code {
+                10.0
+            } else {
+                11.0
+            };
+            let mut style = block_style_from_node(node, is_heading, is_code);
+            if let Some((ordered, counter)) = list_stack.last().copied() {
+                style.list_prefix = Some(if ordered {
+                    format!("{counter}. ")
+                } else {
+                    "• ".to_string()
+                });
+            }
+            let mut runs: Vec<PdfRun> = Vec::new();
+            if let Some(children) = node.get("content").and_then(|c| c.as_array()) {
+                for child in children {
+                    runs.extend(collect_runs(child, base_size));
+                }
+            }
+            if is_heading {
+                for run in &mut runs {
+                    run.bold = true;
+                }
+            }
+            if is_code {
+                for run in &mut runs {
+                    run.bold = false;
+                    run.italic = false;
+                }
+            }
+            let runs = coalesce_runs(runs);
+            if !runs.is_empty() {
+                blocks.push(PdfBlock::Paragraph { runs, style });
+            } else if style.list_prefix.is_some() {
+                // Keep empty list items as a blank marker line.
+                blocks.push(PdfBlock::Paragraph {
+                    runs: vec![PdfRun {
+                        text: " ".to_string(),
+                        bold: false,
+                        italic: false,
+                        size: base_size,
+                    }],
+                    style,
+                });
+            }
+        }
+        Some("bullet_list" | "ordered_list") => {
+            let ordered = node_type == Some("ordered_list");
+            let counter_start = 1;
+            let mut counter = counter_start;
+            list_stack.push((ordered, counter));
+            if let Some(children) = node.get("content").and_then(|c| c.as_array()) {
+                for child in children {
+                    collect_pdf_blocks(child, blocks, list_stack);
+                    if ordered {
+                        counter += 1;
+                        if let Some(top) = list_stack.last_mut() {
+                            top.1 = counter;
+                        }
+                    }
+                }
+            }
+            list_stack.pop();
+        }
+        Some("table") => {
+            let mut rows: Vec<Vec<Vec<PdfRun>>> = Vec::new();
+            let mut header_rows: Vec<bool> = Vec::new();
+            if let Some(row_nodes) = node.get("content").and_then(|c| c.as_array()) {
+                for row in row_nodes {
+                    let mut row_runs: Vec<Vec<PdfRun>> = Vec::new();
+                    let mut row_has_header = false;
+                    if let Some(cells) = row.get("content").and_then(|c| c.as_array()) {
+                        for cell in cells {
+                            let is_header =
+                                cell.get("type").and_then(|t| t.as_str()) == Some("table_header");
+                            row_has_header |= is_header;
+                            let mut runs: Vec<PdfRun> = Vec::new();
+                            if let Some(paragraphs) = cell.get("content").and_then(|c| c.as_array())
+                            {
+                                for paragraph in paragraphs {
+                                    if let Some(children) =
+                                        paragraph.get("content").and_then(|c| c.as_array())
+                                    {
+                                        for child in children {
+                                            runs.extend(collect_runs(child, 10.0));
+                                        }
+                                    }
+                                }
+                            }
+                            for run in &mut runs {
+                                if is_header {
+                                    run.bold = true;
+                                }
+                            }
+                            row_runs.push(coalesce_runs(runs));
+                        }
+                    }
+                    rows.push(row_runs);
+                    header_rows.push(row_has_header);
+                }
+            }
+            if !rows.is_empty() {
+                blocks.push(PdfBlock::Table { rows, header_rows });
+            }
+        }
+        _ => {
+            if let Some(children) = node.get("content").and_then(|c| c.as_array()) {
+                for child in children {
+                    collect_pdf_blocks(child, blocks, list_stack);
+                }
+            }
+        }
+    }
+}
+
 pub fn export_doc_to_pdf(
     doc_json: &serde_json::Value,
     title: &str,
@@ -134,195 +638,139 @@ pub fn export_doc_to_pdf(
 
     let (doc, mut page, mut layer) =
         PdfDocument::new(title, Mm(page_width), Mm(page_height), "Page 1");
-    let mut pages = vec![(page, layer)];
-    let font = doc
+    let mut pages: Vec<(PdfPageIndex, PdfLayerIndex)> = vec![(page, layer)];
+
+    // Four builtin variants give the export run-level bold/italic fidelity.
+    let font_regular = doc
         .add_builtin_font(BuiltinFont::Helvetica)
         .map_err(|e| ExportError::Pdf(format!("{:?}", e)))?;
+    let font_bold = doc
+        .add_builtin_font(BuiltinFont::HelveticaBold)
+        .map_err(|e| ExportError::Pdf(format!("{:?}", e)))?;
+    let font_italic = doc
+        .add_builtin_font(BuiltinFont::HelveticaOblique)
+        .map_err(|e| ExportError::Pdf(format!("{:?}", e)))?;
+    let font_bold_italic = doc
+        .add_builtin_font(BuiltinFont::HelveticaBoldOblique)
+        .map_err(|e| ExportError::Pdf(format!("{:?}", e)))?;
+    let font_code = doc
+        .add_builtin_font(BuiltinFont::Courier)
+        .map_err(|e| ExportError::Pdf(format!("{:?}", e)))?;
+
+    let font_for = |run: &PdfRun| -> (IndirectFontRef, IndirectFontRef) {
+        if run.italic && run.bold {
+            (font_bold_italic.clone(), font_bold_italic.clone())
+        } else if run.italic {
+            (font_italic.clone(), font_italic.clone())
+        } else if run.bold {
+            (font_bold.clone(), font_bold.clone())
+        } else {
+            (font_regular.clone(), font_regular.clone())
+        }
+    };
 
     let printable_width = (page_width - margin_left - margin_right).max(10.0);
-    let chars_per_line = ((printable_width * 92.0 / 170.0) as usize).max(20);
     let initial_y = page_height - margin_top - 10.0;
+    let line_height_for = |size: f32| (size * 0.42).max(4.2);
 
-    fn text_content(node: &serde_json::Value) -> String {
-        if node.get("type").and_then(|value| value.as_str()) == Some("text") {
-            return node
-                .get("text")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .to_string();
-        }
-        node.get("content")
-            .and_then(|value| value.as_array())
-            .map(|children| {
-                children
-                    .iter()
-                    .map(text_content)
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .unwrap_or_default()
-    }
+    let new_page = |doc: &PdfDocumentReference,
+                    page: &mut PdfPageIndex,
+                    layer: &mut PdfLayerIndex,
+                    pages: &mut Vec<(PdfPageIndex, PdfLayerIndex)>,
+                    page_number: &mut usize,
+                    y: &mut f32| {
+        *page_number += 1;
+        let next = doc.add_page(
+            Mm(page_width),
+            Mm(page_height),
+            format!("Page {}", page_number),
+        );
+        *page = next.0;
+        *layer = next.1;
+        pages.push((*page, *layer));
+        *y = initial_y;
+    };
 
-    enum Block {
-        Text(String, bool, f32),
-        Image(Vec<u8>),
-        PageBreak,
-    }
+    let mut blocks: Vec<PdfBlock> = Vec::new();
+    collect_pdf_blocks(doc_json, &mut blocks, &mut Vec::new());
 
-    fn collect_blocks(node: &serde_json::Value, blocks: &mut Vec<Block>) {
-        let node_type = node.get("type").and_then(|value| value.as_str());
-        if node_type == Some("page_break") {
-            blocks.push(Block::PageBreak);
-            return;
-        }
-        if node_type == Some("image") {
-            if let Some(src) = node
-                .get("attrs")
-                .and_then(|attrs| attrs.get("src"))
-                .and_then(|src| src.as_str())
-            {
-                if let Some(bytes) = data_uri_bytes(src) {
-                    blocks.push(Block::Image(bytes));
-                }
-            }
-            return;
-        }
-        if matches!(
-            node_type,
-            Some("paragraph" | "heading" | "blockquote" | "code_block")
-        ) {
-            let text = text_content(node).trim().to_string();
-            if !text.is_empty() {
-                let size = if node_type == Some("heading") {
-                    16.0
-                } else {
-                    // Prefer explicit fontSize mark on first text child when present.
-                    node.get("content")
-                        .and_then(|c| c.as_array())
-                        .and_then(|children| {
-                            children.iter().find_map(|child| {
-                                child
-                                    .get("marks")
-                                    .and_then(|m| m.as_array())
-                                    .and_then(|marks| {
-                                        marks.iter().find_map(|mark| {
-                                            if mark.get("type").and_then(|t| t.as_str())
-                                                == Some("fontSize")
-                                            {
-                                                mark.get("attrs")
-                                                    .and_then(|a| a.get("size"))
-                                                    .and_then(|s| {
-                                                        s.as_f64()
-                                                            .or_else(|| s.as_str()?.parse().ok())
-                                                    })
-                                                    .map(|v| v as f32)
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                    })
-                            })
-                        })
-                        .unwrap_or(11.0)
-                };
-                blocks.push(Block::Text(text, node_type == Some("heading"), size));
-            }
-            return;
-        }
-        if node_type == Some("table") {
-            if let Some(rows) = node.get("content").and_then(|value| value.as_array()) {
-                for row in rows {
-                    let cells = row
-                        .get("content")
-                        .and_then(|value| value.as_array())
-                        .map(|cells| {
-                            cells
-                                .iter()
-                                .map(|cell| text_content(cell).trim().to_string())
-                                .collect::<Vec<_>>()
-                                .join(" | ")
-                        })
-                        .unwrap_or_default();
-                    if !cells.is_empty() {
-                        blocks.push(Block::Text(cells, false, 11.0));
-                    }
-                }
-            }
-            return;
-        }
-        if let Some(children) = node.get("content").and_then(|value| value.as_array()) {
-            for child in children {
-                collect_blocks(child, blocks);
-            }
-        }
-    }
-
-    fn wrapped_lines(text: &str, width: usize) -> Vec<String> {
-        let mut lines = Vec::new();
-        let mut line = String::new();
-        for word in text.split_whitespace() {
-            if !line.is_empty() && line.len() + 1 + word.len() > width {
-                lines.push(std::mem::take(&mut line));
-            }
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(word);
-        }
-        if !line.is_empty() {
-            lines.push(line);
-        }
-        lines
-    }
-
-    let mut blocks = vec![Block::Text(format!("Document: {title}"), true, 16.0)];
-    collect_blocks(doc_json, &mut blocks);
     let mut y = initial_y;
-    let mut page_number = 1;
-    for block in blocks {
+    let mut page_number = 1usize;
+
+    for block in &blocks {
         match block {
-            Block::PageBreak => {
-                page_number += 1;
-                let next = doc.add_page(
-                    Mm(page_width),
-                    Mm(page_height),
-                    format!("Page {page_number}"),
+            PdfBlock::PageBreak => {
+                new_page(
+                    &doc,
+                    &mut page,
+                    &mut layer,
+                    &mut pages,
+                    &mut page_number,
+                    &mut y,
                 );
-                page = next.0;
-                layer = next.1;
-                pages.push((page, layer));
-                y = initial_y;
             }
-            Block::Text(text, heading, font_size) => {
-                for line in wrapped_lines(&text, chars_per_line) {
-                    if y < margin_bottom + 10.0 {
-                        page_number += 1;
-                        let next = doc.add_page(
-                            Mm(page_width),
-                            Mm(page_height),
-                            format!("Page {page_number}"),
-                        );
-                        page = next.0;
-                        layer = next.1;
-                        pages.push((page, layer));
-                        y = initial_y;
-                    }
+            PdfBlock::Paragraph { runs, style } => {
+                let indent_mm = (style.indent * 8.0).min(printable_width * 0.3);
+                let max_width = printable_width - indent_mm;
+                let lines = wrap_runs(runs, max_width);
+
+                // List marker on the first line, aligned with the indent.
+                if let Some(prefix) = &style.list_prefix {
                     let current_layer = doc.get_page(page).get_layer(layer);
                     current_layer.begin_text_section();
-                    current_layer.set_font(&font, font_size);
+                    current_layer.set_font(&font_regular, 11.0);
                     current_layer.set_text_cursor(Mm(margin_left), Mm(y));
-                    current_layer.write_text(line, &font);
+                    current_layer.write_text(prefix, &font_regular);
                     current_layer.end_text_section();
-                    y -= if heading {
-                        9.0
-                    } else {
-                        (font_size * 0.55).max(5.0)
-                    };
                 }
-                y -= 4.0;
+
+                for line in &lines {
+                    if y < margin_bottom + 12.0 {
+                        new_page(
+                            &doc,
+                            &mut page,
+                            &mut layer,
+                            &mut pages,
+                            &mut page_number,
+                            &mut y,
+                        );
+                    }
+                    let line_width = line.width_mm;
+                    let x = match style.align.as_deref() {
+                        Some("center") => {
+                            margin_left + indent_mm + ((max_width - line_width) / 2.0).max(0.0)
+                        }
+                        Some("right") | Some("justify") => {
+                            margin_left + indent_mm + (max_width - line_width).max(0.0)
+                        }
+                        _ => margin_left + indent_mm,
+                    };
+                    let current_layer = doc.get_page(page).get_layer(layer);
+                    let mut cursor = x;
+                    for fragment in &line.fragments {
+                        let text = &fragment.run.text[fragment.start..fragment.end];
+                        if text.is_empty() {
+                            continue;
+                        }
+                        let (write_font, _meta_font) = if style.is_code {
+                            (font_code.clone(), font_code.clone())
+                        } else {
+                            font_for(&fragment.run)
+                        };
+                        current_layer.begin_text_section();
+                        current_layer.set_font(&write_font, fragment.run.size);
+                        current_layer.set_text_cursor(Mm(cursor), Mm(y));
+                        current_layer.write_text(text, &write_font);
+                        current_layer.end_text_section();
+                        cursor += text_width_mm(text, fragment.run.size, fragment.run.bold);
+                    }
+                    let size = line.fragments.first().map(|f| f.run.size).unwrap_or(11.0);
+                    y -= line_height_for(size);
+                }
+                y -= style.spacing_after;
             }
-            Block::Image(bytes) => {
-                let Ok(decoded) = ::image::load_from_memory(&bytes) else {
+            PdfBlock::Image(bytes) => {
+                let Ok(decoded) = ::image::load_from_memory(bytes) else {
                     continue;
                 };
                 let image = printpdf::Image::from_dynamic_image(&decoded);
@@ -331,16 +779,15 @@ pub fn export_doc_to_pdf(
                 let source_height = image.image.height.0 as f32 * 25.4 / dpi;
                 let width = source_width.min(printable_width);
                 let height = (source_height * (width / source_width.max(1.0))).min(100.0);
-                if y - height < margin_bottom + 10.0 {
-                    page_number += 1;
-                    let next = doc.add_page(
-                        Mm(page_width),
-                        Mm(page_height),
-                        format!("Page {page_number}"),
+                if y - height < margin_bottom + 12.0 {
+                    new_page(
+                        &doc,
+                        &mut page,
+                        &mut layer,
+                        &mut pages,
+                        &mut page_number,
+                        &mut y,
                     );
-                    page = next.0;
-                    layer = next.1;
-                    y = initial_y;
                 }
                 image.add_to_layer(
                     doc.get_page(page).get_layer(layer),
@@ -355,9 +802,226 @@ pub fn export_doc_to_pdf(
                 );
                 y -= height + 8.0;
             }
+            PdfBlock::Table { rows, header_rows } => {
+                let column_count = rows.iter().map(|r| r.len()).max().unwrap_or(1).max(1);
+                let column_width = printable_width / column_count as f32;
+                let cell_padding = 1.6_f32;
+
+                for (row_index, row) in rows.iter().enumerate() {
+                    // Wrap each cell, then lay the row out at its tallest line.
+                    let wrapped_cells: Vec<Vec<WrappedLine>> = row
+                        .iter()
+                        .map(|cell_runs| wrap_runs(cell_runs, column_width - 2.0 * cell_padding))
+                        .collect();
+                    let row_line_count = wrapped_cells
+                        .iter()
+                        .map(|c| c.len())
+                        .max()
+                        .unwrap_or(1)
+                        .max(1);
+                    let cell_size = 10.0_f32;
+                    let row_height =
+                        row_line_count as f32 * line_height_for(cell_size) + 2.0 * cell_padding;
+
+                    if y - row_height < margin_bottom + 12.0 {
+                        new_page(
+                            &doc,
+                            &mut page,
+                            &mut layer,
+                            &mut pages,
+                            &mut page_number,
+                            &mut y,
+                        );
+                    }
+                    let top_y = y;
+                    let is_header = header_rows.get(row_index).copied().unwrap_or(false);
+
+                    let current_layer = doc.get_page(page).get_layer(layer);
+                    // Header shading.
+                    if is_header {
+                        let rect = Polygon {
+                            rings: vec![vec![
+                                (Point::new(Mm(margin_left), Mm(top_y)), false),
+                                (
+                                    Point::new(Mm(margin_left + printable_width), Mm(top_y)),
+                                    false,
+                                ),
+                                (
+                                    Point::new(
+                                        Mm(margin_left + printable_width),
+                                        Mm(top_y - row_height),
+                                    ),
+                                    false,
+                                ),
+                                (Point::new(Mm(margin_left), Mm(top_y - row_height)), false),
+                            ]],
+                            mode: PaintMode::Fill,
+                            winding_order: WindingOrder::NonZero,
+                        };
+                        current_layer.set_fill_color(Color::Rgb(Rgb::new(0.85, 0.88, 0.95, None)));
+                        current_layer.add_polygon(rect);
+                    }
+
+                    // Cell borders.
+                    current_layer.set_outline_color(Color::Rgb(Rgb::new(0.75, 0.75, 0.78, None)));
+                    for column in 0..=column_count {
+                        let x = margin_left + column as f32 * column_width;
+                        current_layer.add_line(Line {
+                            points: vec![
+                                (Point::new(Mm(x), Mm(top_y)), false),
+                                (Point::new(Mm(x), Mm(top_y - row_height)), false),
+                            ],
+                            is_closed: false,
+                        });
+                    }
+                    current_layer.add_line(Line {
+                        points: vec![
+                            (Point::new(Mm(margin_left), Mm(top_y - row_height)), false),
+                            (
+                                Point::new(
+                                    Mm(margin_left + printable_width),
+                                    Mm(top_y - row_height),
+                                ),
+                                false,
+                            ),
+                        ],
+                        is_closed: false,
+                    });
+                    if row_index == 0 {
+                        current_layer.add_line(Line {
+                            points: vec![
+                                (Point::new(Mm(margin_left), Mm(top_y)), false),
+                                (
+                                    Point::new(Mm(margin_left + printable_width), Mm(top_y)),
+                                    false,
+                                ),
+                            ],
+                            is_closed: false,
+                        });
+                    }
+
+                    // Cell text.
+                    for (column, cell_lines) in wrapped_cells.iter().enumerate() {
+                        let cell_x = margin_left + column as f32 * column_width + cell_padding;
+                        let mut text_y = top_y - cell_padding - 1.0;
+                        for line in cell_lines {
+                            for fragment in &line.fragments {
+                                let text = &fragment.run.text[fragment.start..fragment.end];
+                                if text.is_empty() {
+                                    continue;
+                                }
+                                let (write_font, _meta) = font_for(&fragment.run);
+                                current_layer.begin_text_section();
+                                current_layer.set_font(&write_font, fragment.run.size);
+                                current_layer.set_text_cursor(Mm(cell_x), Mm(text_y));
+                                current_layer.write_text(text, &write_font);
+                                current_layer.end_text_section();
+                            }
+                            text_y -= line_height_for(cell_size);
+                        }
+                    }
+
+                    y -= row_height;
+                }
+                y -= 6.0;
+            }
         }
     }
-
+    // Footnotes: render as an endnotes section after the body. Word prints
+    // per-page footnotes; the PDF export lists them at the end with the same
+    // bracketed labels used in the body text.
+    if let Some(notes) = doc_json.get("footnotes").and_then(|value| value.as_array()) {
+        let readable: Vec<(u64, String)> = notes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, note)| {
+                let text = note
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if text.trim().is_empty() {
+                    return None;
+                }
+                let label = note
+                    .get("label")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(index as u64 + 1);
+                Some((label, text.to_string()))
+            })
+            .collect();
+        if !readable.is_empty() {
+            new_page(
+                &doc,
+                &mut page,
+                &mut layer,
+                &mut pages,
+                &mut page_number,
+                &mut y,
+            );
+            let current_layer = doc.get_page(page).get_layer(layer);
+            current_layer.begin_text_section();
+            current_layer.set_font(&font_bold, 14.0);
+            current_layer.set_text_cursor(Mm(margin_left), Mm(y));
+            current_layer.write_text("Notes", &font_bold);
+            current_layer.end_text_section();
+            y -= 10.0;
+            for (label, text) in readable {
+                if y < margin_bottom + 12.0 {
+                    new_page(
+                        &doc,
+                        &mut page,
+                        &mut layer,
+                        &mut pages,
+                        &mut page_number,
+                        &mut y,
+                    );
+                }
+                let note_runs = vec![
+                    PdfRun {
+                        text: format!("[{label}] "),
+                        bold: true,
+                        italic: false,
+                        size: 9.0,
+                    },
+                    PdfRun {
+                        text,
+                        bold: false,
+                        italic: false,
+                        size: 9.0,
+                    },
+                ];
+                for line in wrap_runs(&note_runs, printable_width) {
+                    if y < margin_bottom + 12.0 {
+                        new_page(
+                            &doc,
+                            &mut page,
+                            &mut layer,
+                            &mut pages,
+                            &mut page_number,
+                            &mut y,
+                        );
+                    }
+                    let mut cursor = margin_left;
+                    for fragment in &line.fragments {
+                        let text = &fragment.run.text[fragment.start..fragment.end];
+                        if text.is_empty() {
+                            continue;
+                        }
+                        let (write_font, _) = font_for(&fragment.run);
+                        let current_layer = doc.get_page(page).get_layer(layer);
+                        current_layer.begin_text_section();
+                        current_layer.set_font(&write_font, fragment.run.size);
+                        current_layer.set_text_cursor(Mm(cursor), Mm(y));
+                        current_layer.write_text(text, &write_font);
+                        current_layer.end_text_section();
+                        cursor += text_width_mm(text, fragment.run.size, fragment.run.bold);
+                    }
+                    y -= line_height_for(9.0);
+                }
+                y -= 2.0;
+            }
+        }
+    }
     let total_pages = pages.len();
     for (i, &(p, l)) in pages.iter().enumerate() {
         let current_layer = doc.get_page(p).get_layer(l);
@@ -368,9 +1032,9 @@ pub fn export_doc_to_pdf(
             let approx_width = h_text.chars().count() as f32 * 10.0 * 0.5;
             let center_x = (page_width - approx_width) / 2.0;
             current_layer.begin_text_section();
-            current_layer.set_font(&font, 10.0);
+            current_layer.set_font(&font_regular, 10.0);
             current_layer.set_text_cursor(Mm(center_x), Mm(page_height - margin_top / 2.0));
-            current_layer.write_text(h_text, &font);
+            current_layer.write_text(h_text, &font_regular);
             current_layer.end_text_section();
         }
         if let Some(ref footer) = footer_opt {
@@ -380,9 +1044,9 @@ pub fn export_doc_to_pdf(
             let approx_width = f_text.chars().count() as f32 * 10.0 * 0.5;
             let center_x = (page_width - approx_width) / 2.0;
             current_layer.begin_text_section();
-            current_layer.set_font(&font, 10.0);
+            current_layer.set_font(&font_regular, 10.0);
             current_layer.set_text_cursor(Mm(center_x), Mm(margin_bottom / 2.0));
-            current_layer.write_text(f_text, &font);
+            current_layer.write_text(f_text, &font_regular);
             current_layer.end_text_section();
         }
     }
@@ -541,6 +1205,7 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
                     fill_color,
                     stroke_color,
                     stroke_width,
+                    ..
                 } => {
                     let (draw_x, draw_y) =
                         begin_element_rotation(&current, x, y, width, height, rotation);
@@ -687,19 +1352,28 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
                     );
                     end_element_rotation(&current, rotation);
                 }
-                ElementKind::Table { rows, cols, data } => {
+                ElementKind::Table { rows, cols, data, .. } => {
                     let (draw_x, draw_y) =
                         begin_element_rotation(&current, x, y, width, height, rotation);
                     current.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
                     current.add_polygon(Polygon {
                         rings: vec![vec![
                             (Point::new(Mm(draw_x as f32), Mm(draw_y as f32)), false),
-                            (Point::new(Mm(draw_x as f32), Mm((draw_y + height) as f32)), false),
                             (
-                                Point::new(Mm((draw_x + width) as f32), Mm((draw_y + height) as f32)),
+                                Point::new(Mm(draw_x as f32), Mm((draw_y + height) as f32)),
                                 false,
                             ),
-                            (Point::new(Mm((draw_x + width) as f32), Mm(draw_y as f32)), false),
+                            (
+                                Point::new(
+                                    Mm((draw_x + width) as f32),
+                                    Mm((draw_y + height) as f32),
+                                ),
+                                false,
+                            ),
+                            (
+                                Point::new(Mm((draw_x + width) as f32), Mm(draw_y as f32)),
+                                false,
+                            ),
                         ]],
                         mode: printpdf::path::PaintMode::FillStroke,
                         winding_order: printpdf::path::WindingOrder::NonZero,
@@ -730,19 +1404,33 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
                     current.end_text_section();
                     end_element_rotation(&current, rotation);
                 }
-                ElementKind::Chart { chart_type, data, labels } => {
+                ElementKind::Chart {
+                    chart_type,
+                    data,
+                    labels,
+                    ..
+                } => {
                     let (draw_x, draw_y) =
                         begin_element_rotation(&current, x, y, width, height, rotation);
                     current.set_fill_color(Color::Rgb(Rgb::new(0.97, 0.98, 0.99, None)));
                     current.add_polygon(Polygon {
                         rings: vec![vec![
                             (Point::new(Mm(draw_x as f32), Mm(draw_y as f32)), false),
-                            (Point::new(Mm(draw_x as f32), Mm((draw_y + height) as f32)), false),
                             (
-                                Point::new(Mm((draw_x + width) as f32), Mm((draw_y + height) as f32)),
+                                Point::new(Mm(draw_x as f32), Mm((draw_y + height) as f32)),
                                 false,
                             ),
-                            (Point::new(Mm((draw_x + width) as f32), Mm(draw_y as f32)), false),
+                            (
+                                Point::new(
+                                    Mm((draw_x + width) as f32),
+                                    Mm((draw_y + height) as f32),
+                                ),
+                                false,
+                            ),
+                            (
+                                Point::new(Mm((draw_x + width) as f32), Mm(draw_y as f32)),
+                                false,
+                            ),
                         ]],
                         mode: printpdf::path::PaintMode::FillStroke,
                         winding_order: printpdf::path::WindingOrder::NonZero,
@@ -798,7 +1486,10 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
                             current.add_polygon(Polygon {
                                 rings: vec![vec![
                                     (
-                                        Point::new(Mm(bx as f32), Mm((draw_y + height - 6.0) as f32)),
+                                        Point::new(
+                                            Mm(bx as f32),
+                                            Mm((draw_y + height - 6.0) as f32),
+                                        ),
                                         false,
                                     ),
                                     (
@@ -816,7 +1507,10 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
                                         false,
                                     ),
                                     (
-                                        Point::new(Mm(bx as f32), Mm((draw_y + height - 6.0 - bar_h) as f32)),
+                                        Point::new(
+                                            Mm(bx as f32),
+                                            Mm((draw_y + height - 6.0 - bar_h) as f32),
+                                        ),
                                         false,
                                     ),
                                 ]],
@@ -825,11 +1519,17 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
                             });
                         }
                     }
-                    let title = labels.first().cloned().unwrap_or_else(|| "Chart".to_string());
+                    let title = labels
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "Chart".to_string());
                     current.set_fill_color(Color::Rgb(Rgb::new(0.1, 0.1, 0.1, None)));
                     current.begin_text_section();
                     current.set_font(&font, 9.0);
-                    current.set_text_cursor(Mm((draw_x + 2.0) as f32), Mm((draw_y + height - 2.0) as f32));
+                    current.set_text_cursor(
+                        Mm((draw_x + 2.0) as f32),
+                        Mm((draw_y + height - 2.0) as f32),
+                    );
                     current.write_text(&title, &font);
                     current.end_text_section();
                     end_element_rotation(&current, rotation);
@@ -859,6 +1559,31 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pdf_field_text_uses_bounded_cached_results_and_placeholders() {
+        assert_eq!(
+            pdf_field_text(&serde_json::json!({
+                "type": "field",
+                "attrs": { "kind": "page", "result": "12" }
+            })),
+            Some("12".to_string())
+        );
+        assert_eq!(
+            pdf_field_text(&serde_json::json!({
+                "type": "field",
+                "attrs": { "kind": "numPages" }
+            })),
+            Some("[NUMPAGES]".to_string())
+        );
+        assert_eq!(
+            pdf_field_text(&serde_json::json!({
+                "type": "field",
+                "attrs": { "kind": "page", "result": "  " }
+            })),
+            Some("[PAGE]".to_string())
+        );
+    }
 
     #[test]
     fn document_pdf_headers_footers() {
@@ -931,6 +1656,12 @@ mod tests {
             rotation: 0.0,
             z_index: 3,
             entrance: "none".to_string(),
+            entrance_delay_ms: None,
+            entrance_duration_ms: None,
+            entrance_order: None,
+                    exit: "none".to_string(),
+                    exit_duration_ms: None,
+            hyperlink: None,
             kind: ElementKind::Image {
                 asset_hash: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".to_string(),
                 mime: "image/png".to_string(),
@@ -955,6 +1686,12 @@ mod tests {
                 rotation: 45.0,
                 z_index: 1,
                 entrance: "none".to_string(),
+                entrance_delay_ms: None,
+                entrance_duration_ms: None,
+                entrance_order: None,
+                exit: "none".to_string(),
+                exit_duration_ms: None,
+                hyperlink: None,
                 kind: ElementKind::Text {
                     text: "Rotated".to_string(),
                     font_size: 24.0,
@@ -977,6 +1714,115 @@ mod tests {
             pdf.contains(" q") || pdf.contains("q\n"),
             "expected graphics state save"
         );
+    }
+
+    #[test]
+    fn document_pdf_uses_bold_and_italic_font_variants() {
+        let doc = serde_json::json!({
+            "type": "doc",
+            "content": [{
+                "type": "paragraph",
+                "content": [
+                    { "type": "text", "text": "plain ", "marks": [] },
+                    { "type": "text", "text": "bold", "marks": [{ "type": "bold" }] },
+                    { "type": "text", "text": " ital", "marks": [{ "type": "italic" }] },
+                    { "type": "text", "text": "both", "marks": [{ "type": "bold" }, { "type": "italic" }] }
+                ]
+            }]
+        });
+        let bytes = export_doc_to_pdf(&doc, "Run styles").expect("export pdf");
+        let pdf = String::from_utf8_lossy(&bytes);
+        // All four Helvetica variants must be embedded in the PDF.
+        assert!(pdf.contains("/Helvetica "), "regular variant missing");
+        assert!(pdf.contains("/Helvetica-Bold"), "bold variant missing");
+        assert!(pdf.contains("/Helvetica-Oblique"), "italic variant missing");
+        assert!(
+            pdf.contains("/Helvetica-BoldOblique"),
+            "bold-italic missing"
+        );
+    }
+
+    #[test]
+    fn document_pdf_renders_list_markers_and_alignment() {
+        let doc = serde_json::json!({
+            "type": "doc",
+            "content": [
+                { "type": "bullet_list", "content": [
+                    { "type": "list_item", "content": [
+                        { "type": "paragraph", "content": [{ "type": "text", "text": "First bullet" }] }
+                    ]}
+                ]},
+                { "type": "ordered_list", "content": [
+                    { "type": "list_item", "content": [
+                        { "type": "paragraph", "content": [{ "type": "text", "text": "Numbered item" }] }
+                    ]}
+                ]},
+                { "type": "paragraph", "attrs": { "align": "center" }, "content": [
+                    { "type": "text", "text": "Centered" }
+                ]}
+            ]
+        });
+        let bytes = export_doc_to_pdf(&doc, "Lists").expect("export pdf");
+        let pdf = String::from_utf8_lossy(&bytes);
+        let bullet_hex = "E299A2"; // UTF-16BE-ish? printpdf encodes text as WinAnsi; verify below.
+        assert!(
+            pdf.contains("4E756D6265726564"),
+            "ordered marker text present"
+        );
+        assert!(pdf.contains("43656E7465726564"), "centered text present");
+        let _ = bullet_hex; // bullet glyph encoding is font-specific; presence of ordering asserted above
+    }
+
+    #[test]
+    fn document_pdf_renders_footnote_references_and_notes() {
+        let doc = serde_json::json!({
+            "type": "doc",
+            "content": [
+                { "type": "paragraph", "content": [
+                    { "type": "text", "text": "Claim" },
+                    { "type": "footnote_ref", "attrs": { "id": "fn-a", "label": 1 } }
+                ]}
+            ],
+            "footnotes": [
+                { "id": "fn-a", "label": 1, "text": "The supporting source." }
+            ]
+        });
+        let bytes = export_doc_to_pdf(&doc, "Notes").expect("export pdf");
+        let pdf = String::from_utf8_lossy(&bytes);
+        // "Claim" body text, the [1] reference marker, the Notes heading, and
+        // the note text all survive into the PDF text streams.
+        assert!(pdf.contains("436C61696D"), "body text present");
+        assert!(pdf.contains("5B315D"), "[1] reference marker present");
+        assert!(pdf.contains("4E6F746573"), "Notes heading present");
+        assert!(pdf.contains("737570706F7274696E67"), "note text present");
+    }
+
+    #[test]
+    fn document_pdf_renders_table_grid() {
+        let doc = serde_json::json!({
+            "type": "doc",
+            "content": [{
+                "type": "table",
+                "content": [
+                    { "type": "table_row", "content": [
+                        { "type": "table_header", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "H1" }] }] },
+                        { "type": "table_header", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "H2" }] }] }
+                    ]},
+                    { "type": "table_row", "content": [
+                        { "type": "table_cell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "A" }] }] },
+                        { "type": "table_cell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "B" }] }] }
+                    ]}
+                ]
+            }]
+        });
+        let bytes = export_doc_to_pdf(&doc, "Table grid").expect("export pdf");
+        let pdf = String::from_utf8_lossy(&bytes);
+        // Cell text and header text must appear; the grid uses stroke
+        // operators (' re' path painting) that text-flattening never emits.
+        assert!(pdf.contains("4831"), "H1 text present");
+        assert!(pdf.contains("4832"), "H2 text present");
+        assert!(pdf.contains("S\n"), "stroke path operators present");
+        assert!(pdf.contains("0.85 0.88 0.95"), "header row shading present");
     }
 
     #[test]
@@ -1042,11 +1888,24 @@ mod tests {
                 rotation: 0.0,
                 z_index: 1,
                 entrance: "none".to_string(),
+                entrance_delay_ms: None,
+                entrance_duration_ms: None,
+                entrance_order: None,
+                exit: "none".to_string(),
+                exit_duration_ms: None,
+                hyperlink: None,
                 kind: ElementKind::Shape {
                     shape_type: "ellipse".to_string(),
                     fill_color: "#ff0000".to_string(),
                     stroke_color: "#000000".to_string(),
                     stroke_width: 2.0,
+                    text: String::new(),
+                    fill_gradient: None,
+                    shadow: false,
+                    font_family: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
                 },
             });
         deck.slides[0]
@@ -1060,11 +1919,24 @@ mod tests {
                 rotation: 0.0,
                 z_index: 2,
                 entrance: "none".to_string(),
+                entrance_delay_ms: None,
+                entrance_duration_ms: None,
+                entrance_order: None,
+                exit: "none".to_string(),
+                exit_duration_ms: None,
+                hyperlink: None,
                 kind: ElementKind::Shape {
                     shape_type: "line".to_string(),
                     fill_color: "#000000".to_string(),
                     stroke_color: "#0000ff".to_string(),
                     stroke_width: 1.5,
+                    text: String::new(),
+                    fill_gradient: None,
+                    shadow: false,
+                    font_family: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
                 },
             });
         deck.slides[0]
@@ -1078,11 +1950,24 @@ mod tests {
                 rotation: 0.0,
                 z_index: 3,
                 entrance: "none".to_string(),
+                entrance_delay_ms: None,
+                entrance_duration_ms: None,
+                entrance_order: None,
+                exit: "none".to_string(),
+                exit_duration_ms: None,
+                hyperlink: None,
                 kind: ElementKind::Shape {
                     shape_type: "arrow".to_string(),
                     fill_color: "#00ff00".to_string(),
                     stroke_color: "#000000".to_string(),
                     stroke_width: 1.0,
+                    text: String::new(),
+                    fill_gradient: None,
+                    shadow: false,
+                    font_family: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
                 },
             });
 

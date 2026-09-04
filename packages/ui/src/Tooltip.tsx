@@ -9,11 +9,38 @@ interface TooltipProps {
 
 export function Tooltip(props: TooltipProps) {
   const [isVisible, setIsVisible] = createSignal(false);
+  const [actualPos, setActualPos] = createSignal(props.position || "top");
   let timeoutId: number;
+  let containerRef!: HTMLDivElement;
+  let tooltipRef!: HTMLDivElement;
 
   const show = () => {
     clearTimeout(timeoutId);
-    timeoutId = window.setTimeout(() => setIsVisible(true), 400);
+    timeoutId = window.setTimeout(() => {
+      setActualPos(props.position || "top");
+      setIsVisible(true);
+      // Use requestAnimationFrame to measure after it's in the DOM
+      requestAnimationFrame(() => {
+        if (!tooltipRef) return;
+        const rect = tooltipRef.getBoundingClientRect();
+        const pref = props.position || "top";
+        let newPos = pref;
+
+        if (pref === "top" && rect.top < 0) {
+          newPos = "bottom";
+        } else if (pref === "bottom" && rect.bottom > window.innerHeight) {
+          newPos = "top";
+        } else if (pref === "left" && rect.left < 0) {
+          newPos = "right";
+        } else if (pref === "right" && rect.right > window.innerWidth) {
+          newPos = "left";
+        }
+
+        if (newPos !== pref) {
+          setActualPos(newPos);
+        }
+      });
+    }, 400);
   };
 
   const hide = () => {
@@ -23,10 +50,8 @@ export function Tooltip(props: TooltipProps) {
 
   onCleanup(() => clearTimeout(timeoutId));
 
-  const position = () => props.position || "top";
-
   const getPositionStyles = () => {
-    switch (position()) {
+    switch (actualPos()) {
       case "bottom":
         return { top: "100%", left: "50%", transform: "translateX(-50%)", "margin-top": "6px" };
       case "left":
@@ -41,6 +66,7 @@ export function Tooltip(props: TooltipProps) {
 
   return (
     <div
+      ref={containerRef}
       style={{ position: "relative", display: "inline-block" }}
       onMouseEnter={show}
       onMouseLeave={hide}
@@ -50,6 +76,7 @@ export function Tooltip(props: TooltipProps) {
       {props.children}
       <Show when={isVisible()}>
         <div
+          ref={tooltipRef}
           style={{
             position: "absolute",
             ...getPositionStyles(),
@@ -59,7 +86,7 @@ export function Tooltip(props: TooltipProps) {
             "border-radius": "4px",
             "font-size": "12px",
             "white-space": "nowrap",
-            "z-index": "1000",
+            "z-index": "var(--z-tooltip, 1000)",
             "pointer-events": "none",
             display: "flex",
             "align-items": "center",

@@ -34,6 +34,16 @@ export function ContextMenu(props: ContextMenuProps) {
     queueMicrotask(() => {
       const first = menuRef?.querySelector<HTMLElement>('button:not([disabled])');
       first?.focus();
+      
+      if (menuRef) {
+        const rect = menuRef.getBoundingClientRect();
+        let newX = props.x;
+        let newY = props.y;
+        if (newX + rect.width > window.innerWidth) newX = Math.max(0, window.innerWidth - rect.width - 4);
+        if (newY + rect.height > window.innerHeight) newY = Math.max(0, window.innerHeight - rect.height - 4);
+        menuRef.style.left = `${newX}px`;
+        menuRef.style.top = `${newY}px`;
+      }
     });
   });
 

@@ -17,6 +17,21 @@ export interface DocumentCompareResult {
   truncated: boolean;
 }
 
+export interface CompareSource {
+  id: string;
+  title: string;
+  content: DocContent | null;
+}
+
+/** Resolve a selectable open-document baseline without ever returning the current document implicitly. */
+export function findCompareSource(
+  sources: readonly CompareSource[] | undefined,
+  sourceId: string,
+): CompareSource | null {
+  if (!sourceId || !sources) return null;
+  return sources.find((source) => source.id === sourceId && source.content != null) ?? null;
+}
+
 const MAX_TOKENS = 2_000;
 const BLOCK_NODES = new Set([
   "blockquote",

@@ -1,5 +1,5 @@
 use super::model::NamedRange;
-use redoc_formula::Expr;
+use redoc_formula::{tokenize, Expr, Token};
 use std::collections::HashSet;
 
 pub fn expand_named_ranges(formula: &str, named_ranges: &[NamedRange]) -> String {
@@ -10,6 +10,8 @@ pub fn expand_named_ranges(formula: &str, named_ranges: &[NamedRange]) -> String
     if has_eq {
         result.push('=');
     }
+
+    let let_binding_names = collect_let_binding_names(text);
 
     let mut chars = text.chars().peekable();
 
@@ -41,7 +43,8 @@ pub fn expand_named_ranges(formula: &str, named_ranges: &[NamedRange]) -> String
             } else {
                 let mut found = false;
                 for nr in named_ranges {
-                    if nr.name == ident {
+                    if !let_binding_names.contains(&ident.to_ascii_uppercase()) && nr.name == ident
+                    {
                         result.push_str(&nr.range_str);
                         found = true;
                         break;
@@ -57,6 +60,55 @@ pub fn expand_named_ranges(formula: &str, named_ranges: &[NamedRange]) -> String
         }
     }
     result
+}
+
+fn collect_let_binding_names(formula: &str) -> HashSet<String> {
+    let Ok(tokens) = tokenize(formula) else {
+        return HashSet::new();
+    };
+    let mut names = HashSet::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token != &Token::Identifier("LET".to_string())
+            || tokens.get(index + 1) != Some(&Token::LParen)
+        {
+            continue;
+        }
+        let mut depth = 1usize;
+        let mut arg_index = 0usize;
+        let mut at_arg_start = true;
+        let mut candidates: Vec<(usize, String)> = Vec::new();
+        for token in tokens.iter().skip(index + 2) {
+            match token {
+                Token::LParen => {
+                    depth += 1;
+                    at_arg_start = false;
+                }
+                Token::RParen => {
+                    if depth == 1 {
+                        let arg_count = arg_index + usize::from(!at_arg_start);
+                        for (candidate_index, candidate) in candidates {
+                            if candidate_index + 1 < arg_count {
+                                names.insert(candidate.to_ascii_uppercase());
+                            }
+                        }
+                        break;
+                    }
+                    depth -= 1;
+                    at_arg_start = false;
+                }
+                Token::Comma if depth == 1 => {
+                    arg_index += 1;
+                    at_arg_start = true;
+                }
+                Token::Identifier(name) if depth == 1 && at_arg_start => {
+                    candidates.push((arg_index, name.clone()));
+                    at_arg_start = false;
+                }
+                _ => at_arg_start = false,
+            }
+        }
+    }
+    names
 }
 pub fn extract_local_dependencies(expr: &Expr) -> HashSet<(u32, u32)> {
     let mut deps = HashSet::new();
@@ -93,7 +145,7 @@ pub fn extract_local_dependencies(expr: &Expr) -> HashSet<(u32, u32)> {
                 }
             }
             Expr::CellRef { sheet: Some(_), .. } | Expr::RangeRef { sheet: Some(_), .. } => {}
-            Expr::Literal(_) => {}
+            Expr::Literal(_) | Expr::Name(_) => {}
         }
     }
 

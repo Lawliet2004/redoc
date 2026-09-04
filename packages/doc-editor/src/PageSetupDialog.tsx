@@ -1,5 +1,6 @@
 import { createSignal, createEffect } from "solid-js";
 import { Dialog } from "@redoc/ui";
+import { normalizePageSetupConfig } from "./pageSetup";
 
 export interface PageSetupConfig {
   margins: { top: number; bottom: number; left: number; right: number };
@@ -20,29 +21,31 @@ interface PageSetupDialogProps {
 
 export function PageSetupDialog(props: PageSetupDialogProps) {
   const [tab, setTab] = createSignal<"margins" | "paper" | "header_footer">("margins");
+  const initialConfig = normalizePageSetupConfig(props.config);
 
-  const [top, setTop] = createSignal(props.config.margins.top);
-  const [bottom, setBottom] = createSignal(props.config.margins.bottom);
-  const [left, setLeft] = createSignal(props.config.margins.left);
-  const [right, setRight] = createSignal(props.config.margins.right);
+  const [top, setTop] = createSignal(initialConfig.margins.top);
+  const [bottom, setBottom] = createSignal(initialConfig.margins.bottom);
+  const [left, setLeft] = createSignal(initialConfig.margins.left);
+  const [right, setRight] = createSignal(initialConfig.margins.right);
   
-  const [orientation, setOrientation] = createSignal(props.config.orientation);
-  const [paperSize, setPaperSize] = createSignal(props.config.paperSize);
-  const [columns, setColumns] = createSignal(Math.max(1, Math.min(4, props.config.columns || 1)));
-  const [header, setHeader] = createSignal(props.config.header || "");
-  const [footer, setFooter] = createSignal(props.config.footer || "");
+  const [orientation, setOrientation] = createSignal(initialConfig.orientation);
+  const [paperSize, setPaperSize] = createSignal(initialConfig.paperSize);
+  const [columns, setColumns] = createSignal(initialConfig.columns ?? 1);
+  const [header, setHeader] = createSignal(initialConfig.header || "");
+  const [footer, setFooter] = createSignal(initialConfig.footer || "");
 
   createEffect(() => {
     if (props.open) {
-      setTop(props.config.margins.top);
-      setBottom(props.config.margins.bottom);
-      setLeft(props.config.margins.left);
-      setRight(props.config.margins.right);
-      setOrientation(props.config.orientation);
-      setPaperSize(props.config.paperSize);
-      setColumns(Math.max(1, Math.min(4, props.config.columns || 1)));
-      setHeader(props.config.header || "");
-      setFooter(props.config.footer || "");
+      const config = normalizePageSetupConfig(props.config);
+      setTop(config.margins.top);
+      setBottom(config.margins.bottom);
+      setLeft(config.margins.left);
+      setRight(config.margins.right);
+      setOrientation(config.orientation);
+      setPaperSize(config.paperSize);
+      setColumns(config.columns ?? 1);
+      setHeader(config.header || "");
+      setFooter(config.footer || "");
       setTab("margins");
     }
   });
@@ -55,14 +58,14 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
   };
 
   const handleApply = () => {
-    props.onApply({
+    props.onApply(normalizePageSetupConfig({
       margins: { top: top(), bottom: bottom(), left: left(), right: right() },
       orientation: orientation(),
       paperSize: paperSize(),
       columns: columns(),
       header: header(),
       footer: footer()
-    });
+    }));
     props.onClose();
   };
 

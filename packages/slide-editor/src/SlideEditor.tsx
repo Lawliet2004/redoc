@@ -1,4 +1,4 @@
-import { createSignal, For, Show, onMount, onCleanup, type JSX } from "solid-js";
+import { createEffect, createSignal, For, Show, onMount, onCleanup, type JSX } from "solid-js";
 import {
   ToolbarRow, ToolbarButton, ToolbarSep, ToolbarSelect, ToolbarColor, IconSidebar, type SidebarPanel,
   ContextMenu, type ContextMenuItem, EDITOR_COMMAND, type EditorCommandDetail,
@@ -19,11 +19,15 @@ import { commands } from "@redoc/api-client";
 import { snapElementPosition, alignElements, assignGroupId, clearGroupIds, type AlignmentGuide } from "./geometry";
 import {
   PLACEHOLDER_TITLE, PLACEHOLDER_BODY, defaultTheme, normalizeDeck, normalizeTransition, toDeck,
-  type Slide, type SlideElement, type SlideTransition, type ElementEntrance,
+  type Slide, type SlideElement, type SlideTransition, type ElementEntrance, type ElementExit,
 } from "./deckNormalize";
 import { stashPresenterDeck } from "./presenterSession";
-import { ShapeBody, isFilledShape, isShapeType, type ShapeType } from "./shapeUtils";
+import { downloadBlob, renderSlideToPng } from "./slidePngExport";
+import { ShapeBody, isFilledShape, isShapeType, shapeClipPath, shapeBorderRadius, type ShapeType } from "./shapeUtils";
+import { normalizeSlideHyperlink, SLIDE_HYPERLINK_HINT } from "./hyperlinks";
 import "./SlideEditor.css";
+
+let clipboardBuffer: string | null = null;
 
 type PrintPerPage = 1 | 2 | 4 | 6;
 
@@ -39,6 +43,9 @@ interface SlideEditorProps {
   onRequestOpen?: () => void;
   onRequestSave?: () => void;
   onRequestExportPdf?: () => void;
+  onRequestExportPptx?: () => void;
+  zoomLevel?: number;
+  onZoomChange?: (zoom: number) => void;
 }
 
 type ResizeHandle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
@@ -53,7 +60,6 @@ export function SlideEditor(props: SlideEditorProps) {
   );
   const [sidebarPanel, setSidebarPanel] = createSignal<string | null>("properties");
   let canvasEl: HTMLDivElement | undefined;
-  let notesHistoryPushed = false;
   let dragPointerId: number | null = null;
   let dragStartClient = { x: 0, y: 0 };
   let dragMoved = false;
@@ -73,7 +79,13 @@ export function SlideEditor(props: SlideEditorProps) {
     width: number;
     height: number;
   } | null>(null);
-  const [zoom, setZoom] = createSignal(100);
+  const [localZoom, setLocalZoom] = createSignal(100);
+  const zoom = () => props.zoomLevel ?? localZoom();
+  const setZoom = (updater: number | ((z: number) => number)) => {
+    const next = typeof updater === "function" ? updater(zoom()) : updater;
+    if (props.onZoomChange) props.onZoomChange(next);
+    else setLocalZoom(next);
+  };
   const [filmstripDragIndex, setFilmstripDragIndex] = createSignal<number | null>(null);
   const [alignmentGuides, setAlignmentGuides] = createSignal<AlignmentGuide[]>([]);
   const [drawTool, setDrawTool] = createSignal<DrawTool>("select");
@@ -85,6 +97,57 @@ export function SlideEditor(props: SlideEditorProps) {
   const [printPerPage, setPrintPerPage] = createSignal<PrintPerPage>(1);
   const [printIncludeNotes, setPrintIncludeNotes] = createSignal(false);
   const [notesHeight, setNotesHeight] = createSignal(96);
+  const [notesHistoryPushed, setNotesHistoryPushed] = createSignal(false);
+  const [commentDraft, setCommentDraft] = createSignal("");
+
+  // --- Slide comment operations (offline review) ---
+  const addSlideComment = () => {
+    const text = commentDraft().trim();
+    if (!text) return;
+    const idx = activeSlideIndex();
+    const list = [...slides()];
+    const slide = list[idx];
+    if (!slide) return;
+    pushSlideHistory();
+    const comment = {
+      id: `comment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      author: "You",
+      text: text.slice(0, 2000),
+      resolved: false,
+      createdAt: new Date().toISOString(),
+    };
+    list[idx] = { ...slide, comments: [...(slide.comments ?? []), comment] };
+    setSlides(list);
+    emitChange(list);
+    setCommentDraft("");
+  };
+
+  const setSlideCommentResolved = (id: string, resolved: boolean) => {
+    const idx = activeSlideIndex();
+    const list = [...slides()];
+    const slide = list[idx];
+    if (!slide) return;
+    pushSlideHistory();
+    list[idx] = {
+      ...slide,
+      comments: (slide.comments ?? []).map((comment) =>
+        comment.id === id ? { ...comment, resolved } : comment,
+      ),
+    };
+    setSlides(list);
+    emitChange(list);
+  };
+
+  const deleteSlideComment = (id: string) => {
+    const idx = activeSlideIndex();
+    const list = [...slides()];
+    const slide = list[idx];
+    if (!slide || !(slide.comments ?? []).some((comment) => comment.id === id)) return;
+    pushSlideHistory();
+    list[idx] = { ...slide, comments: (slide.comments ?? []).filter((comment) => comment.id !== id) };
+    setSlides(list);
+    emitChange(list);
+  };
 
   // --- Undo / Redo snapshot stack ---
   type SlideSnapshot = { slides: Slide[]; activeSlideIndex: number };
@@ -148,14 +211,19 @@ export function SlideEditor(props: SlideEditorProps) {
     if (!els.length) return;
     pushSlideHistory();
     const positions = alignElements(els, mode);
-    for (const el of els) {
-      const pos = positions.find((p) => p.id === el.id);
-      if (pos) {
-        el.x = pos.x;
-        el.y = pos.y;
-      }
-    }
-    setSlides([...slides()]);
+    setSlides(prev => prev.map((s, i) => {
+      if (i !== activeSlideIndex()) return s;
+      return {
+        ...s,
+        elements: s.elements.map(e => {
+          const pos = positions.find((p) => p.id === e.id);
+          if (pos) {
+            return { ...e, x: pos.x, y: pos.y };
+          }
+          return e;
+        })
+      };
+    }));
     commitChange();
   };
 
@@ -163,6 +231,7 @@ export function SlideEditor(props: SlideEditorProps) {
     const els = [...getSelectedElements()].sort((a, b) => axis === "h" ? a.x - b.x : a.y - b.y);
     if (els.length < 3) return;
     pushSlideHistory();
+    const updates = new Map<string, number>();
     if (axis === "h") {
       const minX = els[0].x;
       const maxX = els[els.length - 1].x;
@@ -170,7 +239,7 @@ export function SlideEditor(props: SlideEditorProps) {
       const gap = (maxX + els[els.length - 1].width - minX - totalWidth) / (els.length - 1);
       let x = minX;
       for (const el of els) {
-        el.x = x;
+        updates.set(el.id, x);
         x += el.width + gap;
       }
     } else {
@@ -180,11 +249,22 @@ export function SlideEditor(props: SlideEditorProps) {
       const gap = (maxY + els[els.length - 1].height - minY - totalHeight) / (els.length - 1);
       let y = minY;
       for (const el of els) {
-        el.y = y;
+        updates.set(el.id, y);
         y += el.height + gap;
       }
     }
-    setSlides([...slides()]);
+    setSlides(prev => prev.map((s, i) => {
+      if (i !== activeSlideIndex()) return s;
+      return {
+        ...s,
+        elements: s.elements.map(e => {
+          if (updates.has(e.id)) {
+            return axis === "h" ? { ...e, x: updates.get(e.id)! } : { ...e, y: updates.get(e.id)! };
+          }
+          return e;
+        })
+      };
+    }));
     commitChange();
   };
 
@@ -226,8 +306,18 @@ export function SlideEditor(props: SlideEditorProps) {
 
   const activeSlide = () => slides()[activeSlideIndex()];
   const selectedElement = () => activeSlide()?.elements.find((el) => el.id === selectedElementId()) || null;
-  const emitChange = (next: Slide[] = slides()) =>
-    props.onChange?.(toDeck(next, props.initialContent, theme(), activeSlideIndex()));
+  const [hyperlinkDraft, setHyperlinkDraft] = createSignal("");
+  const [hyperlinkError, setHyperlinkError] = createSignal<string | null>(null);
+  createEffect(() => {
+    setHyperlinkDraft(selectedElement()?.hyperlink || "");
+    setHyperlinkError(null);
+  });
+  const emitChange = (next: Slide[] = slides()) => {
+    const deck = toDeck(next, props.initialContent, theme(), activeSlideIndex());
+    props.onChange?.(deck);
+    // Live-update an open presenter window with the edited deck.
+    stashPresenterDeck(deck, activeSlideIndex());
+  };
 
   const canvasToLocal = (clientX: number, clientY: number) => {
     const rect = canvasEl?.getBoundingClientRect();
@@ -242,7 +332,7 @@ export function SlideEditor(props: SlideEditorProps) {
 
   const slideBackground = () => activeSlide()?.bgOverride || theme().bgColor;
 
-  const applyResize = (el: SlideElement, handle: ResizeHandle, localX: number, localY: number, start: NonNullable<ReturnType<typeof resizing>>, shiftKey: boolean) => {
+  const applyResize = (el: SlideElement, handle: ResizeHandle, localX: number, localY: number, start: NonNullable<ReturnType<typeof resizing>>, shiftKey: boolean): SlideElement => {
     const minW = 40;
     const minH = 30;
     let { origX, origY, width, height } = start;
@@ -267,20 +357,26 @@ export function SlideEditor(props: SlideEditorProps) {
       origY = newY;
     }
 
-    if (shiftKey && (handle === "nw" || handle === "ne" || handle === "se" || handle === "sw")) {
-      if (handle.includes("e") || handle.includes("w")) {
+    if (shiftKey) {
+      if (handle === "nw" || handle === "ne" || handle === "se" || handle === "sw") {
         height = width / ratio;
         if (handle.includes("n")) origY = bottom - height;
-      } else {
+      } else if (handle === "e" || handle === "w") {
+        height = width / ratio;
+      } else if (handle === "n" || handle === "s") {
         width = height * ratio;
-        if (handle.includes("w")) origX = right - width;
       }
     }
 
-    el.x = Math.max(0, Math.min(960 - minW, origX));
-    el.y = Math.max(0, Math.min(540 - minH, origY));
-    el.width = Math.max(minW, Math.min(960 - el.x, width));
-    el.height = Math.max(minH, Math.min(540 - el.y, height));
+    const newX = Math.max(0, Math.min(960 - minW, origX));
+    const newY = Math.max(0, Math.min(540 - minH, origY));
+    return {
+      ...el,
+      x: newX,
+      y: newY,
+      width: Math.max(minW, Math.min(960 - newX, width)),
+      height: Math.max(minH, Math.min(540 - newY, height)),
+    };
   };
 
   const reorderSlides = (from: number, to: number) => {
@@ -399,6 +495,42 @@ export function SlideEditor(props: SlideEditorProps) {
     emitChange(list);
   };
 
+  /** Move an element's entrance order within the slide's animated sequence. */
+  const reorderAnimation = (elementId: string, direction: -1 | 1) => {
+    const slide = slides()[activeSlideIndex()];
+    if (!slide) return;
+    const animated = slide.elements
+      .filter((el) => el.entrance !== "none" || el.exit !== "none")
+      .slice()
+      .sort((a, b) => (a.entranceOrder ?? 0) - (b.entranceOrder ?? 0));
+    const position = animated.findIndex((el) => el.id === elementId);
+    const target = position + direction;
+    if (position < 0 || target < 0 || target >= animated.length) return;
+    const [moved] = animated.splice(position, 1);
+    animated.splice(target, 0, moved);
+    const orderById = new Map(animated.map((el, index) => [el.id, index]));
+    pushSlideHistory();
+    const list = [...slides()];
+    const updated = { ...list[activeSlideIndex()] };
+    updated.elements = updated.elements.map((el) =>
+      orderById.has(el.id) ? { ...el, entranceOrder: orderById.get(el.id) } : el,
+    );
+    list[activeSlideIndex()] = updated;
+    setSlides(list);
+    emitChange(list);
+  };
+
+  const applySelectedHyperlink = (value = hyperlinkDraft()) => {
+    const normalized = value.trim() ? normalizeSlideHyperlink(value) : null;
+    if (value.trim() && !normalized) {
+      setHyperlinkError(`Enter a safe ${SLIDE_HYPERLINK_HINT}.`);
+      return;
+    }
+    setHyperlinkError(null);
+    setHyperlinkDraft(normalized || "");
+    patchSelected({ hyperlink: normalized || undefined });
+  };
+
   const updateSelectedColor = (color: string) => {
     setFillColor(color);
     setLineColor(color);
@@ -489,9 +621,21 @@ export function SlideEditor(props: SlideEditorProps) {
   };
 
   const applyLayout = (layout: string) => {
-    pushSlideHistory();
     const slide = activeSlide();
     if (!slide) return;
+    // Only scaffold placeholder elements for an empty slide. Applying a
+    // layout to a slide the user has filled keeps their content and changes
+    // just the layout tag — the old behavior silently deleted every element.
+    const hasUserContent = slide.elements.some((el) => !String(el.content ?? "").startsWith(PLACEHOLDER_TITLE) && !String(el.content ?? "").startsWith(PLACEHOLDER_BODY));
+    if (hasUserContent) {
+      pushSlideHistory();
+      const next = [...slides()];
+      next[activeSlideIndex()] = { ...slide, layout, title: layout };
+      setSlides(next);
+      emitChange(next);
+      return;
+    }
+    pushSlideHistory();
     const heading = (content: string, x = 100, y = 70, width = 760): SlideElement => ({ id: `el-${Date.now()}-${Math.random()}`, type: "text", x, y, width, height: 60, content, fontSize: 32, color: theme().textColor });
     const nextElements: Record<string, SlideElement[]> = {
       title: [heading(PLACEHOLDER_TITLE, 100, 170, 760), { ...heading(PLACEHOLDER_BODY, 150, 270, 660), fontSize: 22, color: theme().textColor }],
@@ -561,26 +705,25 @@ export function SlideEditor(props: SlideEditorProps) {
   };
 
   const addImage = () => {
+    // Native file picker only. The old fallback `window.prompt("Image URL")`
+    // was a blocking browser prompt — noisy in a desktop app and a dead end
+    // in sandboxed WebViews; silently doing nothing is the honest behavior.
     try {
       const input = document.createElement("input");
       input.type = "file";
-      input.accept = "image/*";
-      input.addEventListener('cancel', () => {
-        addImageFromUrl(window.prompt("Image URL"));
-      });
+      input.accept = "image/png,image/jpeg,image/gif,image/webp";
       input.onchange = (e) => {
         const file = (e.target as HTMLInputElement).files?.[0];
         if (file) {
           const reader = new FileReader();
           reader.onload = (ev) => addImageFromUrl(ev.target?.result as string);
           reader.readAsDataURL(file);
-        } else {
-          addImageFromUrl(window.prompt("Image URL"));
         }
       };
       input.click();
     } catch (e) {
-      addImageFromUrl(window.prompt("Image URL"));
+      // File pickers can fail in restricted environments; drop the image
+      // insertion silently rather than prompting for a raw URL.
     }
   };
 
@@ -592,7 +735,7 @@ export function SlideEditor(props: SlideEditorProps) {
       ...source,
       id: `slide-${Date.now()}`,
       title: `${source.title} copy`,
-      elements: source.elements.map((element) => ({ ...element, id: `el-${Date.now()}-${Math.random()}` })),
+      elements: JSON.parse(JSON.stringify(source.elements)).map((element: any) => ({ ...element, id: `el-${Date.now()}-${Math.random()}` })),
     };
     const next = [...slides()];
     next.splice(activeSlideIndex() + 1, 0, copy);
@@ -623,15 +766,50 @@ export function SlideEditor(props: SlideEditorProps) {
   };
 
   const deleteSelectedElement = () => {
-    const id = selectedElementId();
-    if (!id) return;
+    const ids = selectedElementIds();
+    if (!ids.length) return;
     pushSlideHistory();
     const next = [...slides()];
     const index = activeSlideIndex();
-    next[index] = { ...next[index], elements: next[index].elements.filter((el) => el.id !== id) };
+    next[index] = { ...next[index], elements: next[index].elements.filter((el) => !ids.includes(el.id)) };
     setSlides(next);
-    setSelectedElementId(null);
+    setSelectedElementIds([]);
     emitChange(next);
+  };
+
+  /** Internal element clipboard (shared by shortcuts and toolbar buttons). */
+  const copySelectedElements = () => {
+    const els = getSelectedElements();
+    if (els.length > 0) {
+      clipboardBuffer = JSON.stringify(els);
+    }
+  };
+
+  const pasteClippedElements = (inPlace: boolean = false) => {
+    if (!clipboardBuffer) return;
+    try {
+      const els: SlideElement[] = JSON.parse(clipboardBuffer);
+      if (els && els.length > 0) {
+        pushSlideHistory();
+        const newEls = els.map(el => ({
+          ...el,
+          id: `el-${Date.now()}-${Math.random()}`,
+          x: el.x + (inPlace ? 0 : 20),
+          y: el.y + (inPlace ? 0 : 20)
+        }));
+        const list = [...slides()];
+        const slide = list[activeSlideIndex()];
+        list[activeSlideIndex()] = { ...slide, elements: [...slide.elements, ...newEls] };
+        setSlides(list);
+        setSelectedElementIds(newEls.map(e => e.id));
+        emitChange(list);
+      }
+    } catch (err) {}
+  };
+
+  const cutSelectedElements = () => {
+    copySelectedElements();
+    deleteSelectedElement();
   };
 
 
@@ -639,12 +817,22 @@ export function SlideEditor(props: SlideEditorProps) {
     pushSlideHistory();
     const id = selectedElementId();
     if (!id) return;
-    const slide = activeSlide();
-    const element = slide?.elements.find((item) => item.id === id);
-    if (!element) return;
-    element.x = Math.max(0, Math.min(960 - element.width, element.x + dx));
-    element.y = Math.max(0, Math.min(540 - element.height, element.y + dy));
-    setSlides([...slides()]);
+    setSlides(prev => prev.map((slide, i) => {
+      if (i !== activeSlideIndex()) return slide;
+      return {
+        ...slide,
+        elements: slide.elements.map(el => {
+          if (el.id === id) {
+            return {
+              ...el,
+              x: Math.max(0, Math.min(960 - el.width, el.x + dx)),
+              y: Math.max(0, Math.min(540 - el.height, el.y + dy))
+            };
+          }
+          return el;
+        })
+      };
+    }));
     emitChange();
   };
 
@@ -679,10 +867,15 @@ export function SlideEditor(props: SlideEditorProps) {
       if (element.type === "image") return `<img src="${escape(element.content)}" alt="" style="${base}object-fit:contain"/>`;
       if (element.type === "line" || element.type === "arrow") {
         const color = escape(element.color || "#3b82f6");
-        const arrow = element.type === "arrow" ? `<polygon points="96,0 100,0 100,4" fill="${color}"/>` : "";
-        return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" style="${base}"><line x1="0" y1="100" x2="100" y2="0" stroke="${color}" stroke-width="3"/>${arrow}</svg>`;
+        const defs = element.type === "arrow" ? `<defs><marker id="arrowhead-${element.id}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="${color}"/></marker></defs>` : "";
+        const markerEnd = element.type === "arrow" ? ` marker-end="url(#arrowhead-${element.id})"` : "";
+        return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" style="${base}">${defs}<line x1="0" y1="50" x2="100" y2="50" stroke="${color}" stroke-width="4" vector-effect="non-scaling-stroke"${markerEnd}/></svg>`;
       }
-      return `<div style="${base}background:${element.color || "#3b82f6"};border-radius:${element.type === "ellipse" ? "50%" : "4px"}"></div>`;
+      const clip = shapeClipPath(element.type);
+      const radius = shapeBorderRadius(element.type);
+      const styleExt = (clip ? `clip-path:${clip};` : "") + (radius ? `border-radius:${radius};` : "");
+      const textOverlay = element.content ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;font-family:${element.fontFamily || 'Inter, sans-serif'};font-weight:${element.bold?'bold':'normal'};font-style:${element.italic?'italic':'normal'};text-decoration:${element.underline?'underline':'none'};font-size:${element.fontSize || 20}px;color:${element.color && element.color.toLowerCase() === '#ffffff' ? '#000' : '#fff'};white-space:pre-wrap;padding:8px">${escape(element.content)}</div>` : "";
+      return `<div style="${base}background:${element.color || "#3b82f6"};${styleExt}">${textOverlay}</div>`;
     }).join("");
 
     const cols = perPage === 1 ? 1 : 2;
@@ -758,14 +951,54 @@ export function SlideEditor(props: SlideEditorProps) {
     };
     window.addEventListener(EDITOR_COMMAND, onCommand);
 
-    const onKeyDown = (e: KeyboardEvent) => {
+      const onKeyDown = (e: KeyboardEvent) => {
       const activeEl = document.activeElement;
       if (activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA" || activeEl.hasAttribute("contenteditable"))) {
         return;
       }
+
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key === 'c' || e.key === 'C') {
+          copySelectedElements();
+          return;
+        } else if (e.key === 'v' || e.key === 'V') {
+          pasteClippedElements(false);
+          e.preventDefault();
+          return;
+        } else if (e.key === 'x' || e.key === 'X') {
+          cutSelectedElements();
+          e.preventDefault();
+          return;
+        } else if (e.key === 'd' || e.key === 'D') {
+          copySelectedElements();
+          pasteClippedElements(true);
+          e.preventDefault();
+          return;
+        }
+      }
+
       if (e.key === "Delete" || e.key === "Backspace") {
-        if (selectedElementId()) {
+        if (selectedElementIds().length) {
           deleteSelectedElement();
+          e.preventDefault();
+        }
+      }
+
+      if (e.key === "PageDown") {
+        const to = activeSlideIndex() + 1;
+        if (to < slides().length) selectSlide(to);
+        e.preventDefault();
+      } else if (e.key === "PageUp") {
+        const to = activeSlideIndex() - 1;
+        if (to >= 0) selectSlide(to);
+        e.preventDefault();
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
+        if (selectedElementIds().length) {
+          const amount = e.shiftKey ? 10 : 1;
+          if (e.key === "ArrowLeft") nudgeSelected(-amount, 0);
+          else if (e.key === "ArrowRight") nudgeSelected(amount, 0);
+          else if (e.key === "ArrowUp") nudgeSelected(0, -amount);
+          else if (e.key === "ArrowDown") nudgeSelected(0, amount);
           e.preventDefault();
         }
       }
@@ -854,6 +1087,35 @@ export function SlideEditor(props: SlideEditorProps) {
                   <button type="button" class="g-toolbar-btn" title="Rotate +15°" onClick={() => rotateSelected(15)}>+</button>
                 </div>,
               )}
+              {fieldLabel(
+                "Hyperlink",
+                <div style={{ display: "flex", "flex-direction": "column", gap: "4px" }}>
+                  <input
+                    aria-label="Element hyperlink"
+                    placeholder="https://example.com"
+                    value={hyperlinkDraft()}
+                    onInput={(e) => {
+                      setHyperlinkDraft(e.currentTarget.value);
+                      setHyperlinkError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        applySelectedHyperlink();
+                      }
+                    }}
+                    style={{ width: "100%", background: "var(--bg-input, #2a2a2a)", border: "1px solid var(--border-color)", color: "var(--text-primary)", padding: "3px 4px", "font-size": "11px" }}
+                  />
+                  <div style={{ display: "flex", gap: "4px" }}>
+                    <button type="button" class="g-toolbar-btn" onClick={() => applySelectedHyperlink()}>Apply</button>
+                    <button type="button" class="g-toolbar-btn" onClick={() => applySelectedHyperlink("")}>Clear</button>
+                  </div>
+                  <Show when={hyperlinkError()}>
+                    <span role="alert" style={{ color: "var(--text-danger, #ef4444)", "font-size": "10px" }}>{hyperlinkError()}</span>
+                  </Show>
+                  <span style={{ color: "var(--text-muted)", "font-size": "10px" }}>{SLIDE_HYPERLINK_HINT}. Ctrl/Cmd-click opens it.</span>
+                </div>,
+              )}
               <Show when={el().type === "text"}>
                 {fieldLabel(
                   "Font Family",
@@ -899,6 +1161,41 @@ export function SlideEditor(props: SlideEditorProps) {
                   Bullets
                 </label>
               </Show>
+              <Show when={el().type === "table"}>
+                <div style={{ display: "flex", "flex-direction": "column", gap: "4px", "margin-top": "8px", "margin-bottom": "8px" }}>
+                  <div style={{ "font-size": "11px", color: "var(--text-secondary)" }}>Table Controls</div>
+                  <div style={{ display: "flex", gap: "4px" }}>
+                    <button type="button" class="g-toolbar-btn" onClick={() => {
+                      const td = el().tableData;
+                      if (!td) return;
+                      const cols = td[0]?.length || 1;
+                      const newRow = Array.from({ length: cols }, () => "");
+                      const newData = [...td, newRow];
+                      patchSelected({ tableData: newData, tableRows: newData.length });
+                    }}>Add Row</button>
+                    <button type="button" class="g-toolbar-btn" onClick={() => {
+                      const td = el().tableData;
+                      if (!td || td.length <= 1) return;
+                      const newData = td.slice(0, -1);
+                      patchSelected({ tableData: newData, tableRows: newData.length });
+                    }}>Remove Row</button>
+                  </div>
+                  <div style={{ display: "flex", gap: "4px" }}>
+                    <button type="button" class="g-toolbar-btn" onClick={() => {
+                      const td = el().tableData;
+                      if (!td) return;
+                      const newData = td.map(r => [...r, ""]);
+                      patchSelected({ tableData: newData, tableCols: newData[0]?.length || 1 });
+                    }}>Add Col</button>
+                    <button type="button" class="g-toolbar-btn" onClick={() => {
+                      const td = el().tableData;
+                      if (!td || (td[0]?.length || 0) <= 1) return;
+                      const newData = td.map(r => r.slice(0, -1));
+                      patchSelected({ tableData: newData, tableCols: newData[0]?.length || 1 });
+                    }}>Remove Col</button>
+                  </div>
+                </div>
+              </Show>
               {fieldLabel(
                 "Fill color",
                 <input
@@ -931,6 +1228,10 @@ export function SlideEditor(props: SlideEditorProps) {
               <option value="fade">Fade</option>
               <option value="slide-left">Slide left</option>
               <option value="slide-right">Slide right</option>
+              <option value="wipe-left">Wipe left</option>
+              <option value="wipe-right">Wipe right</option>
+              <option value="zoom">Zoom</option>
+              <option value="dissolve">Dissolve</option>
             </select>
           </label>
           <label style={{ "font-size": "11px" }}>
@@ -957,30 +1258,146 @@ export function SlideEditor(props: SlideEditorProps) {
       title: "Animation",
       icon: <IconAnimation />,
       content: (
-        <Show
-          when={selectedElement()}
-          fallback={<div style={{ "font-size": "11px", color: "var(--text-muted)" }}>Select an element to set its entrance animation.</div>}
-        >
-          {(el) => (
-            <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
-              <div style={{ "font-size": "12px" }}>
-                <strong>{el().type}</strong>
-                <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-top": "2px" }}>{el().id}</div>
-              </div>
-              <label style={{ display: "flex", "align-items": "center", gap: "8px", cursor: "pointer", "font-size": "12px" }}>
-                <input
-                  type="checkbox"
-                  checked={(el().entrance || "none") === "fade"}
-                  onChange={(e) => patchSelected({ entrance: e.currentTarget.checked ? "fade" : "none" })}
-                />
-                Entrance fade
-              </label>
+        <div style={{ display: "flex", "flex-direction": "column", gap: "10px" }}>
+          <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
+            Animated elements on this slide reveal in the listed order in presenter view.
+          </div>
+          <div style={{ display: "flex", "flex-direction": "column", gap: "4px" }}>
+            <For each={activeSlide()?.elements
+              .filter((e) => e.entrance !== "none" || e.exit !== "none")
+              .slice()
+              .sort((a, b) => (a.entranceOrder ?? 0) - (b.entranceOrder ?? 0)) ?? []}
+            >
+              {(el, index) => (
+                <div
+                  style={{
+                    display: "flex",
+                    "align-items": "center",
+                    gap: "4px",
+                    padding: "3px 4px",
+                    "border-radius": "4px",
+                    background: selectedElementIds().includes(el.id) ? "var(--bg-selected, #505050)" : "var(--bg-tertiary)",
+                  }}
+                >
+                  <span
+                    style={{ "font-size": "11px", flex: 1, overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap", cursor: "pointer" }}
+                    title={`${el.entrance !== "none" ? `Entrance: ${el.entrance}` : ""}${el.entrance !== "none" && el.exit !== "none" ? " · " : ""}${el.exit !== "none" ? `Exit: ${el.exit}` : ""}`}
+                    onClick={() => setSelectedElementId(el.id)}
+                  >
+                    {index() + 1}. {el.type}
+                  </span>
+                  <button
+                    type="button"
+                    class="g-toolbar-btn"
+                    aria-label={`Move ${el.type} animation earlier`}
+                    title="Play earlier"
+                    disabled={index() === 0}
+                    style={{ width: "22px", height: "20px", padding: 0, "font-size": "10px" }}
+                    onClick={() => reorderAnimation(el.id, -1)}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    class="g-toolbar-btn"
+                    aria-label={`Move ${el.type} animation later`}
+                    title="Play later"
+                    disabled={index() === (activeSlide()?.elements.filter((e) => e.entrance !== "none" || e.exit !== "none").length ?? 0) - 1}
+                    style={{ width: "22px", height: "20px", padding: 0, "font-size": "10px" }}
+                    onClick={() => reorderAnimation(el.id, 1)}
+                  >
+                    ↓
+                  </button>
+                </div>
+              )}
+            </For>
+            <Show when={(activeSlide()?.elements.filter((e) => e.entrance !== "none" || e.exit !== "none").length ?? 0) === 0}>
               <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
-                In presenter view, faded elements start hidden and reveal in z-order with Space or click.
+                No animated elements yet. Select an element to add an entrance or exit effect.
               </div>
-            </div>
-          )}
-        </Show>
+            </Show>
+          </div>
+          <Show
+            when={selectedElement()}
+            fallback={<div style={{ "font-size": "11px", color: "var(--text-muted)" }}>Select an element to set its animation.</div>}
+          >
+            {(el) => (
+              <div style={{ display: "flex", "flex-direction": "column", gap: "8px", "border-top": "1px solid var(--border-color)", "padding-top": "8px" }}>
+                <div style={{ "font-size": "12px" }}>
+                  <strong>{el().type}</strong>
+                  <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-top": "2px" }}>{el().id}</div>
+                </div>
+                <label style={{ "font-size": "11px" }}>
+                  Entrance effect
+                  <select
+                    aria-label="Entrance animation effect"
+                    value={el().entrance || "none"}
+                    onChange={(e) => patchSelected({ entrance: e.currentTarget.value as ElementEntrance })}
+                    style={{ display: "block", width: "100%", "margin-top": "3px" }}
+                  >
+                    <option value="none">None</option>
+                    <option value="fade">Fade</option>
+                    <option value="zoom">Zoom</option>
+                  </select>
+                </label>
+                <label style={{ "font-size": "11px" }}>
+                  Exit effect
+                  <select
+                    aria-label="Exit animation effect"
+                    value={el().exit || "none"}
+                    onChange={(e) => patchSelected({ exit: e.currentTarget.value as ElementExit })}
+                    style={{ display: "block", width: "100%", "margin-top": "3px" }}
+                  >
+                    <option value="none">None</option>
+                    <option value="fade">Fade out on slide exit</option>
+                  </select>
+                </label>
+                <label style={{ "font-size": "11px" }}>
+                  Entrance delay (ms)
+                  <input
+                    type="number"
+                    min="0"
+                    max="60000"
+                    step="50"
+                    aria-label="Animation delay milliseconds"
+                    value={el().entranceDelayMs ?? 0}
+                    onInput={(e) => patchSelected({ entranceDelayMs: Math.max(0, Math.min(60000, Number(e.currentTarget.value) || 0)) })}
+                    style={{ display: "block", width: "100%", "margin-top": "3px" }}
+                  />
+                </label>
+                <label style={{ "font-size": "11px" }}>
+                  Entrance duration (ms)
+                  <input
+                    type="number"
+                    min="50"
+                    max="60000"
+                    step="50"
+                    aria-label="Animation duration milliseconds"
+                    value={el().entranceDurationMs ?? 350}
+                    onInput={(e) => patchSelected({ entranceDurationMs: Math.max(50, Math.min(60000, Number(e.currentTarget.value) || 350)) })}
+                    style={{ display: "block", width: "100%", "margin-top": "3px" }}
+                  />
+                </label>
+                <label style={{ "font-size": "11px" }}>
+                  Exit duration (ms)
+                  <input
+                    type="number"
+                    min="50"
+                    max="60000"
+                    step="50"
+                    aria-label="Exit duration milliseconds"
+                    value={el().exitDurationMs ?? 350}
+                    onInput={(e) => patchSelected({ exitDurationMs: Math.max(50, Math.min(60000, Number(e.currentTarget.value) || 350)) })}
+                    style={{ display: "block", width: "100%", "margin-top": "3px" }}
+                  />
+                </label>
+                <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
+                  In presenter view, entrance-animated elements start hidden and reveal in the listed order with Space or click. Exit effects play when leaving the slide.
+                </div>
+              </div>
+            )}
+          </Show>
+        </div>
       ),
     },
     {
@@ -1097,11 +1514,27 @@ export function SlideEditor(props: SlideEditorProps) {
         <ToolbarButton title="Open" onClick={() => props.onRequestOpen?.()}><IconFolderOpen /></ToolbarButton>
         <ToolbarButton title="Save" onClick={() => props.onRequestSave?.()}><IconSave /></ToolbarButton>
         <ToolbarButton title="Export PDF" onClick={() => props.onRequestExportPdf?.()}><IconPdf /></ToolbarButton>
+        <ToolbarButton title="Export as PPTX (.pptx)" onClick={() => props.onRequestExportPptx?.()}>PPTX</ToolbarButton>
+        <ToolbarButton
+          title="Export current slide as PNG"
+          onClick={() => {
+            const slide = activeSlide();
+            if (!slide) return;
+            void renderSlideToPng({
+              elements: slide.elements as any,
+              bg: slide.bgOverride || theme().bgColor || "#ffffff",
+            })
+              .then((blob) => downloadBlob(blob, `slide-${activeSlideIndex() + 1}.png`))
+              .catch(() => showToast("Could not export slide as PNG", "error"));
+          }}
+        >
+          <IconImage />
+        </ToolbarButton>
         <ToolbarButton title="Print…" onClick={() => setPrintDialogOpen(true)}><IconPrint /></ToolbarButton>
         <ToolbarSep />
-        <ToolbarButton title="Cut" onClick={() => document.execCommand("cut")}><IconCut /></ToolbarButton>
-        <ToolbarButton title="Copy" onClick={() => document.execCommand("copy")}><IconCopy /></ToolbarButton>
-        <ToolbarButton title="Paste" onClick={() => document.execCommand("paste")}><IconPaste /></ToolbarButton>
+        <ToolbarButton title="Cut" onClick={() => cutSelectedElements()}><IconCut /></ToolbarButton>
+        <ToolbarButton title="Copy" onClick={() => copySelectedElements()}><IconCopy /></ToolbarButton>
+        <ToolbarButton title="Paste" onClick={() => pasteClippedElements(false)}><IconPaste /></ToolbarButton>
         <ToolbarSep />
         <ToolbarButton title="Undo" onClick={undoSlide}><IconUndo /></ToolbarButton>
         <ToolbarButton title="Redo" onClick={redoSlide}><IconRedo /></ToolbarButton>
@@ -1247,22 +1680,25 @@ export function SlideEditor(props: SlideEditorProps) {
             <For each={slides()}>
               {(slide, idx) => {
                 const active = () => idx() === activeSlideIndex();
-                const previewText = () => slide.elements.find((e) => e.type === "text")?.content || slide.title;
-                const shapeCount = () => slide.elements.filter((e) => e.type !== "text").length;
                 return (
                   <div
                     onClick={() => selectSlide(idx())}
-                    onPointerDown={(e) => {
-                      if (e.button !== 0) return;
+                    draggable
+                    onDragStart={(e) => {
                       setFilmstripDragIndex(idx());
-                      e.currentTarget.setPointerCapture(e.pointerId);
+                      e.dataTransfer?.setData("text/plain", idx().toString());
                     }}
-                    onPointerUp={(e) => {
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                    }}
+                    onDrop={(e) => {
                       const from = filmstripDragIndex();
-                      if (from !== null && from !== idx()) reorderSlides(from, idx());
+                      if (from !== null && from !== idx()) {
+                        reorderSlides(from, idx());
+                      }
                       setFilmstripDragIndex(null);
-                      e.currentTarget.releasePointerCapture(e.pointerId);
                     }}
+                    onDragEnd={() => setFilmstripDragIndex(null)}
                     style={{
                       display: "flex",
                       "align-items": "flex-start",
@@ -1281,35 +1717,76 @@ export function SlideEditor(props: SlideEditorProps) {
                         height: "63px",
                         background: slide.bgOverride || theme().bgColor || "white",
                         border: active() ? "2px solid var(--slide-accent)" : "1px solid var(--border-color)",
-                        padding: "5px 6px",
+                        padding: "0",
                         overflow: "hidden",
                         "box-shadow": active() ? "0 0 0 1px var(--slide-accent)" : "0 1px 3px rgba(0,0,0,.35)",
                         position: "relative",
                       }}
                     >
-                      <div style={{
-                        "font-size": "7px",
-                        "font-weight": "600",
-                        color: isPlaceholder(previewText()) ? "#999" : (theme().textColor || "#202124"),
-                        "font-style": isPlaceholder(previewText()) ? "italic" : "normal",
-                        "line-height": "1.3",
-                        overflow: "hidden",
-                        "text-overflow": "ellipsis",
-                        "white-space": "nowrap",
-                      }}>
-                        {previewText()}
+                      {/* Live miniature render of the slide (960x540 scaled to
+                          112x63) instead of a text-only placeholder. */}
+                      <div
+                        style={{
+                          width: "960px",
+                          height: "540px",
+                          transform: "scale(0.11667)",
+                          "transform-origin": "top left",
+                          position: "relative",
+                          background: slide.bgOverride || theme().bgColor || "white",
+                        }}
+                      >
+                        <For each={slide.elements}>
+                          {(element) => {
+                            const common = {
+                              position: "absolute" as const,
+                              left: `${element.x}px`,
+                              top: `${element.y}px`,
+                              width: `${element.width}px`,
+                              height: `${element.height}px`,
+                              transform: element.rotation ? `rotate(${element.rotation}deg)` : undefined,
+                            };
+                            if (element.type === "text") {
+                              return (
+                                <div style={{
+                                  ...common,
+                                  "font-size": `${Math.max(6, (element.fontSize || 16) * 0.6)}px`,
+                                  color: element.color || theme().textColor || "#202124",
+                                  "font-weight": (element as any).bold ? "700" : "400",
+                                  "font-style": (element as any).italic ? "italic" : "normal",
+                                  "text-align": ((element as any).align as any) || "left",
+                                  overflow: "hidden",
+                                  padding: "2px",
+                                  "line-height": "1.15",
+                                }}>
+                                  {String(element.content ?? "").slice(0, 220)}
+                                </div>
+                              );
+                            }
+                            if (element.type === "image") {
+                              const src = String(element.content ?? "");
+                              return (
+                                <div style={{
+                                  ...common,
+                                  ...(src.startsWith("data:")
+                                    ? { "background-image": `url(${src})`, "background-size": "cover", "background-position": "center" }
+                                    : { background: theme().accentColor || "#3b82f6" }),
+                                } as any} />
+                              );
+                            }
+                            return (
+                              <div style={{
+                                ...common,
+                                ...(element.type === "line" || element.type === "arrow"
+                                  ? { height: "3px", background: element.color || "#334155" }
+                                  : {
+                                      background: element.color || theme().accentColor || "#3b82f6",
+                                      "border-radius": element.type === "ellipse" ? "50%" : (element.type === "roundedRect" ? "12px" : "0"),
+                                    }),
+                              }} />
+                            );
+                          }}
+                        </For>
                       </div>
-                      <Show when={shapeCount() > 0}>
-                        <div style={{
-                          position: "absolute",
-                          right: "4px",
-                          bottom: "3px",
-                          width: "10px",
-                          height: "7px",
-                          background: theme().accentColor || "#3b82f6",
-                          opacity: "0.7",
-                        }} />
-                      </Show>
                     </div>
                   </div>
                 );
@@ -1341,7 +1818,7 @@ export function SlideEditor(props: SlideEditorProps) {
           >
           <div
             ref={(el) => { canvasEl = el; }}
-            class={`g-slide-canvas g-print-slide ${slideAnimClass() === "fade" ? "g-slide-anim-fade" : ""} ${slideAnimClass() === "slide-left" ? "g-slide-anim-left" : ""} ${slideAnimClass() === "slide-right" ? "g-slide-anim-right" : ""}`}
+            class={`g-slide-canvas g-print-slide ${slideAnimClass() === "fade" ? "g-slide-anim-fade" : ""} ${slideAnimClass() === "slide-left" ? "g-slide-anim-left" : ""} ${slideAnimClass() === "slide-right" ? "g-slide-anim-right" : ""} ${slideAnimClass() === "wipe-left" ? "g-slide-anim-wipe-left" : ""} ${slideAnimClass() === "wipe-right" ? "g-slide-anim-wipe-right" : ""} ${slideAnimClass() === "zoom" ? "g-slide-anim-zoom" : ""} ${slideAnimClass() === "dissolve" ? "g-slide-anim-dissolve" : ""}`}
             style={{
               width: "960px",
               height: "540px",
@@ -1354,7 +1831,8 @@ export function SlideEditor(props: SlideEditorProps) {
             }}
             tabindex="0"
             role="region"
-            aria-label="Slide canvas"
+            data-pane="canvas"
+            aria-label="Slide canvas. Tab moves between elements; arrow keys nudge the selection; all toolbar actions have keyboard equivalents."
             onContextMenu={(event) => {
               event.preventDefault();
               const items: ContextMenuItem[] = [
@@ -1426,7 +1904,19 @@ export function SlideEditor(props: SlideEditorProps) {
                 const placeholder = () => el.type === "text" && isPlaceholder(el.content);
                 return (
                   <div
-                    onClick={(event) => selectElement(el.id, event.shiftKey)}
+                    onClick={(event) => {
+                      if ((event.ctrlKey || event.metaKey) && el.hyperlink) {
+                        const target = normalizeSlideHyperlink(el.hyperlink);
+                        if (target) {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          window.open(target, "_blank", "noopener,noreferrer");
+                          return;
+                        }
+                        showToast("This hyperlink is invalid or unsafe.", "error");
+                      }
+                      selectElement(el.id, event.shiftKey);
+                    }}
                     onPointerDown={(event) => {
                       if ((el.type === "text" || isFilledShape(el.type)) && document.activeElement === event.currentTarget.querySelector("[contenteditable]")) {
                         return;
@@ -1445,12 +1935,12 @@ export function SlideEditor(props: SlideEditorProps) {
                       setDragOffset({ x: local.x - el.x, y: local.y - el.y });
                     }}
                     onPointerMove={(event) => {
-                      const resize = resizing();
-                      if (resize?.id === el.id) {
+                      const currentResize = resizing();
+                      if (currentResize && currentResize.id === el.id) {
                         const local = canvasToLocal(event.clientX, event.clientY);
-                        applyResize(el, resize.handle, local.x, local.y, resize, event.shiftKey);
+                        const updatedEl = applyResize(el, currentResize.handle, local.x, local.y, currentResize, event.shiftKey);
                         setAlignmentGuides([]);
-                        setSlides([...slides()]);
+                        setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(e => e.id === el.id ? updatedEl : e) } : s));
                         return;
                       }
                       if (dragPointerId !== event.pointerId) return;
@@ -1471,19 +1961,25 @@ export function SlideEditor(props: SlideEditorProps) {
                         local.y - dragOffset().y,
                         activeSlide()?.elements || [],
                       );
-                      el.x = snapped.x;
-                      el.y = snapped.y;
-                      const moveDx = el.x - prevX;
-                      const moveDy = el.y - prevY;
-                      for (const peer of elementsToMoveWith(el)) {
-                        if (peer.id !== el.id) {
-                          peer.x += moveDx;
-                          peer.y += moveDy;
-                        }
-                      }
+                      const moveDx = snapped.x - prevX;
+                      const moveDy = snapped.y - prevY;
+                      const peersToMove = elementsToMoveWith(el).map(p => p.id);
                       dragMoved = true;
                       setAlignmentGuides(snapped.guides);
-                      setSlides([...slides()]);
+                      setSlides(prev => prev.map((s, i) => {
+                        if (i !== activeSlideIndex()) return s;
+                        return {
+                          ...s,
+                          elements: s.elements.map(e => {
+                            if (e.id === el.id) {
+                              return { ...e, x: snapped.x, y: snapped.y };
+                            } else if (peersToMove.includes(e.id)) {
+                              return { ...e, x: e.x + moveDx, y: e.y + moveDy };
+                            }
+                            return e;
+                          })
+                        };
+                      }));
                     }}
                     onPointerUp={(event) => {
                       if (resizing()?.id === el.id) {
@@ -1523,14 +2019,14 @@ export function SlideEditor(props: SlideEditorProps) {
                           pushSlideHistory();
                           if (isPlaceholder(e.currentTarget.innerText)) {
                             e.currentTarget.innerText = "";
-                            el.content = "";
+                            setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === el.id ? { ...eItem, content: "" } : eItem) } : s));
                           }
                         }}
                         onBlur={(e) => {
                           const text = e.currentTarget.innerText.trim();
-                          el.content = text || (el.fontSize && el.fontSize >= 28 ? PLACEHOLDER_TITLE : PLACEHOLDER_BODY);
-                          e.currentTarget.innerText = el.content;
-                          setSlides([...slides()]);
+                          const newContent = text || (el.fontSize && el.fontSize >= 28 ? PLACEHOLDER_TITLE : PLACEHOLDER_BODY);
+                          e.currentTarget.innerText = newContent;
+                          setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === el.id ? { ...eItem, content: newContent } : eItem) } : s));
                           commitChange();
                         }}
                         style={{
@@ -1570,8 +2066,8 @@ export function SlideEditor(props: SlideEditorProps) {
                           const startRot = el.rotation || 0;
                           const onMove = (moveEvent: PointerEvent) => {
                             const delta = Math.round((moveEvent.clientY - startY) / 2);
-                            el.rotation = ((startRot + delta) % 360 + 360) % 360;
-                            setSlides([...slides()]);
+                            const newRotation = ((startRot + delta) % 360 + 360) % 360;
+                            setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === el.id ? { ...eItem, rotation: newRotation } : eItem) } : s));
                           };
                           const onUp = (upEvent: PointerEvent) => {
                             window.removeEventListener("pointermove", onMove);
@@ -1592,12 +2088,15 @@ export function SlideEditor(props: SlideEditorProps) {
                           contentEditable
                           onFocus={(e) => {
                             pushSlideHistory();
-                            if (!el.content) e.currentTarget.innerText = "";
+                            if (!el.content) {
+                              e.currentTarget.innerText = "";
+                              setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === el.id ? { ...eItem, content: "" } : eItem) } : s));
+                            }
                           }}
                           onBlur={(e) => {
-                            el.content = e.currentTarget.innerText.trim();
-                            e.currentTarget.innerText = el.content;
-                            setSlides([...slides()]);
+                            const newContent = e.currentTarget.innerText.trim();
+                            e.currentTarget.innerText = newContent;
+                            setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === el.id ? { ...eItem, content: newContent } : eItem) } : s));
                             commitChange();
                           }}
                           style={{
@@ -1636,9 +2135,21 @@ export function SlideEditor(props: SlideEditorProps) {
                                       contentEditable
                                       style={{ border: "1px solid #cbd5e1", padding: "4px", "min-width": "24px" }}
                                       onInput={(e) => {
-                                        const data = el.tableData!;
-                                        data[ri()][ci()] = e.currentTarget.textContent || "";
-                                        setSlides([...slides()]);
+                                        const newText = e.currentTarget.textContent || "";
+                                        setSlides(prev => prev.map((s, i) => {
+                                          if (i !== activeSlideIndex()) return s;
+                                          return {
+                                            ...s,
+                                            elements: s.elements.map(elItem => {
+                                              if (elItem.id === el.id && elItem.tableData) {
+                                                const newData = elItem.tableData.map(r => [...r]);
+                                                newData[ri()][ci()] = newText;
+                                                return { ...elItem, tableData: newData };
+                                              }
+                                              return elItem;
+                                            })
+                                          };
+                                        }));
                                       }}
                                       onBlur={() => commitChange()}
                                     >
@@ -1658,8 +2169,8 @@ export function SlideEditor(props: SlideEditorProps) {
                           type="text"
                           value={el.chartTitle || "Chart"}
                           onInput={(e) => {
-                            el.chartTitle = e.currentTarget.value;
-                            setSlides([...slides()]);
+                            const newTitle = e.currentTarget.value;
+                            setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(elItem => elItem.id === el.id ? { ...elItem, chartTitle: newTitle } : elItem) } : s));
                           }}
                           onBlur={() => commitChange()}
                           style={{ "font-size": "14px", "font-weight": "600", border: "none", background: "transparent", "margin-bottom": "4px" }}
@@ -1677,6 +2188,94 @@ export function SlideEditor(props: SlideEditorProps) {
                             }}
                           </For>
                         </div>
+                        <Show when={isSelected()}>
+                          {/* Inline chart-data editor: values and labels become
+                              editable after insert instead of being frozen. */}
+                          <div
+                            class="g-chart-data-editor"
+                            style={{
+                              position: "absolute",
+                              top: "100%",
+                              left: "0",
+                              "margin-top": "6px",
+                              width: "240px",
+                              background: "var(--bg-surface, #ffffff)",
+                              border: "1px solid var(--border-color, #d9d9d9)",
+                              "border-radius": "8px",
+                              "box-shadow": "0 8px 24px rgba(0,0,0,.18)",
+                              padding: "8px",
+                              display: "flex",
+                              "flex-direction": "column",
+                              gap: "6px",
+                              "z-index": "40",
+                            }}
+                          >
+                            <div style={{ "font-size": "11px", "font-weight": "600", color: "var(--text-secondary, #6b7280)" }}>Chart data</div>
+                            <For each={el.chartData || [3, 5, 2, 8]}>
+                              {(v, i) => (
+                                <div style={{ display: "flex", gap: "4px", "align-items": "center" }}>
+                                  <input
+                                    aria-label={`Label for data point ${i() + 1}`}
+                                    type="text"
+                                    value={el.chartLabels?.[i()] ?? ""}
+                                    placeholder={`Point ${i() + 1}`}
+                                    onInput={(e) => {
+                                      const label = e.currentTarget.value;
+                                      const labels = [...(el.chartLabels || [])];
+                                      labels[i()] = label;
+                                      setSlides(prev => prev.map((s, si) => si === activeSlideIndex() ? { ...s, elements: s.elements.map(item => item.id === el.id ? { ...item, chartLabels: labels } : item) } : s));
+                                    }}
+                                    onBlur={() => commitChange()}
+                                    style={{ width: "72px", "font-size": "11px", padding: "2px 6px", border: "1px solid var(--border-color, #d9d9d9)", "border-radius": "4px", background: "var(--bg-input, #fff)", color: "inherit" }}
+                                  />
+                                  <input
+                                    aria-label={`Value for data point ${i() + 1}`}
+                                    type="number"
+                                    value={v}
+                                    onInput={(e) => {
+                                      const parsed = Number(e.currentTarget.value);
+                                      if (!Number.isFinite(parsed)) return;
+                                      const data = [...(el.chartData || [])];
+                                      data[i()] = parsed;
+                                      setSlides(prev => prev.map((s, si) => si === activeSlideIndex() ? { ...s, elements: s.elements.map(item => item.id === el.id ? { ...item, chartData: data } : item) } : s));
+                                    }}
+                                    onBlur={() => commitChange()}
+                                    style={{ width: "60px", "font-size": "11px", padding: "2px 6px", border: "1px solid var(--border-color, #d9d9d9)", "border-radius": "4px", background: "var(--bg-input, #fff)", color: "inherit" }}
+                                  />
+                                  <button
+                                    type="button"
+                                    aria-label={`Remove data point ${i() + 1}`}
+                                    style={{ border: "none", background: "transparent", color: "var(--danger, #b91c1c)", cursor: "pointer", "font-size": "12px", padding: "0 4px" }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      pushSlideHistory();
+                                      const data = (el.chartData || []).filter((_, di) => di !== i());
+                                      const labels = (el.chartLabels || []).filter((_, di) => di !== i());
+                                      setSlides(prev => prev.map((s, si) => si === activeSlideIndex() ? { ...s, elements: s.elements.map(item => item.id === el.id ? { ...item, chartData: data, chartLabels: labels } : item) } : s));
+                                      commitChange();
+                                    }}
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              )}
+                            </For>
+                            <button
+                              type="button"
+                              style={{ "font-size": "11px", padding: "3px 8px", border: "1px solid var(--border-color, #d9d9d9)", "border-radius": "4px", background: "var(--bg-input, #fff)", color: "inherit", cursor: "pointer" }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                pushSlideHistory();
+                                const data = [...(el.chartData || []), 1];
+                                const labels = [...(el.chartLabels || []), `P${data.length}`];
+                                setSlides(prev => prev.map((s, si) => si === activeSlideIndex() ? { ...s, elements: s.elements.map(item => item.id === el.id ? { ...item, chartData: data, chartLabels: labels } : item) } : s));
+                                commitChange();
+                              }}
+                            >
+                              + Add data point
+                            </button>
+                          </div>
+                        </Show>
                       </div>
                     )}
                     <Show when={isSelected()}>
@@ -1767,16 +2366,16 @@ export function SlideEditor(props: SlideEditorProps) {
                 const list = [...slides()];
                 const slide = list[idx];
                 if (!slide) return;
-                if (!notesHistoryPushed) {
+                if (!notesHistoryPushed()) {
                   pushSlideHistory();
-                  notesHistoryPushed = true;
+                  setNotesHistoryPushed(true);
                 }
                 list[idx] = { ...slide, notes: e.currentTarget.value };
                 setSlides(list);
                 emitChange(list);
               }}
               onBlur={() => {
-                notesHistoryPushed = false;
+                setNotesHistoryPushed(false);
               }}
               style={{
                 width: "100%",
@@ -1790,6 +2389,67 @@ export function SlideEditor(props: SlideEditorProps) {
                 "font-size": "13px",
               }}
             />
+            {/* Review comments on this slide (offline collaboration) */}
+            <div style={{ "margin-top": "8px" }}>
+              <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "4px" }}>
+                Comments{" "}
+                {(activeSlide()?.comments ?? []).filter((comment) => !comment.resolved).length > 0
+                  ? `· ${(activeSlide()?.comments ?? []).filter((comment) => !comment.resolved).length} open`
+                  : ""}
+              </div>
+              <div style={{ display: "flex", gap: "6px" }}>
+                <input
+                  class="g-toolbar-input"
+                  aria-label="New slide comment"
+                  placeholder="Comment on this slide…"
+                  value={commentDraft()}
+                  onInput={(e) => setCommentDraft(e.currentTarget.value)}
+                  style={{ flex: 1 }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      addSlideComment();
+                      e.preventDefault();
+                    }
+                  }}
+                />
+                <button type="button" class="g-toolbar-btn" onClick={addSlideComment}>Add</button>
+              </div>
+              <For each={activeSlide()?.comments ?? []}>
+                {(comment) => (
+                  <div style={{ border: "1px solid var(--border-color)", "border-radius": "6px", padding: "5px", "margin-top": "5px" }}>
+                    <div style={{ display: "flex", "align-items": "center", gap: "5px" }}>
+                      <span style={{ flex: 1, "font-size": "11px", "font-weight": "600" }}>{comment.author}</span>
+                      <button
+                        type="button"
+                        class="g-toolbar-btn"
+                        aria-label={comment.resolved ? `Reopen comment ${comment.id}` : `Resolve comment ${comment.id}`}
+                        onClick={() => setSlideCommentResolved(comment.id, !comment.resolved)}
+                      >
+                        {comment.resolved ? "Reopen" : "Resolve"}
+                      </button>
+                      <button
+                        type="button"
+                        class="g-toolbar-btn"
+                        aria-label={`Delete comment ${comment.id}`}
+                        onClick={() => deleteSlideComment(comment.id)}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    <div
+                      style={{
+                        "font-size": "11px",
+                        "margin-top": "3px",
+                        color: comment.resolved ? "var(--text-muted)" : "var(--text-primary)",
+                        "text-decoration": comment.resolved ? "line-through" : "none",
+                      }}
+                    >
+                      {comment.text}
+                    </div>
+                  </div>
+                )}
+              </For>
+            </div>
           </div>
         </main>
 

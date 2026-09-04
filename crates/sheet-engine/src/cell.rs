@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CellStyle {
     pub bold: Option<bool>,
@@ -16,6 +16,34 @@ pub struct CellStyle {
     pub wrap: Option<bool>,
     #[serde(default)]
     pub v_align: Option<String>, // "top" | "middle" | "bottom"
+    #[serde(default)]
+    pub validation: Option<ListValidation>,
+    #[serde(default)]
+    pub hyperlink: Option<String>,
+    /// Optional bounded inline image associated with this cell in Redoc.
+    /// PNG/JPEG values can round-trip through native XLSX drawings.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Font family name; survives .redoc saves and XLSX export. Older files
+    /// deserialize without it (serde default).
+    #[serde(default)]
+    pub font_family: Option<String>,
+    /// Font size in points.
+    #[serde(default)]
+    pub font_size: Option<f64>,
+    /// Digits after the decimal point for numeric display (0-10).
+    #[serde(default)]
+    pub decimals: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ListValidation {
+    #[serde(rename = "type")]
+    pub validation_type: String,
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultTheme, normalizeDeck, toDeck } from "./deckNormalize";
+import { defaultTheme, normalizeDeck, normalizeSlideComments, normalizeTransition, toDeck } from "./deckNormalize";
 
 describe("normalizeDeck", () => {
   it("returns a default title slide when deck is empty", () => {
@@ -41,6 +41,51 @@ describe("normalizeDeck", () => {
       slides: [{ id: "s1", layout: "blank", elements: [] }],
     });
     expect(slides[0].transition).toBe("fade");
+  });
+
+  it("accepts the bounded native transition subset", () => {
+    expect(normalizeTransition("wipe-left")).toBe("wipe-left");
+    expect(normalizeTransition("wipe-right")).toBe("wipe-right");
+    expect(normalizeTransition("zoom")).toBe("zoom");
+    expect(normalizeTransition("dissolve")).toBe("dissolve");
+    expect(normalizeTransition("unknown")).toBe("none");
+  });
+
+  it("normalizes slide comments and drops empty entries", () => {
+    const comments = normalizeSlideComments([
+      { id: "c1", author: "  Alice  ", text: "Tighten this headline", createdAt: "2026-01-01T00:00:00Z" },
+      { id: "c2", author: "", text: "   " },
+      null,
+      42,
+    ]);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toMatchObject({
+      id: "c1",
+      author: "Alice",
+      text: "Tighten this headline",
+      resolved: false,
+    });
+    // Malformed authors fall back to "You" while the text survives.
+    const salvaged = normalizeSlideComments([{ author: 42, text: "kept" }]);
+    expect(salvaged).toHaveLength(1);
+    expect(salvaged[0].author).toBe("You");
+    expect(salvaged[0].text).toBe("kept");
+    expect(normalizeSlideComments(undefined)).toEqual([]);
+    expect(normalizeSlideComments("nope")).toEqual([]);
+  });
+
+  it("round-trips slide comments through toDeck", () => {
+    const slides = normalizeDeck({
+      slides: [{
+        id: "s1",
+        layout: "blank",
+        elements: [],
+        comments: [{ id: "c1", author: "Bob", text: "Add a chart", resolved: false, createdAt: "2026-02-02T00:00:00Z" }],
+      }],
+    });
+    const deck = toDeck(slides, { canvasWidth: 800, canvasHeight: 450 }, defaultTheme, 0);
+    expect(deck.slides[0].comments).toHaveLength(1);
+    expect(deck.slides[0].comments[0].text).toBe("Add a chart");
   });
 });
 

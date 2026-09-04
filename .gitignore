@@ -43,3 +43,6 @@ out*.txt
 /test.py
 /test[0-9].py
 /generate_icons.cjs
+
+# Local tool state
+.commandcode/

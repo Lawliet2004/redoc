@@ -1,15 +1,18 @@
 pub mod base64_util;
 pub mod compatibility;
 pub mod docx;
+pub mod fixups;
 pub mod pdf;
 pub mod pptx;
 pub mod pptx_import;
 pub mod xlsx;
+pub mod xlsx_pivot;
 
+pub use compatibility::export_compatibility_warnings;
+pub use fixups::{apply_export_fixups, nearest_paper_size, transcode_image_to_png_data_uri};
 pub use docx::{
     export_doc_to_docx, import_docx_to_doc, import_docx_to_doc_with_report, DocxImportResult,
 };
-pub use compatibility::export_compatibility_warnings;
 pub use pdf::{export_deck_to_pdf, export_doc_to_pdf, export_workbook_to_pdf};
 pub use pptx::export_deck_to_pptx;
 pub use pptx_import::{import_deck_from_pptx_with_report, PptxImportResult};
@@ -60,6 +63,12 @@ mod tests {
             rotation: 0.0,
             z_index: 1,
             entrance: "none".to_string(),
+            entrance_delay_ms: None,
+            entrance_duration_ms: None,
+            entrance_order: None,
+            exit: "none".to_string(),
+            exit_duration_ms: None,
+            hyperlink: None,
             kind: ElementKind::Text {
                 text: "Hello PPTX".to_string(),
                 font_size: 24.0,

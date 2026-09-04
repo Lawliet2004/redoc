@@ -12,19 +12,78 @@ export type GridCellStyle = {
   format?: "general" | "currency" | "percent" | "number" | "date" | "text";
   decimals?: number;
   hyperlink?: string;
+  /** Bounded inline data URI shown inside the cell in Redoc. */
+  image?: string;
   validation?: ListValidation;
   wrap?: boolean;
   fontFamily?: string;
   fontSize?: number;
+  /** Ephemeral render metadata added by conditional formatting. */
+  conditionalBarPercent?: number;
+  conditionalBarColor?: string;
 };
 
 export type GridCell = {
   raw: string;
   display: string;
   style?: GridCellStyle;
+  /** Render-only value produced by a dynamic-array formula. */
+  spill?: boolean;
 };
 
 export type MergeRange = { startRow: number; endRow: number; startCol: number; endCol: number };
+
+export type ConditionalFormattingRule = {
+  range: { startRow: number; endRow: number; startCol: number; endCol: number };
+  type: "greaterThan" | "lessThan" | "equalTo" | "textContains" | "dataBar" | "colorScale";
+  value?: string;
+  value2?: string;
+  style?: { fontColor?: string; bgColor?: string; bold?: boolean; italic?: boolean };
+  scaleColors?: string[];
+};
+
+export type PivotAggregation = "sum" | "count" | "average";
+
+export type PivotTableConfig = {
+  id: string;
+  sourceRange: MergeRange;
+  rowField: number;
+  /** When set, the pivot crosses rows × this column field (multi-field). */
+  columnField?: number;
+  valueField: number;
+  aggregation: PivotAggregation;
+  outputStartRow: number;
+  outputStartCol: number;
+  outputRowCount?: number;
+  outputColCount?: number;
+};
+
+export type ScenarioCellChange = { row: number; col: number; rawValue: string };
+
+export type ScenarioConfig = {
+  id: string;
+  name: string;
+  changes: ScenarioCellChange[];
+};
+
+export type SlicerConfig = {
+  id: string;
+  title: string;
+  sourceRange: MergeRange;
+  column: number;
+  selectedValues: string[];
+};
+
+/** Cell-anchored review comment (offline collaboration). */
+export type CellComment = {
+  id: string;
+  row: number;
+  col: number;
+  author: string;
+  text: string;
+  resolved: boolean;
+  createdAt: string;
+};
 
 export type SheetSnapshot = {
   cells: Record<string, GridCell>;
@@ -34,9 +93,14 @@ export type SheetSnapshot = {
   columnFilters: Record<number, string[]>;
   columnWidths: Record<number, number>;
   rowHeights: Record<number, number>;
-  chartType: "bar" | "line" | "pie" | null;
+  chartType: "bar" | "line" | "pie" | "area" | "scatter" | "doughnut" | null;
   chartTitle: string;
   chartRange: { startRow: number; endRow: number; startCol: number; endCol: number };
+  conditionalFormatting: ConditionalFormattingRule[];
+  pivotTables?: PivotTableConfig[];
+  scenarios?: ScenarioConfig[];
+  slicers?: SlicerConfig[];
+  comments?: CellComment[];
   sheetsMeta: Array<{ id: string; name: string }>;
   activeSheetIndex: number;
 };
@@ -51,6 +115,9 @@ export interface FormulaBarProps {
   editing: Accessor<boolean>;
   setEditing: Setter<boolean>;
   cellsData: Accessor<Record<string, GridCell>>;
+  cellsBySheet?: Accessor<Record<string, Record<string, GridCell>>>;
+  namedRanges?: Accessor<Array<{ name: string; rangeStr: string; sheet: string | null }>>;
+  activeSheetName?: Accessor<string>;
   containerRef?: HTMLDivElement;
   formulaInputRef?: HTMLInputElement;
 }
@@ -93,6 +160,7 @@ export interface GridCanvasProps {
   pasteValuesOnly: () => void | Promise<void>;
   pasteTsv: () => void | Promise<void>;
   selectCell: (row: number, col: number, extend?: boolean) => void;
+  moveActiveCell: (dRow: number, dCol: number, extend?: boolean) => void;
   lastUsedCell: () => { row: number; col: number };
   jumpToDataEdge: (dRow: number, dCol: number, extend?: boolean) => void;
   setEditing: Setter<boolean>;
@@ -123,7 +191,11 @@ export interface GridCanvasProps {
   getColName: (col: number) => string;
   cellsData: Accessor<Record<string, GridCell>>;
   cellHyperlink: (cell: GridCell | undefined) => string | null;
-  chartType: Accessor<"bar" | "line" | "pie" | null>;
+  onOpenHyperlink?: (href: string) => boolean;
+  chartType: Accessor<"bar" | "line" | "pie" | "area" | "scatter" | "doughnut" | null>;
+  chartTitle?: string;
+  chartTop: () => number;
+  chartLeft: () => number;
   chartData: () => Array<{ label: string; value: number }>;
   chartMax: () => number;
   pieSlices: () => Array<{
@@ -133,4 +205,5 @@ export interface GridCanvasProps {
     label: string;
     value: number;
   }>;
+  conditionalFormatting: Accessor<ConditionalFormattingRule[]>;
 }

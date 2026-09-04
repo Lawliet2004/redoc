@@ -1,3 +1,6 @@
+import { Show } from "solid-js";
+import { t } from "@redoc/ui";
+
 interface StatusBarProps {
   mode: "doc" | "sheet" | "slide";
   saveState: "Saved" | "Saving" | "Dirty" | "Error";
@@ -7,17 +10,39 @@ interface StatusBarProps {
   /** Extra middle status (e.g. page style, language) */
   pageStyle?: string;
   language?: string;
-  /** Selection stats for sheets */
+  /** Selection stats for sheets (aggregates: Sum/Avg/Count) */
   selectionStats?: string;
+  /** Find position "n of N" / "n/N" */
+  findPosition?: string;
 }
 
 export function StatusBar(props: StatusBarProps) {
   const modeLabel = () =>
-    props.mode === "doc" ? "Document" : props.mode === "sheet" ? "Spreadsheet" : "Presentation";
+    props.mode === "doc"
+      ? t("statusbar.mode.doc")
+      : props.mode === "sheet"
+        ? t("statusbar.mode.sheet")
+        : t("statusbar.mode.slide");
+
+  const saveLabel = () =>
+    props.saveState === "Saved"
+      ? t("statusbar.save.saved")
+      : props.saveState === "Saving"
+        ? t("statusbar.save.saving")
+        : props.saveState === "Dirty"
+          ? t("statusbar.save.modified")
+          : t("statusbar.save.error");
+
+  const zoomIn = () => props.onZoomChange(Math.min(200, props.zoomLevel + 10));
+  const zoomOut = () => props.onZoomChange(Math.max(50, props.zoomLevel - 10));
 
   return (
     <footer
-      class="g-no-print"
+      data-pane="status"
+      data-testid="statusbar"
+      class="g-no-print g-statusbar"
+      role="contentinfo"
+      aria-label={t("shell.panes.status")}
       style={{
         height: "var(--statusbar-h)",
         background: "var(--bg-statusbar)",
@@ -35,6 +60,9 @@ export function StatusBar(props: StatusBarProps) {
       <div style={{ display: "flex", "align-items": "center", gap: "12px", "min-width": "0", overflow: "hidden" }}>
         <span style={{ "font-weight": "500", color: "var(--text-primary)", "white-space": "nowrap" }}>{modeLabel()}</span>
         <span
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
           style={{
             color:
               props.saveState === "Error"
@@ -45,25 +73,41 @@ export function StatusBar(props: StatusBarProps) {
             "white-space": "nowrap",
           }}
         >
-          {props.saveState === "Saved"
-            ? "Saved"
-            : props.saveState === "Saving"
-              ? "Saving…"
-              : props.saveState === "Dirty"
-                ? "Modified"
-                : "Error"}
+          {saveLabel()}
         </span>
         {props.wordCountInfo && (
-          <span style={{ "white-space": "nowrap", overflow: "hidden", "text-overflow": "ellipsis" }}>
+          <span
+            class="g-status-count"
+            aria-label={t("statusbar.wordCount")}
+            style={{ "white-space": "nowrap", overflow: "hidden", "text-overflow": "ellipsis" }}
+          >
             {props.wordCountInfo}
+          </span>
+        )}
+        {props.selectionStats && (
+          <span
+            class="g-status-count"
+            aria-label={t("statusbar.aggregates")}
+            style={{ "white-space": "nowrap", overflow: "hidden", "text-overflow": "ellipsis" }}
+          >
+            {props.selectionStats}
+          </span>
+        )}
+        {props.findPosition && (
+          <span
+            class="g-status-count"
+            aria-label={t("statusbar.position")}
+            aria-live="polite"
+            style={{ "white-space": "nowrap" }}
+          >
+            {props.findPosition}
           </span>
         )}
       </div>
 
       <div style={{ display: "flex", "align-items": "center", gap: "12px", "flex-shrink": "0" }}>
-        <span>{props.pageStyle || "Default"}</span>
-        <span>{props.language || "English"}</span>
-        {props.selectionStats && <span>{props.selectionStats}</span>}
+        <span aria-label={t("statusbar.pageStyle")}>{props.pageStyle || t("statusbar.defaultStyle")}</span>
+        <span aria-label={t("statusbar.language")}>{props.language || t("statusbar.english")}</span>
       </div>
 
       <div style={{ display: "flex", "align-items": "center", gap: "4px", "flex-shrink": "0" }}>
@@ -71,8 +115,9 @@ export function StatusBar(props: StatusBarProps) {
           type="button"
           class="g-icon-btn"
           style={{ width: "20px", height: "20px", "font-size": "12px" }}
-          onClick={() => props.onZoomChange(Math.max(50, props.zoomLevel - 10))}
-          aria-label="Zoom out"
+          onClick={zoomOut}
+          aria-label={t("statusbar.zoomOut")}
+          disabled={props.zoomLevel <= 50}
         >
           −
         </button>
@@ -82,7 +127,8 @@ export function StatusBar(props: StatusBarProps) {
           max="200"
           step="10"
           value={props.zoomLevel}
-          aria-label="Zoom"
+          aria-label={t("statusbar.zoom")}
+          aria-valuetext={t("statusbar.zoomValue", { value: props.zoomLevel })}
           onInput={(e) => props.onZoomChange(Number(e.currentTarget.value))}
           style={{ width: "80px", height: "14px" }}
         />
@@ -90,12 +136,15 @@ export function StatusBar(props: StatusBarProps) {
           type="button"
           class="g-icon-btn"
           style={{ width: "20px", height: "20px", "font-size": "12px" }}
-          onClick={() => props.onZoomChange(Math.min(200, props.zoomLevel + 10))}
-          aria-label="Zoom in"
+          onClick={zoomIn}
+          aria-label={t("statusbar.zoomIn")}
+          disabled={props.zoomLevel >= 200}
         >
           +
         </button>
-        <span style={{ width: "36px", "text-align": "right", "font-size": "11px" }}>{props.zoomLevel}%</span>
+        <span class="g-status-count" style={{ width: "36px", "text-align": "right", "font-size": "11px" }} aria-live="polite">
+          {props.zoomLevel}%
+        </span>
       </div>
     </footer>
   );

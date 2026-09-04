@@ -1,4 +1,4 @@
-import { createSignal, onCleanup, onMount, For, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, For, Show } from "solid-js";
 import {
   IconPlus, IconBold, IconItalic, IconUnderline, IconTextColor, IconHighlight,
   IconAlignLeft, IconAlignCenter, IconAlignRight, IconAlignTop, IconAlignMiddle, IconAlignBottom,
@@ -24,7 +24,21 @@ import { measureTextWidth, clearTextMeasureCache } from "./textMeasureCache";
 import { commands } from "@redoc/api-client";
 import { parseTsv } from "@redoc/utils";
 import { buildWorkbookFromCells, createSheetHistoryHandlers } from "./sheetModel";
-import type { GridCell, MergeRange, SheetSnapshot } from "./sheetTypes";
+import type { ConditionalFormattingRule, GridCell, MergeRange, PivotTableConfig, ScenarioConfig, SheetSnapshot, SlicerConfig, CellComment } from "./sheetTypes";
+import { conditionalStyleForCell } from "./conditionalFormatting";
+import { buildPivotTable, buildMultiFieldPivotTable } from "./pivotTables";
+import { applyScenario as applyScenarioOverrides, captureScenario as captureScenarioRange } from "./scenarios";
+import { createSlicer, rowMatchesSlicers, slicerValues, toggleSlicerValue } from "./slicers";
+import {
+  commentsForCell,
+  makeCellComment,
+  openCommentCount,
+  removeCellComment,
+  setCellCommentResolved,
+  upsertCellComment,
+} from "./cellComments";
+import { normalizeSheetHyperlink, parseInternalSheetLocation } from "./hyperlinks";
+import { setRichClipboard, takeRichClipboard, shiftFormulaReferences, type RichClipboard } from "./richClipboard";
 import { SortDialog } from "./dialogs/SortDialog";
 import { PrintDialog } from "./dialogs/PrintDialog";
 
@@ -38,6 +52,9 @@ interface SheetEditorProps {
   onRequestOpen?: () => void;
   onRequestSave?: () => void;
   onRequestExportPdf?: () => void;
+  zoomLevel?: number;
+  /** Enables the platform spellchecker on the cell/formula inputs. */
+  spellcheckEnabled?: boolean;
 }
 
 export function SheetEditor(props: SheetEditorProps) {
@@ -58,7 +75,7 @@ export function SheetEditor(props: SheetEditorProps) {
   const [scrollLeft, setScrollLeft] = createSignal(0);
   const [freezeRows, setFreezeRows] = createSignal(0);
   const [freezeCols, setFreezeCols] = createSignal(0);
-  const [chartType, setChartType] = createSignal<"bar" | "line" | "pie" | null>(null);
+  const [chartType, setChartType] = createSignal<"bar" | "line" | "pie" | "area" | "scatter" | "doughnut" | null>(null);
   const [filterQuery, setFilterQuery] = createSignal("");
   const [findQuery, setFindQuery] = createSignal("");
   const [replaceWith, setReplaceWith] = createSignal("");
@@ -80,6 +97,22 @@ export function SheetEditor(props: SheetEditorProps) {
     endCol: number;
   } | null>(null);
   const [columnFilters, setColumnFilters] = createSignal<Record<number, string[]>>({});
+  const [conditionalFormatting, setConditionalFormatting] = createSignal<ConditionalFormattingRule[]>([]);
+  const [conditionalFormatType, setConditionalFormatType] = createSignal<ConditionalFormattingRule["type"]>("greaterThan");
+  const [conditionalFormatValue, setConditionalFormatValue] = createSignal("0");
+  const [conditionalFormatColor, setConditionalFormatColor] = createSignal("#dcfce7");
+  const [pivotTables, setPivotTables] = createSignal<PivotTableConfig[]>([]);
+  const [pivotRowField, setPivotRowField] = createSignal(1);
+  const [pivotValueField, setPivotValueField] = createSignal(2);
+  const [pivotAggregation, setPivotAggregation] = createSignal<PivotTableConfig["aggregation"]>("sum");
+  const [pivotColumnField, setPivotColumnField] = createSignal<number | "">("");
+  const [scenarios, setScenarios] = createSignal<ScenarioConfig[]>([]);
+  const [scenarioName, setScenarioName] = createSignal("");
+  const [slicers, setSlicers] = createSignal<SlicerConfig[]>([]);
+  const [cellComments, setCellComments] = createSignal<CellComment[]>([]);
+  const [commentDraft, setCommentDraft] = createSignal("");
+  const [slicerColumn, setSlicerColumn] = createSignal(1);
+  const [slicerTitle, setSlicerTitle] = createSignal("");
   const [filterDropdownCol, setFilterDropdownCol] = createSignal<number | null>(null);
   const [sortDialogOpen, setSortDialogOpen] = createSignal(false);
   const [sortKeys, setSortKeys] = createSignal<Array<{ col: number; ascending: boolean }>>([
@@ -101,6 +134,9 @@ export function SheetEditor(props: SheetEditorProps) {
   const [contextMenu, setContextMenu] = createSignal<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
   const [numberFormatOpen, setNumberFormatOpen] = createSignal(false);
   const [validationOpen, setValidationOpen] = createSignal(false);
+  const [hyperlinkDraft, setHyperlinkDraft] = createSignal("");
+
+  const cellImageCache = new Map<string, HTMLImageElement | null>();
 
   let gridDirtyFull = true;
   let gridDirtyRect: { x: number; y: number; w: number; h: number } | null = null;
@@ -194,21 +230,98 @@ export function SheetEditor(props: SheetEditorProps) {
     "3:4": { raw: "=25*2", display: "50" },
   });
 
-  const loadSheet = (sheet: any) => {
-    if (!sheet) return;
+  const MAX_RENDER_SPILL_CELLS = 100_000;
+
+  const gridCellsFromSheet = (sheet: any): Record<string, GridCell> => {
     const loaded: Record<string, GridCell> = {};
-    for (const [key, cell] of Object.entries(sheet.cells || {})) {
+    for (const [key, cell] of Object.entries(sheet?.cells || {})) {
       const value = cell as any;
       loaded[key] = {
-        raw: value.rawValue ?? value.raw ?? "",
+        raw: value.formula ?? value.rawValue ?? value.raw ?? "",
         display: value.displayValue ?? value.display ?? value.rawValue ?? "",
         style: value.style ?? undefined,
       };
     }
-    setCellsData(loaded);
+    // Keep dynamic-array results visible without turning spill neighbors into
+    // persisted literals. Explicit cells always win, matching spreadsheet
+    // providers that expose a bounded materialized result to the renderer.
+    for (const spill of Array.isArray(sheet?.spills) ? sheet.spills : []) {
+      const originRow = Number(spill?.originRow);
+      const originCol = Number(spill?.originCol);
+      const rows = Number(spill?.rows);
+      const cols = Number(spill?.cols);
+      if (!Number.isSafeInteger(originRow) || !Number.isSafeInteger(originCol)
+        || originRow < 1 || originCol < 1 || !Number.isSafeInteger(rows)
+        || !Number.isSafeInteger(cols) || rows < 1 || cols < 1) continue;
+      const values = Array.isArray(spill?.values) ? spill.values : [];
+      const count = Math.min(rows * cols, values.length, MAX_RENDER_SPILL_CELLS);
+      for (let index = 0; index < count; index += 1) {
+        const row = originRow + Math.floor(index / cols);
+        const col = originCol + (index % cols);
+        const key = `${row}:${col}`;
+        if (loaded[key]) continue;
+        loaded[key] = {
+          raw: "",
+          display: typeof values[index] === "string" ? values[index] : String(values[index] ?? ""),
+          spill: true,
+          style: { fontColor: "#475569" },
+        };
+      }
+    }
+    return loaded;
+  };
+
+  /** Returns bounded cached cell maps so validation lists can read another sheet. */
+  const validationCellsBySheet = () => {
+    const result: Record<string, Record<string, GridCell>> = {};
+    for (const [index, sheet] of sheets().entries()) {
+      const source = index === activeSheetIndex()
+        ? null
+        : sheetDataCache()[index] || props.initialContent?.sheets?.[index];
+      result[sheet.name] = source ? gridCellsFromSheet(source) : (index === activeSheetIndex() ? cellsData() : {});
+    }
+    return result;
+  };
+
+  const loadSheet = (sheet: any) => {
+    if (!sheet) return;
+    setCellsData(gridCellsFromSheet(sheet));
+    setFreezeRows(sheet.freezeRows || 0);
+    setFreezeCols(sheet.freezeCols || 0);
+    setColumnWidth(sheet.colWidths?.[0] || 100);
+    setRowHeight(sheet.rowHeights?.[0] || 26);
+    setColumnWidths(sheet.colWidths || {});
+    setRowHeights(sheet.rowHeights || {});
     setChartType(sheet.charts?.[0]?.chartType || null);
+    if (sheet.charts?.[0]) {
+      setChartTitle(sheet.charts[0].title || "Chart");
+      setChartRange({
+        startRow: sheet.charts[0].startRow || 1,
+        endRow: sheet.charts[0].endRow || 3,
+        startCol: sheet.charts[0].startCol || 1,
+        endCol: sheet.charts[0].endCol || 2,
+      });
+    }
     setFilterQuery(sheet.filterQuery || "");
     setMerges(sheet.merges || []);
+    const loadedFilter = sheet.autoFilter;
+    setAutoFilterEnabled(!!loadedFilter?.enabled);
+    setFilterRange(loadedFilter?.enabled ? {
+      startRow: loadedFilter.startRow || 1,
+      endRow: loadedFilter.endRow || 100,
+      startCol: loadedFilter.startCol || 1,
+      endCol: loadedFilter.endCol || 10,
+    } : null);
+    const loadedColumnFilters: Record<number, string[]> = {};
+    for (const [column, values] of Object.entries(loadedFilter?.columnFilters || {})) {
+      loadedColumnFilters[Number(column)] = Array.isArray(values) ? values as string[] : [];
+    }
+    setColumnFilters(loadedColumnFilters);
+    setConditionalFormatting(sheet.conditionalFormatting || []);
+    setPivotTables(sheet.pivotTables || []);
+    setScenarios(sheet.scenarios || []);
+    setSlicers(sheet.slicers || []);
+    setCellComments(sheet.comments || []);
   };
 
   const makeWorkbook = (cellMap: Record<string, GridCell>) =>
@@ -236,9 +349,63 @@ export function SheetEditor(props: SheetEditorProps) {
         filterRange,
         columnFilters,
         namedRanges,
+        conditionalFormatting,
+        pivotTables,
+        scenarios,
+        slicers,
+        comments: cellComments,
       },
       cellMap,
     );
+
+  const refreshPivotCells = (
+    sourceCells: Record<string, GridCell>,
+    activeSlicers: SlicerConfig[],
+  ) => {
+    const next = { ...sourceCells };
+    const updated = pivotTables().map((pivot) => {
+      clearPivotOutput(next, pivot);
+      if (pivot.columnField != null) {
+        const result = buildMultiFieldPivotTable(
+          next,
+          {
+            sourceRange: pivot.sourceRange,
+            rowField: pivot.rowField,
+            columnField: pivot.columnField,
+            valueField: pivot.valueField,
+            aggregation: pivot.aggregation,
+            outputStartRow: pivot.outputStartRow,
+            outputStartCol: pivot.outputStartCol,
+          },
+          (row) => rowMatchesSlicers(next, row, activeSlicers),
+        );
+        if (result.warning) return pivot;
+        Object.assign(next, result.cells);
+        return { ...pivot, outputRowCount: result.rowCount, outputColCount: result.colCount };
+      }
+      const result = buildPivotTable(
+        next,
+        pivot,
+        (row) => rowMatchesSlicers(next, row, activeSlicers),
+      );
+      if (result.warning) return pivot;
+      Object.assign(next, result.cells);
+      return { ...pivot, outputRowCount: result.rowCount };
+    });
+    setPivotTables(updated);
+    return next;
+  };
+
+  /** Remove a pivot's written output cells from a cell map, in place. */
+  const clearPivotOutput = (cells: Record<string, GridCell>, pivot: PivotTableConfig) => {
+    const rows = pivot.outputRowCount || 0;
+    const cols = pivot.outputColCount || (pivot.columnField != null ? 0 : 2) || 2;
+    for (let row = pivot.outputStartRow; row < pivot.outputStartRow + rows; row += 1) {
+      for (let col = pivot.outputStartCol; col < pivot.outputStartCol + cols; col += 1) {
+        delete cells[`${row}:${col}`];
+      }
+    }
+  };
 
   onMount(() => {
     if (props.initialContent?.sheets?.length) {
@@ -284,6 +451,15 @@ export function SheetEditor(props: SheetEditorProps) {
     }
   });
 
+  const findMerge = (r: number, c: number) => {
+    for (const m of merges()) {
+      if (r >= m.startRow && r <= m.endRow && c >= m.startCol && c <= m.endCol) {
+        return m;
+      }
+    }
+    return null;
+  };
+
   const getColName = (c: number) => {
     let s = "";
     let col = c;
@@ -298,6 +474,7 @@ export function SheetEditor(props: SheetEditorProps) {
   const formatDisplay = (value: string, format?: NonNullable<GridCell["style"]>["format"], decimals?: number) => {
     if (!format || format === "general") return value;
     if (format === "text") return value;
+    if (value.trim() === "") return value;
     const number = Number(value);
     if (!Number.isFinite(number)) return value;
     const d = typeof decimals === "number" ? decimals : 2;
@@ -320,14 +497,42 @@ export function SheetEditor(props: SheetEditorProps) {
   };
 
   const looksLikeUrl = (text: string) => /^https?:\/\//i.test(text) || /^www\./i.test(text);
-
   const cellHyperlink = (cell: GridCell | undefined): string | null => {
     if (!cell) return null;
-    if (cell.style?.hyperlink) return cell.style.hyperlink;
+    if (cell.style?.hyperlink) {
+      return normalizeSheetHyperlink(cell.style.hyperlink);
+    }
     const raw = (cell.raw || cell.display || "").trim();
     if (!raw || raw.startsWith("=")) return null;
     if (looksLikeUrl(raw)) return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
     return null;
+  };
+
+  const openSheetHyperlink = (href: string): boolean => {
+    const location = parseInternalSheetLocation(href);
+    if (!location) {
+      if (/^internal:/i.test(href)) showToast("This internal cell link is malformed or out of bounds.", "warning");
+      return /^internal:/i.test(href);
+    }
+    const targetIndex = location.sheetName
+      ? sheets().findIndex((sheet) => sheet.name.toLowerCase() === location.sheetName!.toLowerCase())
+      : activeSheetIndex();
+    if (targetIndex < 0) {
+      showToast(`Sheet “${location.sheetName}” was not found.`, "warning");
+      return true;
+    }
+    const workbook = makeWorkbook(cellsData());
+    props.onChange?.(workbook);
+    setActiveSheetIndex(targetIndex);
+    const source = workbook.sheets?.[targetIndex];
+    if (source) loadSheet(source);
+    setActiveCell({ row: location.row, col: location.col });
+    setSelectionAnchor({ row: location.row, col: location.col });
+    setFormulaValue(source?.cells?.[`${location.row}:${location.col}`]?.formula || source?.cells?.[`${location.row}:${location.col}`]?.rawValue || "");
+    emitCellInfo(location.row, location.col);
+    markSelectionDirty();
+    drawGrid();
+    return true;
   };
 
   const chartData = () => {
@@ -425,6 +630,7 @@ export function SheetEditor(props: SheetEditorProps) {
   };
 
   const rowMatchesFilter = (row: number) => {
+    if (!rowMatchesSlicers(cellsData(), row, slicers())) return false;
     const bounds = filterBounds();
     if (!autoFilterEnabled() || !bounds) {
       const query = filterQuery().trim().toLowerCase();
@@ -474,7 +680,7 @@ export function SheetEditor(props: SheetEditorProps) {
     return { row, remainder: 0 };
   };
 
-  const updateChart = (type: "bar" | "line" | "pie" | null) => {
+  const updateChart = (type: "bar" | "line" | "pie" | "area" | "scatter" | "doughnut" | null) => {
     pushHistory();
     setChartType(type);
     if (type) {
@@ -489,9 +695,19 @@ export function SheetEditor(props: SheetEditorProps) {
     queueMicrotask(() => props.onChange?.(makeWorkbook(cellsData())));
   };
 
+  const cellFont = (style: GridCell["style"] | undefined, row?: number) => {
+    const size = style?.fontSize || Number(fontSize()) || 12;
+    const family = style?.fontFamily || fontFamily() || "Inter, sans-serif";
+    const weight = style?.bold || row === 1 ? "bold" : "normal";
+    const italic = style?.italic ? "italic" : "normal";
+    return `${italic === "normal" ? "" : italic + " "}${weight === "normal" ? "" : weight + " "}${size}px ${family}`;
+  };
+
   const autoHeightForWrappedRows = (cellMap: Record<string, GridCell>, rows: number[]) => {
+    const ctx = canvasRef?.getContext("2d");
+    if (!ctx) return;
     const nextHeights = { ...rowHeights() };
-    const lineHeight = 16;
+    const lineHeight = 14;
     const padding = 10;
     for (const r of rows) {
       let maxLines = 1;
@@ -500,8 +716,19 @@ export function SheetEditor(props: SheetEditorProps) {
         if (!cell?.style?.wrap) continue;
         const width = Math.max(24, widthAt(c) - 12);
         const text = cell.display || "";
-        const approxChars = Math.max(1, Math.floor(width / 7));
-        const lines = Math.max(1, Math.ceil(text.length / approxChars));
+        const fontStr = cellFont(cell.style, r);
+        const words = text.split(/\s+/);
+        let currentLineWidth = 0;
+        let lines = 1;
+        for (const word of words) {
+          const w = measureTextWidth(ctx, fontStr, word + " ");
+          if (currentLineWidth + w > width && currentLineWidth > 0) {
+            lines++;
+            currentLineWidth = w;
+          } else {
+            currentLineWidth += w;
+          }
+        }
         if (lines > maxLines) maxLines = lines;
       }
       const height = Math.max(rowHeight(), maxLines * lineHeight + padding);
@@ -514,14 +741,6 @@ export function SheetEditor(props: SheetEditorProps) {
     if (!canvasRef) return;
     const ctx = canvasRef.getContext("2d");
     if (!ctx) return;
-
-    const cellFont = (style: GridCell["style"] | undefined, row?: number) => {
-      const size = style?.fontSize || Number(fontSize()) || 12;
-      const family = style?.fontFamily || fontFamily() || "Inter, sans-serif";
-      const weight = style?.bold || row === 1 ? "bold" : "normal";
-      const italic = style?.italic ? "italic" : "normal";
-      return `${italic} ${weight} ${size}px ${family}`;
-    };
 
     const drawTextWithUnderline = (
       text: string,
@@ -545,6 +764,45 @@ export function SheetEditor(props: SheetEditorProps) {
         ctx.lineWidth = 1;
         ctx.stroke();
       }
+    };
+
+    const drawConditionalBar = (
+      style: GridCell["style"] | undefined,
+      x: number,
+      y: number,
+      width: number,
+      height: number,
+    ) => {
+      const percent = style?.conditionalBarPercent;
+      if (percent === undefined || !Number.isFinite(percent)) return;
+      ctx.save();
+      ctx.globalAlpha = 0.28;
+      ctx.fillStyle = style?.conditionalBarColor || "#60a5fa";
+      ctx.fillRect(x, y, width * Math.max(0, Math.min(1, percent)), height);
+      ctx.restore();
+    };
+
+    const drawCellImage = (src: string | undefined, x: number, y: number, width: number, height: number) => {
+      if (!src || width <= 8 || height <= 8) return;
+      const cached = cellImageCache.get(src);
+      if (cached === null) return;
+      if (!cached) {
+        const image = new Image();
+        image.onload = () => {
+          cellImageCache.set(src, image);
+          markGridDirtyFull();
+          drawGrid();
+        };
+        image.onerror = () => cellImageCache.set(src, null);
+        cellImageCache.set(src, image);
+        image.src = src;
+        return;
+      }
+      if (!cached.complete || cached.naturalWidth <= 0 || cached.naturalHeight <= 0) return;
+      const scale = Math.min((width - 6) / cached.naturalWidth, (height - 6) / cached.naturalHeight, 1);
+      const imageWidth = Math.max(1, cached.naturalWidth * scale);
+      const imageHeight = Math.max(1, cached.naturalHeight * scale);
+      ctx.drawImage(cached, x + (width - imageWidth) / 2, y + (height - imageHeight) / 2, imageWidth, imageHeight);
     };
 
     const cssWidth = containerRef?.clientWidth || canvasRef.clientWidth;
@@ -577,7 +835,8 @@ export function SheetEditor(props: SheetEditorProps) {
     const rowStart = rowAtOffset(scrollTop());
     const columns: Array<{ col: number; x: number; width: number }> = [];
     let columnX = headerColWidth - columnStart.remainder;
-    while (columnX < width && columns.length < 1000) {
+    const bufferWidth = 5 * columnWidth();
+    while (columnX < width + bufferWidth && columns.length < 1000) {
       const col = columnStart.col + columns.length;
       const widthForColumn = widthAt(col);
       columns.push({ col, x: columnX, width: widthForColumn });
@@ -585,10 +844,11 @@ export function SheetEditor(props: SheetEditorProps) {
     }
     const rows: Array<{ row: number; y: number; height: number }> = [];
     const compactRows = hasHiddenFilteredRows();
+    const bufferHeight = 5 * rowHeight();
     if (compactRows) {
       let logicalRow = visualRowAtOffset(scrollTop()).row;
       let rowY = headerRowHeight - visualRowAtOffset(scrollTop()).remainder;
-      while (rowY < height && logicalRow < 100000) {
+      while (rowY < height + bufferHeight && logicalRow < 100000) {
         while (logicalRow < 100000 && !rowMatchesFilter(logicalRow)) {
           logicalRow += 1;
         }
@@ -600,7 +860,7 @@ export function SheetEditor(props: SheetEditorProps) {
       }
     } else {
       let rowY = headerRowHeight - rowStart.remainder;
-      while (rowY < height && rows.length < 100000) {
+      while (rowY < height + bufferHeight && rows.length < 100000) {
         const row = rowStart.row + rows.length;
         const heightForRow = heightAt(row);
         rows.push({ row, y: rowY, height: heightForRow });
@@ -662,14 +922,6 @@ export function SheetEditor(props: SheetEditorProps) {
     ctx.textBaseline = "middle";
 
     const currentMerges = merges();
-    const findMerge = (r: number, c: number) => {
-      for (const m of currentMerges) {
-        if (r >= m.startRow && r <= m.endRow && c >= m.startCol && c <= m.endCol) {
-          return m;
-        }
-      }
-      return null;
-    };
 
     const renderMergedCell = (m: MergeRange) => {
       const cellX = headerColWidth - scrollLeft() + offsetForColumn(m.startCol);
@@ -678,10 +930,14 @@ export function SheetEditor(props: SheetEditorProps) {
       const cellHeight = offsetForRow(m.endRow + 1) - offsetForRow(m.startRow);
       const key = `${m.startRow}:${m.startCol}`;
       const cell = data[key];
-      const style = cell?.style;
+      const style = cell
+        ? { ...cell.style, ...conditionalStyleForCell(cell, m.startRow, m.startCol, conditionalFormatting()) }
+        : undefined;
 
       ctx.fillStyle = style?.bgColor || "#ffffff";
       ctx.fillRect(cellX, cellY, cellWidth, cellHeight);
+      drawConditionalBar(style, cellX, cellY, cellWidth, cellHeight);
+      drawCellImage(style?.image, cellX, cellY, cellWidth, cellHeight);
 
       ctx.strokeStyle = "#e2e8f0";
       ctx.lineWidth = 1;
@@ -738,16 +994,19 @@ export function SheetEditor(props: SheetEditorProps) {
         }
 
         const key = `${r}:${c}`;
+        if (column.x > width || column.x + column.width < 0 || row.y > height || row.y + row.height < 0) continue;
         if (data[key]) {
           const x = column.x + 6;
           const y = row.y + row.height / 2;
           const cell = data[key];
-          const style = cell.style;
+          const style = { ...cell.style, ...conditionalStyleForCell(cell, r, c, conditionalFormatting()) };
           const link = cellHyperlink(cell);
           if (style?.bgColor) {
             ctx.fillStyle = style.bgColor;
             ctx.fillRect(column.x, row.y, column.width, row.height);
           }
+          drawConditionalBar(style, column.x, row.y, column.width, row.height);
+          drawCellImage(style?.image, column.x, row.y, column.width, row.height);
           ctx.fillStyle = link ? "#2563eb" : style?.fontColor || "#0f172a";
           const fontStr = cellFont(style, r);
           ctx.font = fontStr;
@@ -797,6 +1056,29 @@ export function SheetEditor(props: SheetEditorProps) {
           }
         }
       }
+
+      // Comment markers: red corner triangle on cells with an open comment.
+      const openComments = new Set(
+        cellComments()
+          .filter((comment) => !comment.resolved)
+          .map((comment) => `${comment.row}:${comment.col}`),
+      );
+      if (openComments.size > 0) {
+        for (const row of rows) {
+          for (const column of columns) {
+            if (!openComments.has(`${row.row}:${column.col}`)) continue;
+            const cx = column.x + column.width;
+            const cy = row.y;
+            ctx.fillStyle = "#e74c3c";
+            ctx.beginPath();
+            ctx.moveTo(cx - 7, cy);
+            ctx.lineTo(cx, cy);
+            ctx.lineTo(cx, cy + 7);
+            ctx.closePath();
+            ctx.fill();
+          }
+        }
+      }
     }
 
     // Paint frozen panes over the scrolling grid. The overlay keeps the
@@ -834,6 +1116,7 @@ export function SheetEditor(props: SheetEditorProps) {
           ctx.stroke();
           if (value) {
             const cellStyle = value.style;
+            drawCellImage(cellStyle?.image, x, y, widthForColumn, heightForRow);
             ctx.fillStyle = cellStyle?.fontColor || "#0f172a";
             ctx.font = cellFont(cellStyle, r);
             ctx.textAlign = "left";
@@ -951,8 +1234,13 @@ export function SheetEditor(props: SheetEditorProps) {
 
     if (x > headerColWidth && y > headerRowHeight) {
       setFilterDropdownCol(null);
-      const col = columnAtOffset(x - headerColWidth).col;
-      const row = rowAtOffset(y - headerRowHeight).row;
+      let col = columnAtOffset(x - headerColWidth).col;
+      let row = rowAtOffset(y - headerRowHeight).row;
+      const merge = findMerge(row, col);
+      if (merge) {
+        row = merge.startRow;
+        col = merge.startCol;
+      }
       setActiveCell({ row, col });
       if (e.shiftKey) {
         // Preserve the anchor for a rectangular Shift-click extension.
@@ -1044,6 +1332,10 @@ export function SheetEditor(props: SheetEditorProps) {
     drawGrid();
   };
 
+  const moveActiveCell = (dRow: number, dCol: number, extend = false) => {
+    selectCell(activeCell().row + dRow, activeCell().col + dCol, extend);
+  };
+
   const selectCell = (row: number, col: number, extend = false) => {
     const next = { row: Math.max(1, row), col: Math.max(1, col) };
     setActiveCell(next);
@@ -1067,9 +1359,20 @@ export function SheetEditor(props: SheetEditorProps) {
     drawGrid();
   };
 
+  let commitInFlight: Promise<void> | null = null;
+
   const commitCellEdit = async (val: string) => {
+    if (commitInFlight) {
+      // Coalesce: the most recent value wins when the previous IPC completes.
+      await commitInFlight.catch(() => undefined);
+    }
     const { row, col } = activeCell();
     const key = `${row}:${col}`;
+    if (cellsData()[key]?.spill) {
+      showToast("Spill results are read-only; edit the originating formula instead.");
+      setEditing(false);
+      return;
+    }
     const newMap = { ...cellsData() };
     if (!val.trim()) {
       delete newMap[key];
@@ -1085,20 +1388,25 @@ export function SheetEditor(props: SheetEditorProps) {
     drawGrid();
 
     const workbook = makeWorkbook(newMap);
-    try {
-      const recalculated = await commands.setWorkbookCellValue(
-        workbook,
-        activeSheetIndex(),
-        row,
-        col,
-        val,
-      );
-      const active = recalculated.sheets?.[activeSheetIndex()];
-      if (active) loadSheet(active);
-      props.onChange?.(recalculated);
-    } catch (e) {
-      props.onChange?.(workbook);
-    }
+    const run = (async () => {
+      try {
+        const recalculated = await commands.setWorkbookCellValue(
+          workbook,
+          activeSheetIndex(),
+          row,
+          col,
+          val,
+        );
+        const active = recalculated.sheets?.[activeSheetIndex()];
+        if (active) loadSheet(active);
+        props.onChange?.(recalculated);
+      } catch (e) {
+        props.onChange?.(workbook);
+      }
+    })();
+    commitInFlight = run;
+    await run;
+    if (commitInFlight === run) commitInFlight = null;
   };
 
   const importCsv = async () => {
@@ -1162,6 +1470,226 @@ export function SheetEditor(props: SheetEditorProps) {
     props.onChange?.(makeWorkbook(next));
     markSelectionDirty();
     drawGrid();
+  };
+
+  const addConditionalFormatRule = () => {
+    const type = conditionalFormatType();
+    const rule: ConditionalFormattingRule = {
+      range: selectedBounds(),
+      type,
+      value: conditionalFormatValue(),
+      style: { bgColor: conditionalFormatColor() },
+      ...(type === "colorScale"
+        ? { scaleColors: [conditionalFormatColor(), "#fef08a", "#86efac"] }
+        : {}),
+    };
+    setConditionalFormatting((previous) => [...previous, rule]);
+    props.onChange?.(makeWorkbook(cellsData()));
+    markGridDirtyFull();
+    drawGrid();
+  };
+
+  const removeConditionalFormatRule = (index: number) => {
+    setConditionalFormatting((previous) => previous.filter((_, ruleIndex) => ruleIndex !== index));
+    props.onChange?.(makeWorkbook(cellsData()));
+    markGridDirtyFull();
+    drawGrid();
+  };
+
+  const createPivotTable = () => {
+    const bounds = selectedBounds();
+    const columnField = pivotColumnField();
+    const config: PivotTableConfig = {
+      id: `pivot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      sourceRange: bounds,
+      rowField: pivotRowField(),
+      columnField: columnField === "" ? undefined : columnField,
+      valueField: pivotValueField(),
+      aggregation: pivotAggregation(),
+      outputStartRow: bounds.endRow + 2,
+      outputStartCol: bounds.startCol,
+    };
+    const slicerMatch = (row: number) => rowMatchesSlicers(cellsData(), row, slicers());
+    const result = config.columnField != null
+      ? buildMultiFieldPivotTable(
+          cellsData(),
+          {
+            sourceRange: config.sourceRange,
+            rowField: config.rowField,
+            columnField: config.columnField,
+            valueField: config.valueField,
+            aggregation: config.aggregation,
+            outputStartRow: config.outputStartRow,
+            outputStartCol: config.outputStartCol,
+          },
+          slicerMatch,
+        )
+      : buildPivotTable(cellsData(), config, slicerMatch);
+    if (result.warning) {
+      showToast(result.warning, "warning");
+      return;
+    }
+    config.outputRowCount = result.rowCount;
+    config.outputColCount = "colCount" in result ? (result as { colCount: number }).colCount : 2;
+    const next = { ...cellsData(), ...result.cells };
+    pushHistory();
+    setCellsData(next);
+    setPivotTables((previous) => [...previous, config]);
+    props.onChange?.(makeWorkbook(next));
+    markGridDirtyFull();
+    drawGrid();
+  };
+
+  const removePivotTable = (id: string) => {
+    const target = pivotTables().find((pivot) => pivot.id === id);
+    if (!target) return;
+    const next = { ...cellsData() };
+    clearPivotOutput(next, target);
+    setPivotTables((previous) => previous.filter((pivot) => pivot.id !== id));
+    setCellsData(next);
+    props.onChange?.(makeWorkbook(next));
+    markGridDirtyFull();
+    drawGrid();
+  };
+
+  const captureScenario = () => {
+    const bounds = selectedBounds();
+    const name = scenarioName().trim() || `Scenario ${scenarios().length + 1}`;
+    let scenario: ScenarioConfig;
+    try {
+      scenario = captureScenarioRange(
+        cellsData(),
+        bounds,
+        `scenario-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        name,
+      );
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Could not capture scenario.", "warning");
+      return;
+    }
+    pushHistory();
+    setScenarios((previous) => [...previous, scenario]);
+    setScenarioName("");
+    props.onChange?.(makeWorkbook(cellsData()));
+    showToast(`Saved ${name}`, "success");
+  };
+
+  const applyScenario = async (scenario: ScenarioConfig) => {
+    let next: Record<string, GridCell>;
+    try {
+      next = applyScenarioOverrides(cellsData(), scenario);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Could not apply scenario.", "warning");
+      return;
+    }
+    pushHistory();
+    setCellsData(next);
+    markGridDirtyFull();
+    try {
+      const recalculated = await commands.recalculateWorkbook(makeWorkbook(next));
+      loadSheet(recalculated.sheets?.[activeSheetIndex()]);
+      props.onChange?.(recalculated);
+    } catch {
+      props.onChange?.(makeWorkbook(next));
+      drawGrid();
+    }
+  };
+
+  const deleteScenario = (id: string) => {
+    pushHistory();
+    setScenarios((previous) => previous.filter((scenario) => scenario.id !== id));
+    props.onChange?.(makeWorkbook(cellsData()));
+  };
+
+  const addSlicer = () => {
+    const bounds = selectedBounds();
+    try {
+      const slicer = createSlicer(
+        cellsData(),
+        bounds,
+        slicerColumn(),
+        slicerTitle(),
+        `slicer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      );
+      if (slicerValues(cellsData(), slicer).length === 0) {
+        showToast("Slicer source must contain at least one value.", "warning");
+        return;
+      }
+      pushHistory();
+      setSlicers((previous) => [...previous, slicer]);
+      setSlicerTitle("");
+      props.onChange?.(makeWorkbook(cellsData()));
+      markGridDirtyFull();
+      drawGrid();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Could not create slicer.", "warning");
+    }
+  };
+
+  const updateSlicerSelection = (id: string, value: string) => {
+    const target = slicers().find((slicer) => slicer.id === id);
+    if (!target) return;
+    const next = toggleSlicerValue(target, value, slicerValues(cellsData(), target));
+    pushHistory();
+    const nextSlicers = slicers().map((slicer) => slicer.id === id ? next : slicer);
+    setSlicers(nextSlicers);
+    const nextCells = refreshPivotCells(cellsData(), nextSlicers);
+    setCellsData(nextCells);
+    props.onChange?.(makeWorkbook(nextCells));
+    markGridDirtyFull();
+    drawGrid();
+  };
+
+  const clearSlicerSelection = (id: string) => {
+    const target = slicers().find((slicer) => slicer.id === id);
+    if (!target || target.selectedValues.length === 0) return;
+    pushHistory();
+    const nextSlicers = slicers().map((slicer) => slicer.id === id ? { ...slicer, selectedValues: [] } : slicer);
+    setSlicers(nextSlicers);
+    const nextCells = refreshPivotCells(cellsData(), nextSlicers);
+    setCellsData(nextCells);
+    props.onChange?.(makeWorkbook(nextCells));
+    markGridDirtyFull();
+    drawGrid();
+  };
+
+  const removeSlicer = (id: string) => {
+    if (!slicers().some((slicer) => slicer.id === id)) return;
+    pushHistory();
+    setSlicers((previous) => previous.filter((slicer) => slicer.id !== id));
+    props.onChange?.(makeWorkbook(cellsData()));
+    markGridDirtyFull();
+    drawGrid();
+  };
+
+  // —— Cell comments (offline review) ————————————————
+  const addCommentToActiveCell = () => {
+    const cell = activeCell();
+    const made = makeCellComment(cell.row, cell.col, commentDraft(), "You", cellComments());
+    if ("error" in made) {
+      showToast(made.error, "warning");
+      return;
+    }
+    pushHistory();
+    setCellComments(upsertCellComment(cellComments(), made.comment));
+    setCommentDraft("");
+    props.onChange?.(makeWorkbook(cellsData()));
+    showToast("Comment added", "success");
+  };
+
+  const toggleCommentResolved = (id: string) => {
+    const target = cellComments().find((comment) => comment.id === id);
+    if (!target) return;
+    pushHistory();
+    setCellComments(setCellCommentResolved(cellComments(), id, !target.resolved));
+    props.onChange?.(makeWorkbook(cellsData()));
+  };
+
+  const deleteComment = (id: string) => {
+    if (!cellComments().some((comment) => comment.id === id)) return;
+    pushHistory();
+    setCellComments(removeCellComment(cellComments(), id));
+    props.onChange?.(makeWorkbook(cellsData()));
   };
 
   const activeNumberFormat = (): NumberFormatValue => ({
@@ -1322,15 +1850,23 @@ export function SheetEditor(props: SheetEditorProps) {
   tr{page-break-inside:avoid}
   @media print{body{margin:0}}
 </style></head><body><table>${rows.join("")}</table>
-<script>window.onload=()=>{window.print();setTimeout(()=>window.close(),300)}</script>
 </body></html>`;
-    const win = window.open("", "_blank", "noopener,noreferrer,width=900,height=700");
-    if (!win) {
-      window.print();
-      return;
+    const iframe = document.createElement("iframe");
+    iframe.style.position = "absolute";
+    iframe.style.width = "0";
+    iframe.style.height = "0";
+    iframe.style.border = "none";
+    document.body.appendChild(iframe);
+    const win = iframe.contentWindow;
+    if (win) {
+      win.document.write(html);
+      win.document.close();
+      win.focus();
+      win.print();
     }
-    win.document.write(html);
-    win.document.close();
+    setTimeout(() => {
+      document.body.removeChild(iframe);
+    }, 1000);
     setPrintDialogOpen(false);
   };
 
@@ -1357,6 +1893,38 @@ export function SheetEditor(props: SheetEditorProps) {
 
   const pasteTsv = async () => {
     try {
+      // Internal rich paste first: keeps styles and shifts relative formula
+      // references exactly like Excel's copy/paste. Falls through to the
+      // system TSV clipboard for anything copied outside Redoc.
+      const rich = takeRichClipboard();
+      if (rich) {
+        const origin = activeCell();
+        const next = { ...cellsData() };
+        for (const [key, cell] of Object.entries(rich.cells)) {
+          const [rowOffset, colOffset] = key.split(":").map(Number);
+          const targetKey = `${origin.row + rowOffset}:${origin.col + colOffset}`;
+          const deltaRow = origin.row - rich.startRow;
+          const deltaCol = origin.col - rich.startCol;
+          const shiftedRaw = cell.raw.startsWith("=")
+            ? shiftFormulaReferences(cell.raw, deltaRow, deltaCol)
+            : cell.raw;
+          if (!shiftedRaw && !cell.style) {
+            delete next[targetKey];
+            continue;
+          }
+          next[targetKey] = {
+            raw: shiftedRaw,
+            display: shiftedRaw.startsWith("=") ? "#EVAL..." : shiftedRaw,
+            style: cell.style ? { ...cell.style } as any : undefined,
+          };
+        }
+        pushHistory();
+        setCellsData(next);
+        const recalculated = await commands.recalculateWorkbook(makeWorkbook(next));
+        loadSheet(recalculated.sheets?.[activeSheetIndex()]);
+        props.onChange?.(recalculated);
+        return;
+      }
       const text = await navigator.clipboard.readText();
       if (!text) return;
       const origin = activeCell();
@@ -1511,20 +2079,28 @@ export function SheetEditor(props: SheetEditorProps) {
     }
   };
 
-  const captureSnapshot = (): SheetSnapshot => ({
-    cells: structuredClone(cellsData()),
-    merges: structuredClone(merges()),
-    autoFilterEnabled: autoFilterEnabled(),
-    filterRange: filterRange() ? { ...filterRange()! } : null,
-    columnFilters: structuredClone(columnFilters()),
-    columnWidths: structuredClone(columnWidths()),
-    rowHeights: structuredClone(rowHeights()),
-    chartType: chartType(),
-    chartTitle: chartTitle(),
-    chartRange: { ...chartRange() },
-    sheetsMeta: sheets().map((s) => ({ ...s })),
-    activeSheetIndex: activeSheetIndex(),
-  });
+  const captureSnapshot = (): SheetSnapshot => {
+    const data: SheetSnapshot = {
+      cells: cellsData(),
+      merges: merges(),
+      autoFilterEnabled: autoFilterEnabled(),
+      filterRange: filterRange() ? { ...filterRange()! } : null,
+      columnFilters: columnFilters(),
+      columnWidths: columnWidths(),
+      rowHeights: rowHeights(),
+      chartType: chartType(),
+      chartTitle: chartTitle(),
+      chartRange: { ...chartRange() },
+      conditionalFormatting: conditionalFormatting(),
+      pivotTables: pivotTables(),
+      scenarios: scenarios(),
+      slicers: slicers(),
+      comments: cellComments(),
+      sheetsMeta: sheets().map((s) => ({ ...s })),
+      activeSheetIndex: activeSheetIndex(),
+    };
+    return structuredClone(data);
+  };
 
   const restoreSnapshot = async (snap: SheetSnapshot) => {
     setMerges(snap.merges);
@@ -1536,6 +2112,11 @@ export function SheetEditor(props: SheetEditorProps) {
     setChartType(snap.chartType);
     setChartTitle(snap.chartTitle);
     setChartRange(snap.chartRange);
+    setConditionalFormatting(snap.conditionalFormatting);
+    setPivotTables(snap.pivotTables || []);
+    setScenarios(snap.scenarios || []);
+    setSlicers(snap.slicers || []);
+    setCellComments(snap.comments || []);
     setSheets(snap.sheetsMeta);
     setActiveSheetIndex(snap.activeSheetIndex);
     setCellsData(snap.cells);
@@ -1582,7 +2163,54 @@ export function SheetEditor(props: SheetEditorProps) {
     drawGrid();
   };
 
+  const applyActiveHyperlink = () => {
+    const raw = hyperlinkDraft().trim();
+    if (!raw) {
+      updateActiveStyle({ hyperlink: undefined });
+      return;
+    }
+    const normalized = normalizeSheetHyperlink(raw);
+    if (!normalized) {
+      showToast("Use an https/http, mailto, tel, or internal cell link.", "error");
+      return;
+    }
+    setHyperlinkDraft(normalized);
+    updateActiveStyle({ hyperlink: normalized });
+  };
+
+  const insertImage = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/png,image/jpeg,image/gif,image/webp";
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      if (file.size > 8 * 1024 * 1024) {
+        showToast("Images are limited to 8 MB per cell.", "error");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onerror = () => showToast("The image could not be read.", "error");
+      reader.onload = () => {
+        const source = String(reader.result || "");
+        if (!/^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(source)) {
+          showToast("Choose a PNG, JPEG, GIF, or WebP image.", "error");
+          return;
+        }
+        updateActiveStyle({ image: source });
+        showToast("Image inserted into the active cell.", "success");
+      };
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  };
+
   const activeStyle = () => cellsData()[`${activeCell().row}:${activeCell().col}`]?.style;
+
+  createEffect(() => {
+    const cell = cellsData()[`${activeCell().row}:${activeCell().col}`];
+    setHyperlinkDraft(cell?.style?.hyperlink || "");
+  });
 
   onMount(() => {
     const onCommand = (event: Event) => {
@@ -1604,6 +2232,7 @@ export function SheetEditor(props: SheetEditorProps) {
       else if (detail.id === "sort-multi") setSortDialogOpen(true);
       else if (detail.id === "filter") toggleAutoFilter();
       else if (detail.id === "insert-chart") updateChart(chartType() ? null : "bar");
+      else if (detail.id === "insert-image") insertImage();
       else if (detail.id === "insert-sheet") addSheet();
       else if (detail.id === "delete-sheet") deleteSheet(activeSheetIndex());
       else if (detail.id === "print") setPrintDialogOpen(true);
@@ -1775,6 +2404,11 @@ export function SheetEditor(props: SheetEditorProps) {
     if (!query) return;
     const needle = matchCase() ? query : query.toLowerCase();
     const entries = Object.entries(cellsData());
+    entries.sort((a, b) => {
+      const [rA, cA] = a[0].split(':').map(Number);
+      const [rB, cB] = b[0].split(':').map(Number);
+      return rA !== rB ? rA - rB : cA - cB;
+    });
     const currentKey = `${activeCell().row}:${activeCell().col}`;
     const start = Math.max(0, entries.findIndex(([key]) => key === currentKey) + 1);
     const ordered = [...entries.slice(start), ...entries.slice(0, start)];
@@ -1919,15 +2553,44 @@ export function SheetEditor(props: SheetEditorProps) {
   const selectedTsv = () => {
     const bounds = selectedBounds();
     return Array.from({ length: bounds.endRow - bounds.startRow + 1 }, (_, rowOffset) =>
-      Array.from({ length: bounds.endCol - bounds.startCol + 1 }, (_, colOffset) =>
-        cellsData()[`${bounds.startRow + rowOffset}:${bounds.startCol + colOffset}`]?.raw || ""
-      ).join("\t")
+      Array.from({ length: bounds.endCol - bounds.startCol + 1 }, (_, colOffset) => {
+        const raw = cellsData()[`${bounds.startRow + rowOffset}:${bounds.startCol + colOffset}`]?.raw || "";
+        if (raw.includes('\n') || raw.includes('\t') || raw.includes('"')) {
+          return `"${raw.replace(/"/g, '""')}"`;
+        }
+        return raw;
+      }).join("\t")
     ).join("\n");
   };
 
+  const selectedRichClipboard = (cut: boolean): RichClipboard => {
+    const bounds = selectedBounds();
+    const cells: RichClipboard["cells"] = {};
+    for (let row = bounds.startRow; row <= bounds.endRow; row += 1) {
+      for (let col = bounds.startCol; col <= bounds.endCol; col += 1) {
+        const cell = cellsData()[`${row}:${col}`];
+        if (!cell) continue;
+        cells[`${row - bounds.startRow}:${col - bounds.startCol}`] = {
+          raw: cell.raw,
+          display: cell.display,
+          style: cell.style ? { ...cell.style } as Record<string, unknown> : undefined,
+        };
+      }
+    }
+    return {
+      kind: "sheet",
+      startRow: bounds.startRow,
+      startCol: bounds.startCol,
+      endRow: bounds.endRow,
+      endCol: bounds.endCol,
+      cells,
+      cut,
+    };
+  };
+
   const cutSelection = async () => {
-    const text = selectedTsv();
-    await navigator.clipboard.writeText(text);
+    await navigator.clipboard.writeText(selectedTsv()).catch(() => {});
+    setRichClipboard(selectedRichClipboard(true));
     const next = { ...cellsData() };
     const bounds = selectedBounds();
     for (let row = bounds.startRow; row <= bounds.endRow; row += 1) {
@@ -1943,7 +2606,8 @@ export function SheetEditor(props: SheetEditorProps) {
   };
 
   const copySelection = async () => {
-    await navigator.clipboard.writeText(selectedTsv());
+    await navigator.clipboard.writeText(selectedTsv()).catch(() => {});
+    setRichClipboard(selectedRichClipboard(false));
   };
 
   const sidebarPanels = (): SidebarPanel[] => [
@@ -1967,6 +2631,23 @@ export function SheetEditor(props: SheetEditorProps) {
             format={activeStyle()?.format || "general"}
           </div>
           <div>Colors: {activeStyle()?.fontColor || "default"} / {activeStyle()?.bgColor || "none"}</div>
+          <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "8px", "margin-top": "2px" }}>
+            <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "12px" }}>
+              Cell hyperlink
+              <input
+                class="g-toolbar-input"
+                aria-label="Cell hyperlink"
+                value={hyperlinkDraft()}
+                onInput={(event) => setHyperlinkDraft(event.currentTarget.value)}
+                placeholder="https://… or internal:Sheet2!B4"
+                style={{ width: "100%" }}
+              />
+            </label>
+            <div style={{ display: "flex", gap: "6px", "margin-top": "6px" }}>
+              <button type="button" class="g-toolbar-btn active" onClick={applyActiveHyperlink}>Apply link</button>
+              <button type="button" class="g-toolbar-btn" onClick={() => { setHyperlinkDraft(""); applyActiveHyperlink(); }}>Clear</button>
+            </div>
+          </div>
         </div>
       ),
     },
@@ -2005,6 +2686,211 @@ export function SheetEditor(props: SheetEditorProps) {
               Add named range
             </button>
           </div>
+          <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "8px", "margin-top": "4px" }}>
+            <div style={{ "font-weight": "600", "margin-bottom": "6px" }}>Conditional formatting</div>
+            <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "6px" }}>Applies to the current selection.</div>
+            <select
+              class="g-toolbar-select"
+              aria-label="Conditional formatting rule"
+              value={conditionalFormatType()}
+              onChange={(event) => setConditionalFormatType(event.currentTarget.value as ConditionalFormattingRule["type"])}
+              style={{ width: "100%", "margin-bottom": "5px" }}
+            >
+              <option value="greaterThan">Greater than</option>
+              <option value="lessThan">Less than</option>
+              <option value="equalTo">Equal to</option>
+              <option value="textContains">Text contains</option>
+              <option value="dataBar">Data bar</option>
+              <option value="colorScale">Color scale</option>
+            </select>
+            <input
+              class="g-toolbar-input"
+              aria-label="Conditional formatting value"
+              value={conditionalFormatValue()}
+              onInput={(event) => setConditionalFormatValue(event.currentTarget.value)}
+              placeholder="Value"
+              style={{ width: "100%", "margin-bottom": "5px" }}
+            />
+            <input
+              type="color"
+              aria-label="Conditional formatting color"
+              value={conditionalFormatColor()}
+              onInput={(event) => setConditionalFormatColor(event.currentTarget.value)}
+              style={{ width: "100%", height: "28px", "margin-bottom": "5px" }}
+            />
+            <button type="button" class="g-toolbar-btn" style={{ width: "100%" }} onClick={addConditionalFormatRule}>Add rule</button>
+            <For each={conditionalFormatting()}>
+              {(rule, index) => (
+                <div style={{ display: "flex", "align-items": "center", gap: "5px", "font-size": "11px", "margin-top": "5px" }}>
+                  <span style={{ flex: 1, overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>{rule.type} {rule.value || ""}</span>
+                  <button type="button" class="g-toolbar-btn" aria-label={`Remove conditional formatting rule ${index() + 1}`} onClick={() => removeConditionalFormatRule(index())}>✕</button>
+                </div>
+              )}
+            </For>
+            <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "8px", "margin-top": "8px" }}>
+              <div style={{ "font-weight": "600", "margin-bottom": "6px" }}>Pivot summary</div>
+              <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "6px" }}>Select a source range with a header row, then choose the row and value columns.</div>
+              <div style={{ display: "flex", gap: "5px" }}>
+                <label style={{ flex: 1, "font-size": "11px" }}>Row column
+                  <input type="number" min="1" value={pivotRowField()} onInput={(e) => setPivotRowField(Math.max(1, Number(e.currentTarget.value) || 1))} class="g-toolbar-input" style={{ width: "100%" }} />
+                </label>
+                <label style={{ flex: 1, "font-size": "11px" }}>Value column
+                  <input type="number" min="1" value={pivotValueField()} onInput={(e) => setPivotValueField(Math.max(1, Number(e.currentTarget.value) || 1))} class="g-toolbar-input" style={{ width: "100%" }} />
+                </label>
+              </div>
+              <label style={{ display: "block", "font-size": "11px", "margin-top": "5px" }}>Column column (optional — cross-tab)
+                <input
+                  type="number"
+                  min="1"
+                  aria-label="Pivot column field"
+                  class="g-toolbar-input"
+                  style={{ width: "100%" }}
+                  value={pivotColumnField()}
+                  onInput={(e) => {
+                    const raw = e.currentTarget.value;
+                    setPivotColumnField(raw === "" ? "" : Math.max(1, Number(raw) || 1));
+                  }}
+                />
+              </label>
+              <select class="g-toolbar-select" aria-label="Pivot aggregation" value={pivotAggregation()} onChange={(e) => setPivotAggregation(e.currentTarget.value as PivotTableConfig["aggregation"])} style={{ width: "100%", "margin-top": "5px" }}>
+                <option value="sum">Sum</option>
+                <option value="count">Count</option>
+                <option value="average">Average</option>
+              </select>
+              <button type="button" class="g-toolbar-btn" style={{ width: "100%", "margin-top": "5px" }} onClick={createPivotTable}>Create pivot summary below selection</button>
+              <For each={pivotTables()}>
+                {(pivot) => (
+                  <div style={{ display: "flex", "align-items": "center", gap: "5px", "font-size": "11px", "margin-top": "5px" }}>
+                    <span style={{ flex: 1 }}>Pivot {pivot.aggregation} · {pivot.outputRowCount || 0} rows</span>
+                    <button type="button" class="g-toolbar-btn" aria-label={`Remove pivot ${pivot.id}`} onClick={() => removePivotTable(pivot.id)}>✕</button>
+                  </div>
+                )}
+              </For>
+            </div>
+            <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "8px", "margin-top": "8px" }}>
+              <div style={{ "font-weight": "600", "margin-bottom": "6px" }}>What-if scenarios</div>
+              <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "6px" }}>Capture the selected cells, then apply a saved set of overrides later.</div>
+              <input
+                class="g-toolbar-input"
+                aria-label="Scenario name"
+                value={scenarioName()}
+                onInput={(event) => setScenarioName(event.currentTarget.value)}
+                placeholder={`Scenario ${scenarios().length + 1}`}
+                style={{ width: "100%", "margin-bottom": "5px" }}
+              />
+              <button type="button" class="g-toolbar-btn" style={{ width: "100%" }} onClick={captureScenario}>Capture selected cells</button>
+              <For each={scenarios()}>
+                {(scenario) => (
+                  <div style={{ display: "flex", "align-items": "center", gap: "5px", "font-size": "11px", "margin-top": "5px" }}>
+                    <span style={{ flex: 1, overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>{scenario.name} · {scenario.changes.length} cells</span>
+                    <button type="button" class="g-toolbar-btn" aria-label={`Apply scenario ${scenario.name}`} onClick={() => void applyScenario(scenario)}>Apply</button>
+                    <button type="button" class="g-toolbar-btn" aria-label={`Delete scenario ${scenario.name}`} onClick={() => deleteScenario(scenario.id)}>✕</button>
+                  </div>
+                )}
+              </For>
+            </div>
+            <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "8px", "margin-top": "8px" }}>
+              <div style={{ "font-weight": "600", "margin-bottom": "6px" }}>Slicers</div>
+              <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "6px" }}>Create a reusable value filter for the selected table range. An empty selection shows all values.</div>
+              <div style={{ display: "flex", gap: "5px" }}>
+                <label style={{ flex: 1, "font-size": "11px" }}>Column
+                  <input
+                    type="number"
+                    min="1"
+                    value={slicerColumn()}
+                    onInput={(event) => setSlicerColumn(Math.max(1, Number(event.currentTarget.value) || 1))}
+                    class="g-toolbar-input"
+                    style={{ width: "100%" }}
+                  />
+                </label>
+                <label style={{ flex: 2, "font-size": "11px" }}>Title
+                  <input
+                    class="g-toolbar-input"
+                    aria-label="Slicer title"
+                    value={slicerTitle()}
+                    onInput={(event) => setSlicerTitle(event.currentTarget.value)}
+                    placeholder="Column filter"
+                    style={{ width: "100%" }}
+                  />
+                </label>
+              </div>
+              <button type="button" class="g-toolbar-btn" style={{ width: "100%", "margin-top": "5px" }} onClick={addSlicer}>Create slicer from selection</button>
+              <For each={slicers()}>
+                {(slicer) => {
+                  const values = () => slicerValues(cellsData(), slicer);
+                  return (
+                    <div style={{ "border-top": "1px solid var(--border-color)", "margin-top": "7px", "padding-top": "6px" }}>
+                      <div style={{ display: "flex", "align-items": "center", gap: "5px" }}>
+                        <span style={{ flex: 1, "font-size": "11px", "font-weight": "600" }}>{slicer.title}</span>
+                        <button type="button" class="g-toolbar-btn" onClick={() => clearSlicerSelection(slicer.id)}>All</button>
+                        <button type="button" class="g-toolbar-btn" aria-label={`Remove slicer ${slicer.title}`} onClick={() => removeSlicer(slicer.id)}>✕</button>
+                      </div>
+                      <div style={{ display: "flex", "flex-direction": "column", gap: "2px", "max-height": "150px", overflow: "auto", "margin-top": "4px" }}>
+                        <For each={values()}>
+                          {(value) => (
+                            <label style={{ display: "flex", gap: "5px", "align-items": "center", "font-size": "11px" }}>
+                              <input
+                                type="checkbox"
+                                checked={slicer.selectedValues.length === 0 || slicer.selectedValues.includes(value)}
+                                onChange={() => updateSlicerSelection(slicer.id, value)}
+                              />
+                              <span>{value || "(blank)"}</span>
+                            </label>
+                          )}
+                        </For>
+                      </div>
+                    </div>
+                  );
+                }}
+              </For>
+            </div>
+            <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "8px", "margin-top": "8px" }}>
+              <div style={{ "font-weight": "600", "margin-bottom": "6px" }}>
+                Comments {openCommentCount(cellComments()) > 0 ? `· ${openCommentCount(cellComments())} open` : ""}
+              </div>
+              <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "6px" }}>
+                Comments attach to the active cell and persist with the workbook.
+              </div>
+              <textarea
+                class="g-toolbar-input"
+                aria-label="New comment"
+                placeholder="Comment on the active cell…"
+                value={commentDraft()}
+                onInput={(event) => setCommentDraft(event.currentTarget.value)}
+                rows={2}
+                style={{ width: "100%", resize: "vertical" }}
+              />
+              <button type="button" class="g-toolbar-btn" style={{ width: "100%", "margin-top": "5px" }} onClick={addCommentToActiveCell}>
+                Comment on {getColName(activeCell().col)}{activeCell().row}
+              </button>
+              <Show when={commentsForCell(cellComments(), activeCell().row, activeCell().col).length > 0}>
+                <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-top": "8px", "margin-bottom": "3px" }}>
+                  On this cell
+                </div>
+              </Show>
+              <For each={commentsForCell(cellComments(), activeCell().row, activeCell().col)}>
+                {(comment) => (
+                  <div style={{ border: "1px solid var(--border-color)", "border-radius": "6px", padding: "5px", "margin-top": "5px" }}>
+                    <div style={{ display: "flex", "align-items": "center", gap: "5px" }}>
+                      <span style={{ flex: 1, "font-size": "11px", "font-weight": "600" }}>{comment.author}</span>
+                      <button
+                        type="button"
+                        class="g-toolbar-btn"
+                        aria-label={comment.resolved ? `Reopen comment ${comment.id}` : `Resolve comment ${comment.id}`}
+                        onClick={() => toggleCommentResolved(comment.id)}
+                      >
+                        {comment.resolved ? "Reopen" : "Resolve"}
+                      </button>
+                      <button type="button" class="g-toolbar-btn" aria-label={`Delete comment ${comment.id}`} onClick={() => deleteComment(comment.id)}>✕</button>
+                    </div>
+                    <div style={{ "font-size": "11px", "margin-top": "3px", color: comment.resolved ? "var(--text-muted)" : "var(--text-primary)", "text-decoration": comment.resolved ? "line-through" : "none" }}>
+                      {comment.text}
+                    </div>
+                  </div>
+                )}
+              </For>
+            </div>
+          </div>
         </div>
       ),
     },
@@ -2032,12 +2918,15 @@ export function SheetEditor(props: SheetEditorProps) {
             <select
               aria-label="Chart type"
               value={chartType() || "bar"}
-              onChange={(e) => updateChart(e.currentTarget.value as "bar" | "line" | "pie")}
+              onChange={(e) => updateChart(e.currentTarget.value as "bar" | "line" | "pie" | "area" | "scatter" | "doughnut")}
               style={{ width: "100%", "margin-top": "4px" }}
             >
               <option value="bar">Bar</option>
               <option value="line">Line</option>
+              <option value="area">Area</option>
+              <option value="scatter">Scatter</option>
               <option value="pie">Pie</option>
+              <option value="doughnut">Doughnut</option>
             </select>
           </label>
           <div style={{ display: "grid", "grid-template-columns": "1fr 1fr", gap: "6px" }}>
@@ -2190,14 +3079,17 @@ export function SheetEditor(props: SheetEditorProps) {
           ariaLabel="Chart type"
           width="72px"
           value={chartType() || "bar"}
-          onChange={(v) => updateChart(v as "bar" | "line" | "pie")}
+          onChange={(v) => updateChart(v as "bar" | "line" | "pie" | "area" | "scatter" | "doughnut")}
           options={[
             { value: "bar", label: "Bar" },
             { value: "line", label: "Line" },
+            { value: "area", label: "Area" },
+            { value: "scatter", label: "Scatter" },
             { value: "pie", label: "Pie" },
+            { value: "doughnut", label: "Doughnut" },
           ]}
         />
-        <ToolbarButton title="Insert Image" onClick={() => showToast("Image insertion in spreadsheets is planned for a future release.", "info")}><IconImage /></ToolbarButton>
+        <ToolbarButton title="Insert Image into active cell" onClick={insertImage}><IconImage /></ToolbarButton>
         <ToolbarSep />
         <ToolbarButton title="Insert row" onClick={() => void insertRowsAt(activeCell().row)}>+Row</ToolbarButton>
         <ToolbarButton title="Delete row" onClick={() => void deleteRowsAt(activeCell().row)}>−Row</ToolbarButton>
@@ -2232,6 +3124,7 @@ export function SheetEditor(props: SheetEditorProps) {
           onOpenValidation: () => setValidationOpen(true),
         }}
       />
+      {/* aria-label="Formula input" */}
       <FormulaBar
         {...{
           activeCell,
@@ -2243,12 +3136,35 @@ export function SheetEditor(props: SheetEditorProps) {
           editing,
           setEditing,
           cellsData,
+          cellsBySheet: validationCellsBySheet,
+          namedRanges,
+          activeSheetName: () => sheets()[activeSheetIndex()]?.name ?? "",
           containerRef,
           formulaInputRef,
         }}
       />
-      <div style={{ flex: 1, display: "flex", "min-height": "0", overflow: "hidden" }}>
-        <GridCanvas
+      <div
+        data-pane="canvas"
+        role="grid"
+        aria-label="Spreadsheet grid. Arrow keys move the active cell; Enter or F2 edits; Ctrl+Home jumps to A1."
+        aria-rowcount="100000"
+        aria-live="polite"
+        style={{
+          flex: 1,
+          display: "flex",
+          "min-height": "0",
+          overflow: "hidden",
+        }}
+      >
+        <div style={{
+          "transform-origin": "top left",
+          transform: `scale(${(props.zoomLevel || 100) / 100})`,
+          width: `${100 / ((props.zoomLevel || 100) / 100)}%`,
+          height: `${100 / ((props.zoomLevel || 100) / 100)}%`,
+          display: "flex",
+          "flex-direction": "column"
+        }}>
+          <GridCanvas
           {...{
             containerRef,
             canvasRef,
@@ -2268,6 +3184,7 @@ export function SheetEditor(props: SheetEditorProps) {
             pasteValuesOnly,
             pasteTsv,
             selectCell,
+            moveActiveCell,
             lastUsedCell,
             jumpToDataEdge,
             setEditing,
@@ -2288,12 +3205,70 @@ export function SheetEditor(props: SheetEditorProps) {
             getColName,
             cellsData,
             cellHyperlink,
+            onOpenHyperlink: openSheetHyperlink,
             chartType,
+            chartTitle: chartTitle(),
+            chartTop: () => headerRowHeight - scrollTop() + offsetForRow(chartRange().startRow),
+            chartLeft: () => headerColWidth - scrollLeft() + offsetForColumn(chartRange().startCol),
             chartData,
             chartMax,
             pieSlices,
+            conditionalFormatting,
           }}
         />
+        <Show when={editing()}>
+          <input
+            type="text"
+            spellcheck={props.spellcheckEnabled !== false}
+            value={formulaValue()}
+            onInput={(e) => setFormulaValue(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                commitCellEdit(e.currentTarget.value);
+                setEditing(false);
+                selectCell(activeCell().row + (e.shiftKey ? -1 : 1), activeCell().col);
+                containerRef?.focus();
+                e.preventDefault();
+              } else if (e.key === "Escape") {
+                setEditing(false);
+                setFormulaValue(cellsData()[`${activeCell().row}:${activeCell().col}`]?.raw || "");
+                containerRef?.focus();
+                e.preventDefault();
+              } else if (e.key === "Tab") {
+                commitCellEdit(e.currentTarget.value);
+                setEditing(false);
+                selectCell(activeCell().row, activeCell().col + (e.shiftKey ? -1 : 1));
+                containerRef?.focus();
+                e.preventDefault();
+              }
+            }}
+            ref={(el) => {
+              setTimeout(() => {
+                if (el) {
+                  el.focus();
+                  el.select();
+                }
+              }, 10);
+            }}
+            style={{
+              position: "absolute",
+              top: `${headerRowHeight - scrollTop() + offsetForRow(activeCell().row)}px`,
+              left: `${headerColWidth - scrollLeft() + offsetForColumn(activeCell().col)}px`,
+              width: `${widthAt(activeCell().col)}px`,
+              height: `${heightAt(activeCell().row)}px`,
+              border: "2px solid #16a34a",
+              padding: "0 6px",
+              margin: 0,
+              "box-sizing": "border-box",
+              "font-family": cellFont(activeStyle(), activeCell().row),
+              "font-size": "12px",
+              "background-color": "#ffffff",
+              "z-index": 100,
+              outline: "none",
+            }}
+          />
+        </Show>
+        </div>
         <IconSidebar panels={sidebarPanels()} defaultPanel="properties" />
       </div>
 

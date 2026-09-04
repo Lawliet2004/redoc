@@ -19,6 +19,8 @@ pub enum FormulaError {
     Value,   // #VALUE!
     Cycle,   // #CYCLE!
     Na,      // #N/A
+    Spill,   // #SPILL!
+    Num,     // #NUM!
 }
 
 impl FormulaError {
@@ -30,6 +32,8 @@ impl FormulaError {
             FormulaError::Value => "#VALUE!",
             FormulaError::Cycle => "#CYCLE!",
             FormulaError::Na => "#N/A",
+            FormulaError::Spill => "#SPILL!",
+            FormulaError::Num => "#NUM!",
         }
     }
 }
@@ -64,6 +68,7 @@ pub enum Expr {
         end_row: u32,
         end_col: u32,
     },
+    Name(String),
     Binary {
         left: Box<Expr>,
         op: BinaryOp,

@@ -92,7 +92,7 @@ impl RecoveryManager {
                         .file_stem()
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    
+
                     let mut title = format!("Recovered {}", name);
                     let mut mode = "doc".to_string();
 
@@ -102,11 +102,17 @@ impl RecoveryManager {
                                 use std::io::Read;
                                 let mut meta_str = String::new();
                                 if meta_file.read_to_string(&mut meta_str).is_ok() {
-                                    if let Ok(meta_json) = serde_json::from_str::<serde_json::Value>(&meta_str) {
-                                        if let Some(t) = meta_json.get("title").and_then(|v| v.as_str()) {
+                                    if let Ok(meta_json) =
+                                        serde_json::from_str::<serde_json::Value>(&meta_str)
+                                    {
+                                        if let Some(t) =
+                                            meta_json.get("title").and_then(|v| v.as_str())
+                                        {
                                             title = t.to_string();
                                         }
-                                        if let Some(m) = meta_json.get("mode").and_then(|v| v.as_str()) {
+                                        if let Some(m) =
+                                            meta_json.get("mode").and_then(|v| v.as_str())
+                                        {
                                             mode = m.to_string();
                                         }
                                     }

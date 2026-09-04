@@ -13,7 +13,10 @@
       "area": "shared",
       "title": "Create, open, save, and recover Redoc documents",
       "status": "verified",
-      "evidence": ["apps/desktop/src/App.tsx", "crates/file-io/tests/roundtrip.rs"],
+      "evidence": [
+        "apps/desktop/src/App.tsx",
+        "crates/file-io/tests/roundtrip.rs"
+      ],
       "targetPhase": "maintain"
     },
     {
@@ -21,7 +24,11 @@
       "area": "shared",
       "title": "Route DOCX, XLSX, and PPTX files to the matching editor",
       "status": "verified",
-      "evidence": ["apps/desktop/src/App.tsx", "apps/desktop/src/shell/fileRouting.ts", "apps/desktop/src/shell/fileRouting.test.ts"],
+      "evidence": [
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src/shell/fileRouting.ts",
+        "apps/desktop/src/shell/fileRouting.test.ts"
+      ],
       "targetPhase": "office-sessions"
     },
     {
@@ -29,7 +36,10 @@
       "area": "shared",
       "title": "Unified commands, menus, shortcuts, and command palette",
       "status": "verified",
-      "evidence": ["apps/desktop/src/shell/registerCommands.ts", "packages/editor-common/src/ShortcutRegistry.test.ts"],
+      "evidence": [
+        "apps/desktop/src/shell/registerCommands.ts",
+        "packages/editor-common/src/ShortcutRegistry.test.ts"
+      ],
       "targetPhase": "shared-shell"
     },
     {
@@ -37,15 +47,36 @@
       "area": "shared",
       "title": "Keyboard and screen-reader accessible shell controls",
       "status": "implemented",
-      "evidence": ["tests/a11y/shell.a11y.test.tsx"],
+      "evidence": [
+        "tests/a11y/shell.a11y.test.tsx"
+      ],
       "targetPhase": "cross-platform-certification"
+    },
+    {
+      "id": "shell.spellcheck",
+      "area": "shared",
+      "title": "Platform spellcheck on document and spreadsheet editing surfaces",
+      "status": "implemented",
+      "evidence": [
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src/SettingsDialog.tsx",
+        "packages/doc-editor/src/DocEditor.tsx",
+        "packages/doc-editor/src/types.ts",
+        "packages/doc-editor/src/spellcheck.test.ts",
+        "packages/sheet-editor/src/SheetEditor.tsx"
+      ],
+      "targetPhase": "maintain"
     },
     {
       "id": "shell.multi-document",
       "area": "shared",
       "title": "Multiple open documents with independent dirty state",
       "status": "implemented",
-      "evidence": ["apps/desktop/src/App.tsx", "packages/editor-common/src/documentSessions.ts", "packages/editor-common/src/documentSessions.test.ts"],
+      "evidence": [
+        "apps/desktop/src/App.tsx",
+        "packages/editor-common/src/documentSessions.ts",
+        "packages/editor-common/src/documentSessions.test.ts"
+      ],
       "targetPhase": "cross-platform-certification"
     },
     {
@@ -53,7 +84,17 @@
       "area": "document",
       "title": "Paragraphs, headings, marks, lists, tables, links, and images",
       "status": "verified",
-      "evidence": ["packages/doc-editor/src/DocEditor.tsx", "crates/doc-engine/src/schema.rs"],
+      "evidence": [
+        "packages/doc-editor/src/DocEditor.tsx",
+        "packages/doc-editor/src/bookmarks.ts",
+        "packages/doc-editor/src/links.ts",
+        "packages/doc-editor/src/bookmarks.test.ts",
+        "crates/doc-engine/src/schema.rs",
+        "packages/doc-editor/src/toc.ts",
+        "packages/doc-editor/src/toc.test.ts",
+        "packages/doc-editor/src/schemaCatalog.test.ts",
+        "crates/doc-engine/src/schema.rs::exports_schema_catalog_json"
+      ],
       "targetPhase": "maintain"
     },
     {
@@ -61,7 +102,21 @@
       "area": "document",
       "title": "Sections, columns, headers, footers, page numbering, and fields",
       "status": "partial",
-      "evidence": ["packages/doc-editor/src/PageSetupDialog.tsx", "crates/export/src/pdf.rs", "crates/export/src/docx.rs::round_trips_docx_page_setup_and_header_footer_fields", "crates/export/src/docx.rs::round_trips_docx_section_columns"],
+      "evidence": [
+        "packages/doc-editor/src/PageSetupDialog.tsx",
+        "packages/doc-editor/src/DocEditor.tsx",
+        "packages/doc-editor/src/schema.ts",
+        "packages/doc-editor/src/fields.ts",
+        "packages/doc-editor/src/fields.test.ts",
+        "packages/doc-editor/src/pageSetup.ts",
+        "packages/doc-editor/src/pageSetup.test.ts",
+        "crates/doc-engine/src/schema.rs::page_count_counts_section_breaks",
+        "crates/export/src/pdf.rs",
+        "crates/export/src/docx.rs::round_trips_docx_page_setup_and_header_footer_fields",
+        "crates/export/src/docx.rs::round_trips_native_page_fields_in_document_body",
+        "crates/export/src/docx.rs::round_trips_docx_section_columns",
+        "crates/export/src/docx.rs::exports_per_section_page_properties"
+      ],
       "targetPhase": "document-completion"
     },
     {
@@ -69,15 +124,75 @@
       "area": "document",
       "title": "Comments, tracked changes, compare, and accept/reject",
       "status": "partial",
-      "evidence": ["packages/doc-editor/src/DocEditor.tsx", "packages/doc-editor/src/schema.ts", "packages/doc-editor/src/review.ts", "packages/doc-editor/src/review.test.ts", "packages/doc-editor/src/compare.ts", "packages/doc-editor/src/compare.test.ts", "packages/doc-editor/src/trackedChanges.ts", "packages/doc-editor/src/trackedChanges.test.ts"],
+      "evidence": [
+        "packages/doc-editor/src/DocEditor.tsx",
+        "packages/doc-editor/src/types.ts",
+        "packages/doc-editor/src/schema.ts",
+        "packages/doc-editor/src/review.ts",
+        "packages/doc-editor/src/review.test.ts",
+        "packages/doc-editor/src/compare.ts",
+        "packages/doc-editor/src/compare.test.ts",
+        "packages/doc-editor/src/trackedChanges.ts",
+        "packages/doc-editor/src/trackedChanges.test.ts",
+        "packages/doc-editor/src/footnotes.ts",
+        "packages/doc-editor/src/footnotes.test.ts",
+        "crates/export/src/docx.rs::round_trips_native_footnotes"
+      ],
+      "targetPhase": "document-completion"
+    },
+    {
+      "id": "doc.named-styles",
+      "area": "document",
+      "title": "Named paragraph styles with create-from-selection and DOCX pStyle round-trip",
+      "status": "implemented",
+      "evidence": [
+        "packages/doc-editor/src/styles.ts",
+        "packages/doc-editor/src/styles.test.ts",
+        "packages/doc-editor/src/DocEditor.tsx",
+        "crates/export/src/docx.rs::round_trips_named_paragraph_styles"
+      ],
+      "targetPhase": "document-completion"
+    },
+    {
+      "id": "doc.footnotes",
+      "area": "document",
+      "title": "Footnote references with native DOCX footnotes.xml and PDF notes section",
+      "status": "interoperable",
+      "evidence": [
+        "packages/doc-editor/src/footnotes.ts",
+        "packages/doc-editor/src/footnotes.test.ts",
+        "packages/doc-editor/src/schema.ts",
+        "crates/doc-engine/src/schema.rs",
+        "crates/export/src/docx.rs::round_trips_native_footnotes",
+        "crates/export/src/docx.rs::inject_footnotes",
+        "crates/export/src/docx.rs::read_docx_footnotes",
+        "crates/export/src/pdf.rs::document_pdf_renders_footnote_references_and_notes"
+      ],
       "targetPhase": "document-completion"
     },
     {
       "id": "doc.office-roundtrip",
       "area": "document",
       "title": "DOCX import and export with compatibility reporting",
-      "status": "partial",
-      "evidence": ["crates/export/src/docx.rs", "crates/export/src/docx.rs::imports_hyperlinks_as_link_marks_without_warning", "crates/export/src/docx.rs::imports_exported_docx_paragraphs_and_marks", "crates/export/src/docx.rs::round_trips_docx_page_setup_and_header_footer_fields"],
+      "status": "interoperable",
+      "evidence": [
+        "crates/export/src/docx.rs",
+        "crates/export/src/docx.rs::imports_hyperlinks_as_link_marks_without_warning",
+        "crates/export/src/docx.rs::round_trips_bookmarks_and_internal_hyperlinks",
+        "crates/export/src/docx.rs::round_trips_native_page_fields_in_document_body",
+        "crates/export/src/docx.rs::imports_simple_page_field_with_cached_result",
+        "crates/export/src/docx.rs::skips_unsupported_simple_field_with_warning",
+        "crates/export/src/docx.rs::exports_bounded_paragraph_spacing",
+        "crates/export/src/docx.rs::round_trips_paragraph_layout_attributes",
+        "crates/export/src/docx.rs::round_trips_named_paragraph_styles",
+        "crates/export/src/docx.rs::round_trips_native_footnotes",
+        "crates/export/src/compatibility.rs::accepts_supported_section_breaks_and_bookmark_marks",
+        "packages/doc-editor/src/bookmarks.test.ts",
+        "packages/doc-editor/src/links.test.ts",
+        "packages/doc-editor/src/fields.test.ts",
+        "crates/export/src/docx.rs::imports_exported_docx_paragraphs_and_marks",
+        "crates/export/src/docx.rs::round_trips_docx_page_setup_and_header_footer_fields"
+      ],
       "targetPhase": "office-sessions"
     },
     {
@@ -85,7 +200,11 @@
       "area": "spreadsheet",
       "title": "Virtualized grid, cell editing, selection, clipboard, and history",
       "status": "verified",
-      "evidence": ["packages/sheet-editor/src/SheetEditor.tsx", "packages/sheet-editor/src/sheetHistory.test.ts"],
+      "evidence": [
+        "packages/sheet-editor/src/SheetEditor.tsx",
+        "packages/sheet-editor/src/sheetHistory.test.ts",
+        "packages/sheet-editor/src/sheetTypes.ts"
+      ],
       "targetPhase": "maintain"
     },
     {
@@ -93,7 +212,36 @@
       "area": "spreadsheet",
       "title": "Formula parsing, evaluation, dependencies, and recalculation",
       "status": "implemented",
-      "evidence": ["crates/formula/src/eval.rs", "crates/formula/src/functions.rs::test_financial_functions", "crates/formula/tests/proptest_formula.rs"],
+      "evidence": [
+        "crates/formula/src/eval.rs",
+        "crates/formula/src/eval.rs::tests::arithmetic_overflow_is_reported_as_a_formula_error",
+        "crates/formula/src/parser.rs::test_parse_dotted_function_names",
+        "crates/formula/src/parser.rs::test_parse_named_expression",
+        "crates/formula/src/functions.rs::test_financial_functions",
+        "crates/formula/src/functions.rs::test_sumproduct_and_max_min_ifs",
+        "crates/formula/src/functions.rs::test_time_and_weekday_functions",
+        "crates/formula/src/functions.rs::test_networkdays_with_holiday_and_bounds",
+        "crates/formula/src/functions.rs::test_business_date_functions",
+        "crates/formula/src/functions.rs::test_array_shape_functions",
+        "crates/formula/src/functions.rs::test_bounded_statistical_compatibility_helpers",
+        "crates/formula/src/functions.rs::test_bounded_dynamic_array_functions",
+        "crates/formula/src/functions.rs::test_text_and_boolean_compatibility_helpers",
+        "crates/formula/src/functions.rs::tests::numeric_functions_reject_non_finite_results",
+        "crates/sheet-engine/src/workbook/workbook_core.rs::tests::recalculates_statistical_compatibility_formulas",
+        "crates/sheet-engine/src/workbook/workbook_core.rs::tests::materializes_bounded_dynamic_array_spills",
+        "crates/sheet-engine/src/workbook/workbook_core.rs::tests::materializes_sequence_spills_with_expected_values",
+        "crates/sheet-engine/src/workbook/workbook_core.rs::tests::materializes_randarray_spills_with_bounded_shape",
+        "crates/sheet-engine/src/workbook/workbook_core.rs::tests::materializes_stacked_dynamic_arrays_with_padding",
+        "crates/sheet-engine/src/workbook/workbook_core.rs::tests::materializes_selected_reference_array_spills",
+        "crates/sheet-engine/src/workbook/workbook_core.rs::tests::materializes_sortby_spills_in_key_order",
+        "crates/sheet-engine/src/workbook/workbook_core.rs::tests::materializes_flattened_array_spills_with_column_scan",
+        "crates/sheet-engine/src/workbook/workbook_core.rs::tests::materializes_wrapped_array_spills_with_safe_padding",
+        "crates/sheet-engine/src/workbook/workbook_core.rs::tests::reports_spill_collision_and_rechecks_after_blocker_is_cleared",
+        "crates/sheet-engine/src/workbook/workbook_core.rs::tests::formulas_can_read_materialized_spill_neighbors",
+        "crates/sheet-engine/src/workbook/workbook_core.rs::tests::cross_sheet_formulas_follow_spill_neighbor_changes",
+        "packages/sheet-editor/src/sheetModel.test.ts::keeps spill metadata while excluding synthetic spill cells",
+        "crates/formula/tests/proptest_formula.rs"
+      ],
       "targetPhase": "spreadsheet-completion"
     },
     {
@@ -101,23 +249,74 @@
       "area": "spreadsheet",
       "title": "One generated formula catalog shared by engine and UI",
       "status": "verified",
-      "evidence": ["crates/formula/src/catalog.rs", "packages/sheet-editor/src/formulaFunctions.ts", "scripts/generate-formula-catalog.mjs", "scripts/quality-gates.mjs"],
+      "evidence": [
+        "crates/formula/src/catalog.rs",
+        "packages/sheet-editor/src/formulaFunctions.ts",
+        "scripts/generate-formula-catalog.mjs",
+        "scripts/quality-gates.mjs"
+      ],
       "targetPhase": "spreadsheet-completion"
     },
     {
       "id": "sheet.analysis",
       "area": "spreadsheet",
       "title": "Tables, conditional formatting, pivot tables, slicers, and scenarios",
-      "status": "partial",
-      "evidence": ["packages/sheet-editor/src/SheetEditor.tsx", "packages/sheet-editor/src/conditionalFormatting.ts", "packages/sheet-editor/src/conditionalFormatting.test.ts", "packages/sheet-editor/src/pivotTables.ts", "packages/sheet-editor/src/pivotTables.test.ts", "packages/sheet-editor/src/sheetModel.test.ts", "crates/sheet-engine/src/workbook/model.rs", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_autofilter_range_and_selected_values", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_named_ranges", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_merged_ranges", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_list_validation", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_hyperlinks", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_table_metadata"],
+      "status": "implemented",
+      "evidence": [
+        "packages/sheet-editor/src/SheetEditor.tsx",
+        "packages/sheet-editor/src/hyperlinks.ts",
+        "packages/sheet-editor/src/hyperlinks.test.ts",
+        "packages/sheet-editor/src/conditionalFormatting.ts",
+        "packages/sheet-editor/src/conditionalFormatting.test.ts",
+        "packages/sheet-editor/src/pivotTables.ts",
+        "packages/sheet-editor/src/pivotTables.test.ts",
+        "packages/sheet-editor/src/scenarios.ts",
+        "packages/sheet-editor/src/scenarios.test.ts",
+        "packages/sheet-editor/src/slicers.ts",
+        "packages/sheet-editor/src/slicers.test.ts",
+        "packages/sheet-editor/src/sheetModel.test.ts",
+        "crates/sheet-engine/src/workbook/model.rs",
+        "crates/export/src/compatibility.rs::reports_xlsx_pivot_and_unknown_chart",
+        "crates/export/src/compatibility.rs::reports_xlsx_slicer_fallback",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_autofilter_range_and_selected_values",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_named_ranges",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_merged_ranges",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_list_validation",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_formula_list_validation",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_hyperlinks",
+        "crates/export/src/xlsx.rs::xlsx_export_rejects_malformed_hyperlinks",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_table_metadata",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_scenarios",
+        "crates/export/src/xlsx.rs::xlsx_export_emits_native_png_cell_images",
+        "packages/sheet-editor/src/pivotTables.test.ts::buildMultiFieldPivotTable_crosses_rows_by_columns_with_sums_and_grand_totals",
+        "packages/sheet-editor/src/pivotTables.test.ts::supports_count_and_average_aggregations",
+        "packages/sheet-editor/src/cellComments.ts",
+        "packages/sheet-editor/src/cellComments.test.ts",
+        "packages/sheet-editor/src/sheetModel.test.ts::persists_the_six_designer_chart_types_through_workbook_builds",
+        "crates/export/src/xlsx.rs::chart_type_for_maps_all_six_designer_chart_types"
+      ],
       "targetPhase": "spreadsheet-completion"
     },
     {
       "id": "sheet.office-roundtrip",
       "area": "spreadsheet",
-      "title": "XLSX import/export with formulas, styles, charts, and compatibility reporting",
-      "status": "partial",
-      "evidence": ["crates/export/src/xlsx.rs", "crates/export/src/xlsx.rs::xlsx_imports_chart_anchor_and_metadata", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_autofilter_range_and_selected_values", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_named_ranges", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_merged_ranges", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_list_validation", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_hyperlinks", "crates/export/src/xlsx.rs::xlsx_export_rejects_malformed_hyperlinks", "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_table_metadata"],
+      "title": "XLSX import/export with formulas, styles, native pivots, charts, and compatibility reporting",
+      "status": "interoperable",
+      "evidence": [
+        "crates/export/src/xlsx.rs",
+        "crates/export/src/xlsx_pivot.rs",
+        "crates/export/src/xlsx_pivot.rs::writes_native_pivot_parts_round_trip",
+        "crates/export/src/xlsx.rs::xlsx_imports_chart_anchor_and_metadata",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_autofilter_range_and_selected_values",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_named_ranges",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_list_validation",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_formula_list_validation",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_hyperlinks",
+        "crates/export/src/xlsx.rs::xlsx_export_rejects_malformed_hyperlinks",
+        "crates/export/src/xlsx.rs::xlsx_export_emits_native_png_cell_images",
+        "packages/sheet-editor/src/hyperlinks.test.ts",
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_table_metadata"
+      ],
       "targetPhase": "office-sessions"
     },
     {
@@ -125,7 +324,15 @@
       "area": "presentation",
       "title": "Slides, text, shapes, images, tables, charts, resize, align, and group",
       "status": "verified",
-      "evidence": ["packages/slide-editor/src/SlideEditor.tsx", "packages/slide-editor/src/geometry.test.ts"],
+      "evidence": [
+        "packages/slide-editor/src/SlideEditor.tsx",
+        "packages/slide-editor/src/geometry.test.ts",
+        "packages/slide-editor/src/deckNormalize.ts::normalizeSlideComments",
+        "packages/slide-editor/src/deckNormalize.test.ts::round_trips_slide_comments_through_toDeck",
+        "crates/export/src/pptx.rs::round_trips_slide_comments_with_author_metadata",
+        "crates/export/src/pptx_import.rs::parse_slide_comments",
+        "crates/export/src/pptx_import.rs::parse_comment_authors"
+      ],
       "targetPhase": "maintain"
     },
     {
@@ -133,15 +340,37 @@
       "area": "presentation",
       "title": "Slide masters, layouts, placeholders, and themes",
       "status": "implemented",
-      "evidence": ["packages/slide-editor/src/SlideEditor.tsx", "crates/slide-engine/src/deck.rs"],
+      "evidence": [
+        "packages/slide-editor/src/SlideEditor.tsx",
+        "crates/slide-engine/src/deck.rs"
+      ],
       "targetPhase": "presentation-completion"
     },
     {
       "id": "slide.animation",
       "area": "presentation",
-      "title": "Transitions, animation timeline, and presenter playback",
-      "status": "partial",
-      "evidence": ["packages/slide-editor/src/SlideEditor.tsx", "packages/slide-editor/src/deckNormalize.ts", "packages/slide-editor/src/PresenterView.tsx", "packages/slide-editor/src/animation.test.ts", "crates/export/src/pptx.rs::writes_native_fade_entrance_timing", "crates/export/src/pptx_import.rs::imports_redoc_pptx_text_shapes_and_notes"],
+      "title": "Transitions, entrance/exit animations with reorder, and presenter playback",
+      "status": "implemented",
+      "evidence": [
+        "packages/slide-editor/src/SlideEditor.tsx",
+        "packages/slide-editor/src/SlideEditor.css",
+        "packages/slide-editor/src/deckNormalize.ts",
+        "packages/slide-editor/src/deckNormalize.test.ts",
+        "packages/slide-editor/src/animation.test.ts",
+        "packages/slide-editor/src/PresenterView.tsx",
+        "packages/slide-editor/src/presenterControls.ts",
+        "packages/slide-editor/src/presenterControls.test.ts",
+        "crates/slide-engine/src/deck.rs::exit_animation_metadata_defaults_and_round_trips",
+        "crates/export/src/pptx.rs::writes_native_fade_exit_timing_and_round_trips",
+        "crates/export/src/pptx.rs::writes_extended_native_transitions",
+        "crates/export/src/pptx.rs::writes_native_fade_entrance_timing",
+        "crates/export/src/pptx.rs::writes_native_zoom_entrance_timing",
+        "crates/export/src/pptx_import.rs::parses_native_exit_animation_as_fade_exit",
+        "crates/export/src/pptx_import.rs::parses_supported_native_transitions",
+        "crates/export/src/pptx_import.rs::parses_native_zoom_animation_kind",
+        "crates/export/src/pptx_import.rs::round_trips_extended_transition_through_pptx",
+        "crates/export/src/pptx_import.rs::imports_redoc_pptx_text_shapes_and_notes"
+      ],
       "targetPhase": "presentation-completion"
     },
     {
@@ -149,7 +378,28 @@
       "area": "presentation",
       "title": "PPTX import/export with masters, media, notes, and animations",
       "status": "partial",
-      "evidence": ["crates/export/src/pptx.rs", "crates/export/src/pptx_import.rs", "crates/export/src/pptx.rs::writes_native_chart_parts_for_supported_types", "crates/export/src/pptx_import.rs::round_trips_native_pptx_tables", "crates/export/src/pptx_import.rs::round_trips_native_pptx_charts", "crates/export/src/pptx_import.rs::parse_theme", "crates/export/src/pptx_import.rs::parse_slide_background", "crates/export/src/pptx_import.rs::honors_presentation_slide_relationship_order", "apps/desktop/src/App.tsx", "apps/desktop/src-tauri/src/lib.rs"],
+      "evidence": [
+        "crates/export/src/pptx.rs",
+        "crates/export/src/pptx_import.rs",
+        "crates/export/src/pptx.rs::writes_native_chart_parts_for_supported_types",
+        "crates/export/src/pptx.rs::exports_common_shape_presets_as_native_geometry",
+        "crates/export/src/pptx.rs::exports_safe_element_hyperlinks_as_external_relationships",
+        "crates/export/src/pptx_import.rs::round_trips_native_pptx_tables",
+        "crates/export/src/pptx_import.rs::round_trips_native_pptx_charts",
+        "crates/export/src/pptx_import.rs::round_trips_common_shape_presets_to_canonical_names",
+        "crates/export/src/pptx_import.rs::round_trips_supported_slide_layouts",
+        "crates/export/src/pptx_import.rs::imports_empty_native_placeholders_as_editable_text",
+        "crates/export/src/pptx_import.rs::preserves_empty_native_picture_placeholders_as_editable_shapes",
+        "crates/export/src/pptx_import.rs::imports_redoc_pptx_text_shapes_and_notes",
+        "crates/export/src/pptx_import.rs::parse_theme",
+        "crates/export/src/pptx_import.rs::parse_slide_background",
+        "crates/export/src/pptx_import.rs::honors_presentation_slide_relationship_order",
+        "packages/slide-editor/src/SlideEditor.tsx",
+        "packages/slide-editor/src/hyperlinks.ts",
+        "packages/slide-editor/src/hyperlinks.test.ts",
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src-tauri/src/lib.rs"
+      ],
       "targetPhase": "office-sessions"
     },
     {
@@ -157,7 +407,11 @@
       "area": "reliability",
       "title": "Atomic, validated saves that preserve the original on failure",
       "status": "implemented",
-      "evidence": ["crates/file-io/src/container.rs", "crates/file-io/tests/roundtrip.rs", "crates/file-io/src/lib.rs"],
+      "evidence": [
+        "crates/file-io/src/container.rs",
+        "crates/file-io/tests/roundtrip.rs",
+        "crates/file-io/src/lib.rs"
+      ],
       "targetPhase": "office-sessions"
     },
     {
@@ -165,23 +419,40 @@
       "area": "reliability",
       "title": "Autosave, crash recovery, corruption handling, and typed errors",
       "status": "implemented",
-      "evidence": ["crates/core/src/recovery.rs", "crates/core/src/autosave.rs"],
+      "evidence": [
+        "crates/core/src/recovery.rs",
+        "apps/desktop/src/App.tsx",
+        "crates/file-io/src/snapshots.rs",
+        "crates/core/src/logging.rs::rolls_log_before_a_write_would_exceed_the_size_bound",
+        "crates/core/src/logging.rs::keeps_a_bounded_number_of_rotated_logs"
+      ],
       "targetPhase": "reliability-hardening"
     },
     {
       "id": "performance.scale",
       "area": "performance",
       "title": "Measured performance for large documents, workbooks, and decks",
-      "status": "partial",
-      "evidence": ["crates/sheet-engine/benches/grid_render.rs", "scripts/perf-budget.mjs"],
+      "status": "verified",
+      "evidence": [
+        "scripts/perf-budget.mjs",
+        "crates/sheet-engine/benches/grid_render.rs",
+        "crates/sheet-engine/benches/grid_render.rs::grid-recalc-warm-median-15ms-10000-formulas"
+      ],
       "targetPhase": "cross-platform-certification"
     },
     {
       "id": "interop.loss-report",
       "area": "interoperability",
-      "title": "Compatibility inspector and explicit loss reports on Office saves",
-      "status": "partial",
-      "evidence": ["apps/desktop/src/App.tsx", "crates/export/src/compatibility.rs", "apps/desktop/src-tauri/src/lib.rs::inspect_export_compatibility"],
+      "title": "Compatibility inspector surfaced as a pre-export dialog and post-save report",
+      "status": "implemented",
+      "evidence": [
+        "apps/desktop/src/App.tsx",
+        "crates/export/src/compatibility.rs",
+        "crates/export/src/compatibility.rs::reports_pptx_fallbacks_and_unknown_animation",
+        "crates/export/src/compatibility.rs::accepts_supported_pptx_transitions_without_warnings",
+        "crates/export/src/compatibility.rs::reports_xlsx_pivot_and_unknown_chart",
+        "apps/desktop/src-tauri/src/lib.rs::inspect_export_compatibility"
+      ],
       "targetPhase": "office-sessions"
     }
   ]

@@ -1,13 +1,13 @@
 use redoc_file_io::{FileIoError, RedocContainer};
 use std::io::Write;
 use tempfile::NamedTempFile;
-use zip::write::FileOptions;
+use zip::write::SimpleFileOptions;
 
 fn write_archive(entries: &[(&str, &[u8])]) -> NamedTempFile {
     let mut file = NamedTempFile::new().expect("temporary archive");
     {
         let mut zip = zip::ZipWriter::new(&mut file);
-        let options = FileOptions::default();
+        let options = SimpleFileOptions::default();
         for (name, bytes) in entries {
             zip.start_file(*name, options).expect("start entry");
             zip.write_all(bytes).expect("write entry");

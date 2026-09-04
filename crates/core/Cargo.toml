@@ -13,4 +13,4 @@ tracing-appender = "0.2"
 parking_lot = "0.12"
 uuid = { version = "1.11", features = ["v7", "serde"] }
 specta = { version = "=2.0.0-rc.20", features = ["derive"] }
-zip = "8.6.0"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }

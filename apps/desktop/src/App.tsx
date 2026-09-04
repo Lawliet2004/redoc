@@ -1,14 +1,18 @@
 import { createSignal, onMount, onCleanup, Show, For, lazy, Suspense, createEffect } from "solid-js";
-import { Button, ToastContainer, showToast, Dialog, t } from "@redoc/ui";
+import { Button, ToastContainer, showToast, Dialog, ConfirmDialog, t } from "@redoc/ui";
 import { IconDoc, IconSheet, IconSlide, IconSettings, IconSave } from "@redoc/icons";
 import {
   CommandPalette,
+  CommandBar,
+  Inspector,
+  InspectorSection,
   StatusBar,
-  MenuBar,
   shortcutRegistry,
   registerShellShortcuts,
   buildMenus,
   emitEditorCommand,
+  handleF6,
+  cyclePane,
   chooseAdjacentSession,
   removeDocumentSession,
   upsertDocumentSession,
@@ -97,6 +101,8 @@ export function App() {
   const [saveState, setSaveState] = createSignal<"Saved" | "Saving" | "Dirty" | "Error">("Saved");
   const [zoomLevel, setZoomLevel] = createSignal(100);
   const [statusInfo, setStatusInfo] = createSignal("");
+  const [inspectorOpen, setInspectorOpen] = createSignal(true);
+  const [selectionSummary, setSelectionSummary] = createSignal("");
   const [paletteOpen, setPaletteOpen] = createSignal(false);
   const [helpOpen, setHelpOpen] = createSignal(false);
   const [aboutOpen, setAboutOpen] = createSignal(false);
@@ -108,6 +114,36 @@ export function App() {
   const [csvImportOpen, setCsvImportOpen] = createSignal(false);
   const [csvImportPath, setCsvImportPath] = createSignal<string | null>(null);
   let csvImportResolver: ((workbook: any | undefined) => void) | undefined;
+
+  const [confirmState, setConfirmState] = createSignal<{
+    open: boolean;
+    title: string;
+    message: string;
+    confirmLabel: string;
+    danger: boolean;
+  }>({ open: false, title: "", message: "", confirmLabel: "", danger: false });
+  let confirmResolver: ((ok: boolean) => void) | undefined;
+
+  const confirmDialog = (opts: { title: string; message: string; confirmLabel?: string; danger?: boolean }) => {
+    if (confirmResolver) confirmResolver(false);
+    return new Promise<boolean>((resolve) => {
+      confirmResolver = resolve;
+      setConfirmState({
+        open: true,
+        title: opts.title,
+        message: opts.message,
+        confirmLabel: opts.confirmLabel || "Discard changes",
+        danger: opts.danger !== false,
+      });
+    });
+  };
+
+  const settleConfirm = (ok: boolean) => {
+    setConfirmState((prev) => ({ ...prev, open: false }));
+    const resolve = confirmResolver;
+    confirmResolver = undefined;
+    resolve?.(ok);
+  };
 
   const [settings, setSettings] = createSignal<AppSettings>({
     theme: "dark",
@@ -200,9 +236,13 @@ export function App() {
     }
   };
 
-  const confirmDiscardIfDirty = (): boolean => {
+  const confirmDiscardIfDirty = async (): Promise<boolean> => {
     if (activeMode() !== "home" && saveState() === "Dirty") {
-      return window.confirm("You have unsaved changes. Do you want to discard them?");
+      return confirmDialog({
+        title: "Unsaved changes",
+        message: "You have unsaved changes. Do you want to discard them?",
+        confirmLabel: "Discard changes",
+      });
     }
     return true;
   };
@@ -250,20 +290,25 @@ export function App() {
     setModeBuffers((previous) => ({ ...previous, [session.mode]: session }));
   };
 
-  const activateSession = (id: string) => {
+  const activateSession = async (id: string) => {
     if (id === activeSessionId()) return;
-    if (!confirmDiscardIfDirty()) return;
+    if (!(await confirmDiscardIfDirty())) return;
     syncCurrentSession();
     const target = openSessions().find((session) => session.id === id);
     if (target) loadSession(target);
   };
 
-  const closeSession = (id: string) => {
+  const closeSession = async (id: string) => {
     const target = openSessions().find((session) => session.id === id);
     if (!target) return;
-    if (id === activeSessionId() && !confirmDiscardIfDirty()) return;
+    if (id === activeSessionId() && !(await confirmDiscardIfDirty())) return;
     if (id !== activeSessionId() && (target.saveState === "Dirty" || target.saveState === "Error")) {
-      if (!window.confirm(`\"${target.title || "Untitled document"}\" has unsaved changes. Close it anyway?`)) return;
+      const ok = await confirmDialog({
+        title: "Unsaved changes",
+        message: `"${target.title || "Untitled document"}" has unsaved changes. Close it anyway?`,
+        confirmLabel: "Close anyway",
+      });
+      if (!ok) return;
     }
     syncCurrentSession();
     const next = chooseAdjacentSession(openSessions(), id);
@@ -343,7 +388,7 @@ export function App() {
   const handleSwitchMode = async (mode: EditorMode) => {
     const current = activeMode();
     if (current === mode) return;
-    if (!confirmDiscardIfDirty()) return;
+    if (!(await confirmDiscardIfDirty())) return;
     if (current !== "home") {
       saveCurrentModeToBuffer();
     }
@@ -362,8 +407,8 @@ export function App() {
     }
   };
 
-  const goHome = () => {
-    if (!confirmDiscardIfDirty()) return;
+  const goHome = async () => {
+    if (!(await confirmDiscardIfDirty())) return;
     saveCurrentModeToBuffer();
     setActiveMode("home");
   };
@@ -480,7 +525,11 @@ export function App() {
       const win = getCurrentWindow();
       unlistenClose = await win.onCloseRequested(async (event) => {
         if (hasDirtySession() || (activeMode() !== "home" && saveState() === "Dirty")) {
-          const discard = window.confirm("You have unsaved changes. Quit without saving?");
+          const discard = await confirmDialog({
+            title: "Unsaved changes",
+            message: "You have unsaved changes. Quit without saving?",
+            confirmLabel: "Quit without saving",
+          });
           if (!discard) {
             event.preventDefault();
             return;
@@ -582,6 +631,13 @@ export function App() {
         setPaletteOpen(!paletteOpen());
         return;
       }
+      // F1 cheatsheet, F4 repeat is registered via shortcutRegistry; F6 pane cycle is global.
+      if (e.key === "F1") {
+        e.preventDefault();
+        setHelpOpen(true);
+        return;
+      }
+      if (handleF6(e)) return;
       const mode = activeMode();
       if (mode === "home") {
         shortcutRegistry.handleKeyDown(e, "home" as any);
@@ -635,7 +691,7 @@ export function App() {
   });
 
   const handleNewDoc = async (mode: EditorMode, templateId?: string) => {
-    if (!confirmDiscardIfDirty()) return;
+    if (!(await confirmDiscardIfDirty())) return;
     cancelAutosave();
     if (activeMode() !== "home") {
       saveCurrentModeToBuffer();
@@ -690,7 +746,7 @@ export function App() {
   };
 
   const openFilePath = async (path: string) => {
-    if (!confirmDiscardIfDirty()) return;
+    if (!(await confirmDiscardIfDirty())) return;
     cancelAutosave();
     try {
       const fileType = supportedFileType(path);
@@ -800,6 +856,27 @@ export function App() {
     }
   };
 
+  const [exportWarnings, setExportWarnings] = createSignal<string[]>([]);
+  const [pendingExport, setPendingExport] = createSignal<{ format: string; path: string } | null>(null);
+
+  const runExport = async (format: string, path: string) => {
+    try {
+      await commands.exportDocumentToFile(path, activeMode(), format, docContent() || {}, docTitle());
+      const compatibilityWarnings = await commands.inspectExportCompatibility(activeMode(), format, docContent() || {});
+      if (compatibilityWarnings.length > 0) {
+        setImportWarnings(compatibilityWarnings);
+      }
+      showToast(
+        compatibilityWarnings.length > 0
+          ? `Exported to ${format.toUpperCase()} with ${compatibilityWarnings.length} compatibility note${compatibilityWarnings.length === 1 ? "" : "s"}`
+          : `Exported to ${format.toUpperCase()}`,
+        "success",
+      );
+    } catch (err) {
+      showToast(`Export failed: ${err}`, "error");
+    }
+  };
+
   const handleExport = async (format: string) => {
     try {
       const path = await save({
@@ -812,15 +889,11 @@ export function App() {
         format,
         docContent() || {},
       );
-      await commands.exportDocumentToFile(path, activeMode(), format, docContent() || {}, docTitle());
       if (compatibilityWarnings.length > 0) {
-        setImportWarnings(compatibilityWarnings);
-        showToast(
-          `Exported to ${format.toUpperCase()} with ${compatibilityWarnings.length} compatibility note${compatibilityWarnings.length === 1 ? "" : "s"}`,
-          "success",
-        );
+        setExportWarnings(compatibilityWarnings);
+        setPendingExport({ format, path });
       } else {
-        showToast(`Exported to ${format.toUpperCase()}`, "success");
+        await runExport(format, path);
       }
       setExportOpen(false);
     } catch (err) {
@@ -898,7 +971,7 @@ export function App() {
           onNewDoc={handleNewDoc}
           onOpenFile={handleOpenFile}
           onOpenRecent={async (entry) => {
-            if (!confirmDiscardIfDirty()) return;
+            if (!(await confirmDiscardIfDirty())) return;
             await openRedocAtPath(entry.path);
           }}
           onTogglePin={async (id) => {
@@ -927,7 +1000,10 @@ export function App() {
       </Show>
 
       <Show when={activeMode() !== "home"}>
-        {/* LibreOffice-style compact title + menu chrome */}
+        <a href="#canvas-pane" class="g-skip-link g-no-print">
+          {t("a11y.skipToCanvas")}
+        </a>
+        {/* Phase 3 compact titlebar: title + save state + mode switch + share/avatar stubs */}
         <header
           class="g-no-print"
           style={{
@@ -951,8 +1027,9 @@ export function App() {
             <div style={{ display: "flex", "align-items": "center", gap: "6px", "min-width": "0", flex: 1 }}>
               <button
                 type="button"
-                title="Home"
-                onClick={goHome}
+                title={t("shell.titlebar.home")}
+                aria-label={t("shell.titlebar.home")}
+                onClick={() => void goHome()}
                 style={{
                   width: "28px",
                   height: "28px",
@@ -976,15 +1053,26 @@ export function App() {
                   setSaveState("Dirty");
                   syncCurrentSession();
                 }}
-                aria-label="Document title"
+                aria-label={t("shell.titlebar.documentTitle")}
               />
-              <span style={{ "font-size": "11px", color: "var(--text-muted)" }} aria-live="polite" aria-atomic="true">
-                {saveState() === "Saved" ? "Saved" : saveState() === "Saving" ? "Saving…" : "Modified"}
+              <span
+                role="status"
+                style={{ "font-size": "11px", color: "var(--text-muted)" }}
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                {saveState() === "Saved"
+                  ? t("shell.titlebar.saveStateSaved")
+                  : saveState() === "Saving"
+                    ? t("shell.titlebar.saveStateSaving")
+                    : saveState() === "Error"
+                      ? t("shell.titlebar.saveStateError")
+                      : t("shell.titlebar.saveStateModified")}
               </span>
             </div>
 
             <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
-              <div class="g-mode-pill" role="tablist" aria-label="Editor mode">
+              <div class="g-mode-pill" role="tablist" aria-label={t("shell.titlebar.modeSwitcher")}>
                 <button
                   type="button"
                   role="tab"
@@ -995,9 +1083,9 @@ export function App() {
                   onClick={() => {
                     void handleSwitchMode("doc");
                   }}
-                  title="Writer (Ctrl+Alt+1)"
+                  title={`${t("shell.titlebar.modeWriter")} (Ctrl+Alt+1)`}
                 >
-                  <IconDoc width="14" height="14" color="var(--doc-accent)" /> Writer
+                  <IconDoc width="14" height="14" color="var(--doc-accent)" /> {t("shell.titlebar.modeWriter")}
                 </button>
                 <button
                   type="button"
@@ -1009,9 +1097,9 @@ export function App() {
                   onClick={() => {
                     void handleSwitchMode("sheet");
                   }}
-                  title="Calc (Ctrl+Alt+2)"
+                  title={`${t("shell.titlebar.modeCalc")} (Ctrl+Alt+2)`}
                 >
-                  <IconSheet width="14" height="14" color="var(--sheet-accent)" /> Calc
+                  <IconSheet width="14" height="14" color="var(--sheet-accent)" /> {t("shell.titlebar.modeCalc")}
                 </button>
                 <button
                   type="button"
@@ -1023,20 +1111,48 @@ export function App() {
                   onClick={() => {
                     void handleSwitchMode("slide");
                   }}
-                  title="Impress (Ctrl+Alt+3)"
+                  title={`${t("shell.titlebar.modeImpress")} (Ctrl+Alt+3)`}
                 >
-                  <IconSlide width="14" height="14" color="var(--slide-accent)" /> Impress
+                  <IconSlide width="14" height="14" color="var(--slide-accent)" /> {t("shell.titlebar.modeImpress")}
                 </button>
               </div>
-              <Button variant="ghost" size="sm" onClick={() => setSettingsOpen(true)} title="Settings">
+              <div class="g-avatar-stack" role="group" aria-label={t("shell.titlebar.avatarStack")} title={t("shell.titlebar.avatarStack")}>
+                <span class="g-avatar" style={{ background: "#5b9bd5" }} title="You (offline stub)">Y</span>
+                <span class="g-avatar" style={{ background: "#70ad47" }} title="Teammate (offline stub)">T</span>
+              </div>
+              <span title={t("shell.titlebar.shareDisabledTooltip")}>
+                <Button variant="share" class="g-share-disabled" disabled aria-disabled="true" title={t("shell.titlebar.shareDisabledTooltip")}>
+                  {t("shell.titlebar.share")}
+                </Button>
+              </span>
+              <Button variant="ghost" size="sm" onClick={() => setSettingsOpen(true)} title={t("shell.titlebar.settings")} aria-label={t("shell.titlebar.settings")}>
                 <IconSettings />
               </Button>
-              <Button variant="share" onClick={() => void handleSave()} title="Save (Ctrl+S)">
-                <IconSave /> Save
+              <Button variant="share" onClick={() => void handleSave()} title={t("shell.titlebar.save")}>
+                <IconSave /> {t("common.save")}
               </Button>
             </div>
           </div>
-          <MenuBar menus={menus()} />
+          {/* Phase 3: ONE compact command bar (menus preserve MENU_ORDER) + session tabs */}
+          <CommandBar
+            menus={menus()}
+            onOpenPalette={() => setPaletteOpen(true)}
+            inspectorOpen={inspectorOpen()}
+            onToggleInspector={() => setInspectorOpen(!inspectorOpen())}
+            actions={[
+              { id: "cmd-new", label: "New", action: () => void handleNewDoc(activeMode() as EditorMode) },
+              { id: "cmd-open", label: "Open", action: () => void handleOpenFile() },
+              { id: "cmd-save", label: "Save", shortcut: "Ctrl+S", action: () => void handleSave() },
+              { id: "cmd-undo", label: "Undo", shortcut: "Ctrl+Z", action: () => emitEditorCommand("undo") },
+              { id: "cmd-redo", label: "Redo", shortcut: "Ctrl+Y", action: () => emitEditorCommand("redo") },
+              { id: "cmd-find", label: "Find", shortcut: "Ctrl+F", action: () => emitEditorCommand("find") },
+            ]}
+            overflowActions={shortcutRegistry
+              .getAll()
+              .filter((c) => c.menuPath && !["cmd-new", "cmd-open", "cmd-save", "cmd-undo", "cmd-redo", "cmd-find"].includes(c.id))
+              .slice(0, 24)
+              .map((c) => ({ id: c.id, label: c.title, shortcut: c.shortcut, action: c.action }))}
+          />
           <Show when={openSessions().length > 0}>
             <div
               role="tablist"
@@ -1061,7 +1177,7 @@ export function App() {
                       role="tab"
                       aria-selected={activeSessionId() === session.id}
                       title={session.filePath || session.title}
-                      onClick={() => activateSession(session.id)}
+                      onClick={() => void activateSession(session.id)}
                       style={{
                         display: "flex",
                         "align-items": "center",
@@ -1089,7 +1205,7 @@ export function App() {
                       title="Close document"
                       onClick={(event) => {
                         event.stopPropagation();
-                        closeSession(session.id);
+                        void closeSession(session.id);
                       }}
                       style={{
                         padding: "3px 5px",
@@ -1116,19 +1232,24 @@ export function App() {
           </Show>
         </header>
 
-        <main style={{ flex: 1, position: "relative", overflow: "hidden", "min-height": "0" }}>
+        <div style={{ flex: 1, display: "flex", "min-height": "0", overflow: "hidden" }}>
+        <main id="canvas-pane" data-pane="canvas" aria-label={t("shell.panes.canvas")} style={{ flex: 1, position: "relative", overflow: "hidden", "min-height": "0", "min-width": "0" }}>
           <Suspense
             fallback={
               <div style={{ padding: "48px", "text-align": "center", color: "var(--text-muted)" }}>
-                Loading editor…
+                {t("common.loading")}
               </div>
             }
           >
             <Show keyed when={docMounted() && activeMode() === "doc" ? activeSessionId() : null}>
-                <div id="editor-pane-doc" role="tabpanel" aria-labelledby="mode-tab-doc" style={{ height: "100%", width: "100%" }}>
+                <div id="editor-pane-doc" role="tabpanel" aria-labelledby="mode-tab-doc" aria-label={t("canvas.docLabel")} style={{ height: "100%", width: "100%" }}>
                   <DocEditor
                     initialContent={docContent()}
+                    compareDocuments={openSessions()
+                      .filter((session) => session.mode === "doc" && session.id !== activeSessionId())
+                      .map((session) => ({ id: session.id, title: session.title, content: session.content }))}
                     zoomLevel={zoomLevel()}
+                    spellcheckEnabled={settings().spellcheckEnabled !== false}
                     onRequestNew={() => void handleNewDoc("doc")}
                     onRequestOpen={() => void handleOpenFile()}
                     onRequestSave={() => void handleSave()}
@@ -1139,15 +1260,19 @@ export function App() {
                       syncCurrentSession();
                       scheduleAutosave(json);
                     }}
-                    onWordCountChange={setStatusInfo}
+                    onWordCountChange={(info) => {
+                      setStatusInfo(info);
+                      setSelectionSummary(info);
+                    }}
                   />
                 </div>
             </Show>
             <Show keyed when={sheetMounted() && activeMode() === "sheet" ? activeSessionId() : null}>
-                <div id="editor-pane-sheet" role="tabpanel" aria-labelledby="mode-tab-sheet" style={{ height: "100%", width: "100%" }}>
+                <div id="editor-pane-sheet" role="tabpanel" aria-labelledby="mode-tab-sheet" aria-label={t("canvas.gridLabel")} style={{ height: "100%", width: "100%" }}>
                   <SheetEditor
                     initialContent={docContent()}
                     zoomLevel={zoomLevel()}
+                    spellcheckEnabled={settings().spellcheckEnabled !== false}
                     onImportCsv={handleImportCsv}
                     onExportCsv={handleExportCsv}
                     onRequestNew={() => void handleNewDoc("sheet")}
@@ -1160,12 +1285,15 @@ export function App() {
                       syncCurrentSession();
                       scheduleAutosave(data);
                     }}
-                    onCellInfoChange={setStatusInfo}
+                    onCellInfoChange={(info) => {
+                      setStatusInfo(info);
+                      setSelectionSummary(info);
+                    }}
                   />
                 </div>
             </Show>
             <Show keyed when={slideMounted() && activeMode() === "slide" ? activeSessionId() : null}>
-                <div id="editor-pane-slide" role="tabpanel" aria-labelledby="mode-tab-slide" style={{ height: "100%", width: "100%" }}>
+                <div id="editor-pane-slide" role="tabpanel" aria-labelledby="mode-tab-slide" aria-label={t("canvas.slideLabel")} style={{ height: "100%", width: "100%" }}>
                   <SlideEditor
                     initialContent={docContent()}
                     zoomLevel={zoomLevel()}
@@ -1174,18 +1302,55 @@ export function App() {
                     onRequestOpen={() => void handleOpenFile()}
                     onRequestSave={() => void handleSave()}
                     onRequestExportPdf={() => void handleExport("pdf")}
+                    onRequestExportPptx={() => void handleExport("pptx")}
                     onChange={(deck) => {
                       setDocContent(deck);
                       setSaveState("Dirty");
                       syncCurrentSession();
                       scheduleAutosave(deck);
                     }}
-                    onSlideInfoChange={setStatusInfo}
+                    onSlideInfoChange={(info) => {
+                      setStatusInfo(info);
+                      setSelectionSummary(info);
+                    }}
                   />
                 </div>
             </Show>
           </Suspense>
         </main>
+
+        <Show when={inspectorOpen()}>
+          <Inspector
+            title={t("inspector.title")}
+            selectionSummary={selectionSummary()}
+            onClose={() => setInspectorOpen(false)}
+          >
+            <InspectorSection title={t("inspector.selection")}>
+              <div style={{ "font-size": "12px", color: "var(--text-secondary)" }}>
+                {selectionSummary() || t("inspector.empty")}
+              </div>
+            </InspectorSection>
+            <InspectorSection title={t("inspector.document")}>
+              <div style={{ display: "flex", "flex-direction": "column", gap: "6px", "font-size": "12px", color: "var(--text-secondary)" }}>
+                <div>{docTitle()}</div>
+                <div>{currentFilePath() || t("placeholder.untitled")}</div>
+                <div>Zoom: {zoomLevel()}% · {saveState() === "Dirty" ? t("statusbar.save.modified") : saveState() === "Saving" ? t("statusbar.save.saving") : t("statusbar.save.saved")}</div>
+              </div>
+            </InspectorSection>
+            <InspectorSection title={t("inspector.properties")}>
+              <div style={{ display: "flex", gap: "6px", "flex-wrap": "wrap" }}>
+                <Button size="sm" variant="secondary" onClick={() => emitEditorCommand("bold")}>{t("format.bold")} (Ctrl+B)</Button>
+                <Button size="sm" variant="secondary" onClick={() => emitEditorCommand("italic")}>{t("format.italic")} (Ctrl+I)</Button>
+                <Button size="sm" variant="secondary" onClick={() => emitEditorCommand("underline")}>{t("format.underline")} (Ctrl+U)</Button>
+                <Button size="sm" variant="secondary" onClick={() => setPaletteOpen(true)}>Ctrl+K</Button>
+              </div>
+              <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-top": "8px" }}>
+                {t("palette.hint")}
+              </div>
+            </InspectorSection>
+          </Inspector>
+        </Show>
+        </div>
 
         <StatusBar
           mode={activeMode() as any}
@@ -1193,13 +1358,13 @@ export function App() {
           wordCountInfo={statusInfo()}
           zoomLevel={zoomLevel()}
           onZoomChange={setZoomLevel}
-          pageStyle="Default"
-          language="English"
+          pageStyle={t("statusbar.defaultStyle")}
+          language={t("statusbar.english")}
         />
       </Show>
 
       <CommandPalette open={paletteOpen()} onClose={() => setPaletteOpen(false)} activeMode={activeMode()} />
-      <Dialog open={helpOpen()} title="Keyboard shortcuts" onClose={() => setHelpOpen(false)}>
+      <Dialog open={helpOpen()} title={t("shell.cheatsheet.title")} onClose={() => setHelpOpen(false)}>
         <div
           style={{
             "min-width": "420px",
@@ -1238,7 +1403,7 @@ export function App() {
             )}
           </For>
           <div style={{ "margin-top": "12px", "font-size": "12px", color: "var(--text-muted)" }}>
-            Press Ctrl+K to open the command palette.
+            {t("shell.cheatsheet.hint")} {t("a11y.f6Hint")} · F1 {t("shell.cheatsheet.title")} · F4 Repeat
           </div>
         </div>
       </Dialog>
@@ -1281,8 +1446,7 @@ export function App() {
         </div>
       </Dialog>
 
-      <Dialog open={importWarnings().length > 0} title="Compatibility report" onClose={() => setImportWarnings([])}>
-        <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
+      <Dialog open={importWarnings().length > 0} title="Compatibility report" onClose={() => setImportWarnings([])}>        <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
           <p style={{ "font-size": "13px", color: "var(--text-secondary)" }}>
             Some Office constructs were simplified or may not round-trip natively:
           </p>
@@ -1297,12 +1461,53 @@ export function App() {
         </div>
       </Dialog>
 
-      <CSVImportDialog 
+      <CSVImportDialog
         open={csvImportOpen()}
         path={csvImportPath()}
         onClose={cancelCsvImport}
         onImport={confirmCsvImport}
       />
+
+      <Dialog
+        open={pendingExport() !== null}
+        title="Export compatibility check"
+        onClose={() => {
+          setPendingExport(null);
+          setExportWarnings([]);
+        }}
+      >
+        <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
+          <p style={{ "font-size": "13px", color: "var(--text-secondary)" }}>
+            The following content will be simplified or may not round-trip natively in{" "}
+            {pendingExport()?.format?.toUpperCase()}:
+          </p>
+          <ul style={{ margin: 0, padding: "0 0 0 20px", color: "var(--text-primary)", "max-height": "40vh", overflow: "auto" }}>
+            <For each={exportWarnings()}>{(warning) => <li>{warning}</li>}</For>
+          </ul>
+          <div style={{ display: "flex", "justify-content": "flex-end", gap: "8px" }}>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setPendingExport(null);
+                setExportWarnings([]);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="share"
+              onClick={() => {
+                const pending = pendingExport();
+                setPendingExport(null);
+                setExportWarnings([]);
+                if (pending) void runExport(pending.format, pending.path);
+              }}
+            >
+              Export anyway
+            </Button>
+          </div>
+        </div>
+      </Dialog>
 
       <Dialog open={recoveryOpen()} title="Recover unsaved work" onClose={() => setRecoveryOpen(false)}>
         <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
@@ -1341,6 +1546,16 @@ export function App() {
       </Dialog>
 
       <AboutDialog open={aboutOpen()} onClose={() => setAboutOpen(false)} />
+
+      <ConfirmDialog
+        open={confirmState().open}
+        title={confirmState().title}
+        message={confirmState().message}
+        confirmLabel={confirmState().confirmLabel}
+        danger={confirmState().danger}
+        onConfirm={() => settleConfirm(true)}
+        onCancel={() => settleConfirm(false)}
+      />
 
       <ToastContainer />
     </div>

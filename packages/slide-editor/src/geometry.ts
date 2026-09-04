@@ -138,3 +138,23 @@ export function clearGroupIds<T extends { id: string; groupId?: string }>(
       : el,
   );
 }
+
+/** Ordered Morph-lite pairing: match elements across slides by stable id. */
+export function morphPairings(
+  from: SnapElement[],
+  to: SnapElement[],
+): Array<{ id: string; from: SnapElement; to: SnapElement }> {
+  const targets = new Map(to.map((el) => [el.id, el]));
+  const pairs: Array<{ id: string; from: SnapElement; to: SnapElement }> = [];
+  for (const el of from) {
+    const target = targets.get(el.id);
+    if (target) pairs.push({ id: el.id, from: el, to: target });
+  }
+  return pairs;
+}
+
+/** Crossfade+zoom interpolation factor for a Morph-lite transition step. */
+export function morphStep(eased: number): { opacity: number; scale: number } {
+  const t = Math.max(0, Math.min(1, eased));
+  return { opacity: t, scale: 0.92 + 0.08 * t };
+}

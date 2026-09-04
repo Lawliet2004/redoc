@@ -47,9 +47,11 @@ fn main() -> ExitCode {
     let cold_elapsed = cold_started.elapsed();
 
     let mut warm_samples_ms = Vec::with_capacity(WARM_ITERS);
-    for _ in 0..WARM_ITERS {
+    for iteration in 0..WARM_ITERS {
         let warm_started = Instant::now();
-        workbook.recalculate(0);
+        // Measure the realistic warm path: one edited source cell and its
+        // dependent formula, while the other 9,999 formulas remain cached.
+        workbook.set_cell_value(0, 1, 1, (FORMULA_ROWS + iteration as u32).to_string());
         warm_samples_ms.push(warm_started.elapsed().as_secs_f64() * 1000.0);
     }
 

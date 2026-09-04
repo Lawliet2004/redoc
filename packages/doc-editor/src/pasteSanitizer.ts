@@ -9,7 +9,7 @@ function stripDangerousAttributes(el: Element): void {
       el.removeAttribute(attr.name);
       continue;
     }
-    if (name === "style" || name === "srcdoc" || name === "href" && attr.value.trim().toLowerCase().startsWith("javascript:")) {
+    if (name === "style" || name === "srcdoc" || ((name === "href" || name === "src") && attr.value.trim().toLowerCase().startsWith("javascript:"))) {
       el.removeAttribute(attr.name);
     }
   }

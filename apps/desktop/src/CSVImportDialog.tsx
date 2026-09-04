@@ -30,9 +30,37 @@ export function CSVImportDialog(props: CSVImportDialogProps) {
     const loadPreview = async () => {
       setLoading(true);
       setError(null);
+      
       try {
+        // Optional file size check via fs API if in Tauri
+        let limitRows = false;
+        try {
+          const fsPluginName = "@tauri-apps/plugin-fs";
+          const { stat } = await import(/* @vite-ignore */ fsPluginName);
+          const fileInfo = await stat(props.path!);
+          if (fileInfo.size > 10 * 1024 * 1024) {
+            limitRows = true;
+          }
+        } catch {
+          // outside Tauri or plugin missing
+        }
+
         const d = delimiter() === "auto" ? null : delimiter();
         const workbook = await commands.importCsvFileWithOptions(props.path!, d, encoding());
+        
+        if (limitRows && workbook && workbook.sheets.length > 0) {
+          const sheet = workbook.sheets[0];
+          const newCells: Record<string, any> = {};
+          for (const key of Object.keys(sheet.cells)) {
+            const [r] = key.split(":").map(Number);
+            if (r <= 1000) {
+              newCells[key] = sheet.cells[key];
+            }
+          }
+          sheet.cells = newCells;
+          setError("File is larger than 10MB. Showing preview of first 1000 rows only.");
+        }
+
         if (!cancelled) {
           setPreviewData(workbook);
         }

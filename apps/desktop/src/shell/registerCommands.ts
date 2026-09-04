@@ -16,7 +16,7 @@ export interface AppCommandContext {
   handleSave: () => void;
   handleOpenFile: () => void;
   setExportOpen: (v: boolean) => void;
-  goHome: () => void;
+  goHome: () => void | Promise<void>;
   setPaletteOpen: (v: boolean) => void;
   setSettingsOpen: (v: boolean) => void;
   setHelpOpen: (v: boolean) => void;
@@ -29,7 +29,6 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
       {
         id: "new-document",
         title: "New Document",
-        shortcut: "Ctrl+Alt+1",
         mode: "global" as const,
         menuPath: ["File", "New Document"],
         action: () => void ctx.handleNewDoc("doc"),
@@ -37,7 +36,6 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
       {
         id: "new-spreadsheet",
         title: "New Spreadsheet",
-        shortcut: "Ctrl+Alt+2",
         mode: "global" as const,
         menuPath: ["File", "New Spreadsheet"],
         action: () => void ctx.handleNewDoc("sheet"),
@@ -45,7 +43,6 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
       {
         id: "new-presentation",
         title: "New Presentation",
-        shortcut: "Ctrl+Alt+3",
         mode: "global" as const,
         menuPath: ["File", "New Presentation"],
         action: () => void ctx.handleNewDoc("slide"),
@@ -73,7 +70,7 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
         mode: "global" as const,
         menuPath: ["File", "Home"],
         separatorBefore: true,
-        action: ctx.goHome,
+        action: () => void ctx.goHome(),
       },
       {
         id: "undo",
@@ -199,6 +196,14 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
         action: () => emitEditorCommand("insert-link"),
       },
       {
+        id: "insert-bookmark",
+        title: "Bookmark…",
+        mode: "doc" as const,
+        menuPath: ["Insert", "Bookmark…"],
+        disabled: () => ctx.activeMode() !== "doc",
+        action: () => emitEditorCommand("insert-bookmark"),
+      },
+      {
         id: "insert-chart",
         title: "Chart…",
         mode: "sheet" as const,
@@ -213,6 +218,30 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
         menuPath: ["Insert", "Page Break"],
         disabled: () => ctx.activeMode() !== "doc",
         action: () => emitEditorCommand("insert-page-break"),
+      },
+      {
+        id: "insert-page-field",
+        title: "Page Number Field",
+        mode: "doc" as const,
+        menuPath: ["Insert", "Field", "Page Number"],
+        disabled: () => ctx.activeMode() !== "doc",
+        action: () => emitEditorCommand("insert-page-field"),
+      },
+      {
+        id: "insert-num-pages-field",
+        title: "Total Pages Field",
+        mode: "doc" as const,
+        menuPath: ["Insert", "Field", "Total Pages"],
+        disabled: () => ctx.activeMode() !== "doc",
+        action: () => emitEditorCommand("insert-num-pages-field"),
+      },
+      {
+        id: "insert-toc",
+        title: "Table of Contents",
+        mode: "doc" as const,
+        menuPath: ["Insert", "Table of Contents"],
+        disabled: () => ctx.activeMode() !== "doc",
+        action: () => emitEditorCommand("insert-toc"),
       },
       {
         id: "add-comment",
@@ -413,11 +442,12 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
         title: "Home",
         mode: "global" as const,
         menuPath: ["Window", "Home"],
-        action: ctx.goHome,
+        action: () => void ctx.goHome(),
       },
       {
         id: "window-doc",
         title: "Document",
+        shortcut: "Ctrl+Alt+1",
         mode: "global" as const,
         menuPath: ["Window", "Document"],
         separatorBefore: true,
@@ -426,6 +456,7 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
       {
         id: "window-sheet",
         title: "Spreadsheet",
+        shortcut: "Ctrl+Alt+2",
         mode: "global" as const,
         menuPath: ["Window", "Spreadsheet"],
         action: () => void ctx.handleSwitchMode("sheet"),
@@ -433,6 +464,7 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
       {
         id: "window-slide",
         title: "Presentation",
+        shortcut: "Ctrl+Alt+3",
         mode: "global" as const,
         menuPath: ["Window", "Presentation"],
         action: () => void ctx.handleSwitchMode("slide"),

@@ -20,10 +20,19 @@
         "resizable": true,
         "fullscreen": false,
         "visible": true
+      },
+      {
+        "label": "presenter",
+        "title": "Redoc — Presenter",
+        "width": 1024,
+        "height": 768,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {

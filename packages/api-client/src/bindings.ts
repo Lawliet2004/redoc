@@ -16,6 +16,7 @@ export type {
   CellRange,
   DocWordCount,
   DocxImportResponse,
+  ExportFixupResponse,
   PptxImportResponse,
   XlsxImportResponse,
   RecoveredDoc,
@@ -24,6 +25,9 @@ export type {
   SheetData,
   SheetCell,
   PivotTableModel,
+  HistoryEntry,
+  MergeDecision,
+  AuthorProfile,
 } from "./generated";
 
 export type AppSettings = Omit<GeneratedAppSettings, "theme"> & {
@@ -250,4 +254,12 @@ export const commands = {
   pathsExist: async (paths: string[]) => await generatedCommands.pathsExist(paths),
   presenterSync: async (payload: { slide_index: number; deck_version: number; elapsed_ms: number; is_playing: boolean }) =>
     unwrap(await generatedCommands.presenterSync(payload)),
+  applyExportFixups: async (mode: string, format: string, body: unknown) =>
+    unwrap(
+      await generatedCommands.applyExportFixups(mode, format, JSON.stringify(body)),
+    ),
+  listDocumentHistory: async (docId: string) =>
+    unwrap(await generatedCommands.listDocumentHistory(docId)),
+  compareDocumentFiles: async (currentPath: string, candidatePath: string) =>
+    unwrap(await generatedCommands.compareDocumentFiles(currentPath, candidatePath)),
 };

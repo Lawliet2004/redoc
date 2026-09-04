@@ -1,5 +1,8 @@
-/* LibreOffice-class desktop chrome: dark toolbars/menus, light document canvases */
+/* Phase 3 modern collaborative chrome: single command bar + inspector, Inter, hard focus rings */
 :root {
+  --font-inter: "Inter", "Segoe UI", "Noto Sans", system-ui, sans-serif;
+  --focus-ring: 2px solid var(--border-focus);
+  --focus-ring-offset: 2px;
   --g-blue: #5b9bd5;
   --g-blue-hover: #4a8bc4;
   --g-blue-light: #2a3a4a;
@@ -43,17 +46,9 @@
   --sheet-accent: #70ad47;
   --slide-accent: #ed7d31;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45);
-  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.5);
   --shadow-paper: 0 0 0 1px #1a1a1a, 0 4px 16px rgba(0, 0, 0, 0.55);
 
-  --radius-sm: 2px;
-  --radius-md: 3px;
-  --radius-lg: 4px;
-  --radius-full: 9999px;
-
-  --font-sans: "Segoe UI", "Noto Sans", Tahoma, Arial, Helvetica, sans-serif;
+  --font-sans: "Inter", "Segoe UI", "Noto Sans", system-ui, -apple-system, sans-serif;
   --font-doc: "Liberation Serif", "Times New Roman", Times, serif;
   --font-sheet: "Liberation Sans", Arial, Helvetica, sans-serif;
   --font-mono: "Liberation Mono", Consolas, "Courier New", monospace;
@@ -66,6 +61,57 @@
   --sidebar-panel-w: 220px;
   --ruler-h: 22px;
   --formula-h: 24px;
+
+  /* New Design Tokens */
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-overlay: 300;
+  --z-modal: 400;
+  --z-popover: 500;
+  --z-toast: 600;
+  --z-tooltip: 700;
+
+  --font-xs: 11px;
+  --font-sm: 12px;
+  --font-base: 13px;
+  --font-md: 14px;
+  --font-lg: 16px;
+  --font-xl: 18px;
+  --font-2xl: 20px;
+  --font-3xl: 24px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
+
+  --transition-fast: 100ms ease;
+  --transition-base: 200ms ease;
+  --transition-slow: 300ms ease;
+
+  /* Dark-chrome defaults (light theme overrides below) */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+  --shadow-md: 0 4px 6px rgba(0,0,0,0.4);
+  --shadow-lg: 0 10px 15px rgba(0,0,0,0.5);
+  --shadow-xl: 0 20px 25px rgba(0,0,0,0.6);
+
+  --color-surface: #1e1e1e;
+  --color-surface-hover: #2a2a2a;
+  --color-error: #ef4444;
+  --color-warning: #f59e0b;
+  --color-success: #22c55e;
+  --color-info: #3b82f6;
+  --color-toolbar-bg: #2b2b2b;
 }
 
 /* Explicit light theme override (optional via settings) */
@@ -96,7 +142,12 @@
   --slide-accent: #c05600;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.12);
   --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.18);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.12);
+  --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.15);
   --shadow-paper: 0 0 0 1px #888, 0 2px 8px rgba(0, 0, 0, 0.25);
+  --color-surface: #ffffff;
+  --color-surface-hover: #f3f4f6;
+  --color-toolbar-bg: #f9fafb;
 }
 
 [data-theme="dark"] {
@@ -228,7 +279,7 @@ select {
   outline: none;
 }
 
-/* —— Dense LibreOffice-style chrome helpers —— */
+/* —— Dense modern chrome helpers —— */
 .g-icon-btn {
   display: inline-flex;
   align-items: center;
@@ -237,10 +288,11 @@ select {
   height: 24px;
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
-  transition: background 0.05s ease;
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
 .g-icon-btn:hover {
   background: var(--bg-tertiary);
+  color: var(--text-primary);
 }
 .g-icon-btn:active {
   background: var(--border-color);
@@ -258,9 +310,10 @@ select {
   font-size: 12px;
   gap: 2px;
   flex-shrink: 0;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast);
 }
 .g-toolbar-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-surface-hover);
 }
 .g-toolbar-btn:disabled {
   opacity: 0.35;
@@ -268,9 +321,13 @@ select {
 }
 .g-toolbar-btn.active,
 .g-toolbar-btn[aria-pressed="true"] {
-  background: rgba(91, 155, 213, 0.35);
-  color: #fff;
-  box-shadow: inset 0 0 0 1px rgba(91, 155, 213, 0.6);
+  background: var(--accent-light);
+  color: var(--accent-hover);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-color) 55%, transparent);
+}
+[data-theme="light"] .g-toolbar-btn.active,
+[data-theme="light"] .g-toolbar-btn[aria-pressed="true"] {
+  color: var(--accent-color);
 }
 
 .g-toolbar-sep {
@@ -321,6 +378,7 @@ select {
   padding: 2px 8px;
   border-radius: var(--radius-sm);
   line-height: 18px;
+  transition: background var(--transition-fast);
 }
 .g-menu-item:hover {
   background: var(--bg-tertiary);
@@ -329,13 +387,15 @@ select {
 .g-share-btn {
   background: var(--accent-color);
   color: #fff;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   padding: 4px 12px;
   font-size: 12px;
   font-weight: 500;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
 }
 .g-share-btn:hover {
   background: var(--accent-hover);
+  box-shadow: var(--shadow-sm);
 }
 
 .g-mode-pill {
@@ -400,9 +460,11 @@ select {
   justify-content: center;
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
 .g-sidebar-rail-btn:hover {
   background: var(--bg-tertiary);
+  color: var(--text-primary);
 }
 .g-sidebar-rail-btn.active {
   background: var(--accent-light);
@@ -623,5 +685,607 @@ select {
   textarea:focus-visible {
     outline: var(--focus-ring);
     outline-offset: 2px;
+  }
+}
+
+/* —— Home screen (Google-Docs-style modern layout) —— */
+.home-root {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-home);
+  overflow: auto;
+  height: 100%;
+}
+
+.home-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-3) var(--space-6);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-color);
+  gap: var(--space-4);
+}
+
+.home-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 160px;
+}
+.home-brand-badge {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-lg);
+  background: var(--g-blue-light);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--doc-accent);
+}
+.home-brand-name {
+  font-size: 22px;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.home-search {
+  flex: 1;
+  max-width: 720px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-xl);
+  padding: 10px var(--space-4);
+  height: 48px;
+  transition: box-shadow var(--transition-base), border-color var(--transition-base);
+  border: 1px solid transparent;
+}
+.home-search:focus-within {
+  border-color: var(--accent-color);
+  box-shadow: var(--shadow-sm);
+}
+.home-search input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  font-size: 16px;
+  color: var(--text-primary);
+}
+.home-search input::placeholder {
+  color: var(--text-muted);
+}
+
+.home-open-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px var(--space-4);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 500;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.home-open-btn:hover {
+  border-color: var(--accent-color);
+  box-shadow: var(--shadow-sm);
+}
+
+.home-section {
+  background: var(--bg-secondary);
+  padding: 28px 0 32px;
+}
+.home-section-inner {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 var(--space-6);
+}
+.home-section-title {
+  font-size: var(--font-lg);
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.home-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 148px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  gap: 10px;
+  padding: 0;
+}
+.home-tile-canvas {
+  height: 186px;
+  background: var(--bg-paper);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+  transition: border-color var(--transition-base), box-shadow var(--transition-base), transform var(--transition-base);
+}
+.home-tile:hover .home-tile-canvas {
+  border-color: var(--accent-color, var(--tile-accent));
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
+}
+.home-tile:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 3px;
+}
+.home-tile-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.home-tile-label {
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.home-tile-sublabel {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.home-recent-section {
+  max-width: 1080px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 28px var(--space-6) 48px;
+}
+.home-recent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-4);
+}
+.home-recent-sort {
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.home-filter-tabs {
+  display: flex;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: var(--space-2);
+}
+.home-filter-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 400;
+  cursor: pointer;
+  padding: 0 4px 8px;
+  margin-bottom: -10px;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+.home-filter-tab:hover {
+  color: var(--text-primary);
+}
+.home-filter-tab[aria-selected="true"] {
+  border-bottom-color: var(--accent-color);
+  color: var(--accent-color);
+  font-weight: 500;
+}
+
+.home-empty {
+  padding: 48px var(--space-6);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
+.home-file-card {
+  background: var(--bg-surface);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+}
+.home-file-row {
+  display: grid;
+  grid-template-columns: 1fr 180px 160px 40px;
+  align-items: center;
+  padding: 10px var(--space-4);
+  border-bottom: 1px solid var(--border-color);
+  cursor: pointer;
+  font-size: 14px;
+  transition: background var(--transition-fast);
+}
+.home-file-row:hover {
+  background: var(--bg-tertiary);
+}
+.home-file-row[data-missing="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.home-file-row-head {
+  display: grid;
+  grid-template-columns: 1fr 180px 160px 40px;
+  padding: 10px var(--space-4);
+  font-size: 12px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-color);
+  font-weight: 500;
+}
+.home-file-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.home-file-title {
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.home-file-path {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.home-file-meta {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+/* ── Motion polish ────────────────────────────────────────────────────────
+   One shared curve for every interactive surface so the shell feels like a
+   single application rather than three editors glued together. 120ms is
+   below perceptible lag for hover/press, 180ms for surface changes. */
+button,
+[role="tab"],
+.g-mode-pill,
+.g-toolbar-btn,
+.g-menu,
+.g-menu-item,
+.g-dialog,
+.g-panel {
+  transition:
+    background-color 120ms cubic-bezier(0.2, 0, 0, 1),
+    color 120ms cubic-bezier(0.2, 0, 0, 1),
+    border-color 120ms cubic-bezier(0.2, 0, 0, 1),
+    box-shadow 180ms cubic-bezier(0.2, 0, 0, 1),
+    opacity 120ms linear;
+}
+
+/* Monospace numerals for counts and telemetry so digits stop jittering as
+   values animate (page counts, cell aggregates, latency readouts). */
+.g-status-count,
+.home-file-meta [data-numeric],
+.g-telemetry-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Focus ring parity across every editor chrome element. */
+.g-toolbar-btn:focus-visible,
+.g-menu-item:focus-visible,
+[role="tab"]:focus-visible {
+  outline: 2px solid var(--focus-ring, #7c3aed);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button,
+  [role="tab"],
+  .g-mode-pill,
+  .g-toolbar-btn,
+  .g-menu,
+  .g-menu-item,
+  .g-dialog,
+  .g-panel {
+    transition: none;
+  }
+}
+
+/* —— Phase 3: compact command bar + inspector + collaborative home —— */
+body {
+  font-family: var(--font-sans);
+}
+.g-commandbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0 8px;
+  background: var(--bg-menubar);
+  border-bottom: 1px solid var(--border-color);
+  overflow: visible;
+  flex-shrink: 0;
+}
+.g-cmd-menu-trigger {
+  font-size: 12px;
+  color: var(--text-primary);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  line-height: 20px;
+  white-space: nowrap;
+}
+.g-cmd-menu-trigger:hover,
+.g-cmd-menu-trigger[aria-expanded="true"] {
+  background: var(--bg-tertiary);
+}
+.g-cmd-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 230px;
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: 6px 0;
+  z-index: 300;
+}
+.g-cmd-overflow {
+  left: auto;
+  right: 0;
+  min-width: 200px;
+}
+.g-cmd-sep {
+  height: 1px;
+  background: var(--border-color);
+  margin: 6px 0;
+}
+.g-cmd-sep-v {
+  width: 1px;
+  align-self: stretch;
+  margin: 8px 4px;
+  background: var(--border-color);
+  flex-shrink: 0;
+}
+.g-cmd-menuitem {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 8px 14px;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: left;
+}
+.g-cmd-menuitem:hover:not([disabled]) {
+  background: var(--bg-tertiary);
+}
+.g-cmd-menuitem[disabled] {
+  color: var(--text-muted);
+  cursor: default;
+}
+.g-cmd-kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+.g-cmd-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 180px;
+  max-width: 300px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-full);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.g-cmd-search:hover {
+  border-color: var(--border-focus);
+  color: var(--text-primary);
+}
+.g-inspector {
+  width: 260px;
+  background: var(--bg-sidebar);
+  border-left: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.g-inspector-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+.g-inspector-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.g-inspector-selection {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+.g-inspector-body {
+  flex: 1;
+  overflow: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.g-inspector-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.g-statusbar roving-note,
+.g-avatar-stack {
+  display: inline-flex;
+  align-items: center;
+}
+.g-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--bg-menubar);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  margin-left: -6px;
+}
+.g-avatar:first-child {
+  margin-left: 0;
+}
+.g-share-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.g-skip-link {
+  position: absolute;
+  left: 8px;
+  top: -40px;
+  z-index: 1000;
+  background: var(--accent-color);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  transition: top 120ms ease;
+}
+.g-skip-link:focus {
+  top: 8px;
+}
+/* Home 3-zone */
+.home-3zone {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 200px 1fr 300px;
+  min-height: 0;
+  overflow: hidden;
+}
+.home-rail {
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border-color);
+  padding: 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: auto;
+}
+.home-rail-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-align: left;
+}
+.home-rail-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+.home-rail-btn[aria-pressed="true"] {
+  background: var(--accent-light);
+  color: var(--accent-color);
+  font-weight: 600;
+}
+.home-center {
+  overflow: auto;
+  padding: 20px 24px 40px;
+  min-width: 0;
+}
+.home-right {
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border-color);
+  overflow: auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.home-tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 14px;
+  margin: 12px 0 20px;
+}
+/* Hard focus rings (Inter chrome, both themes, high-contrast safe) */
+.g-commandbar :focus-visible,
+.g-inspector :focus-visible,
+.g-toolbar-btn:focus-visible,
+.g-icon-btn:focus-visible,
+.g-menu-item:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: var(--focus-ring, 2px solid var(--border-focus)) !important;
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+@media (prefers-contrast: more) {
+  .g-commandbar,
+  .g-inspector,
+  .home-rail,
+  .home-right {
+    border-color: currentColor;
+  }
+  .g-cmd-search,
+  .g-cmd-menu {
+    border-width: 2px;
+  }
+}
+@media (max-width: 1100px) {
+  .home-3zone {
+    grid-template-columns: 180px 1fr;
+  }
+  .home-right {
+    display: none;
   }
 }

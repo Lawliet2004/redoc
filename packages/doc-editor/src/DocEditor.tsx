@@ -1,7 +1,7 @@
-import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show, For } from "solid-js";
 import { EditorState, Plugin, TextSelection, NodeSelection } from "prosemirror-state";
 import { Decoration, DecorationSet, EditorView } from "prosemirror-view";
-import { Schema, MarkSpec, NodeSpec, Mark, Node, Fragment, Slice } from "prosemirror-model";
+import { Schema, MarkSpec, NodeSpec, Mark, Node, Fragment, Slice, DOMSerializer } from "prosemirror-model";
 import { schema as basicSchema } from "prosemirror-schema-basic";
 import { addListNodes, wrapInList, sinkListItem, liftListItem } from "prosemirror-schema-list";
 import { history, undo, redo } from "prosemirror-history";
@@ -17,8 +17,11 @@ import {
   deleteRow,
   addColumnAfter,
   deleteColumn,
+  tableNodes,
+  toggleHeaderRow as pmToggleHeaderRow,
+  deleteTable,
 } from "prosemirror-tables";
-import { Dialog } from "@redoc/ui";
+import { Dialog, showToast } from "@redoc/ui";
 import { PrintPreview } from "./PrintPreview";
 import {
   IconBold, IconItalic, IconUnderline, IconStrikethrough, IconAlignLeft, IconAlignCenter,
@@ -37,358 +40,67 @@ import {
 import { commands } from "@redoc/api-client";
 import { BubbleToolbar } from "./BubbleToolbar";
 import { PageSetupDialog, type PageSetupConfig } from "./PageSetupDialog";
+import { DEFAULT_PAGE_SETUP, normalizePageSetupConfig, formatPrintHeaderFooter } from "./pageSetup";
 import { DocToolbar } from "./DocToolbar";
 import { FindReplace } from "./FindReplace";
 import { transformPastedHTML } from "./pasteSanitizer";
-import type { DocContent, DocEditorProps, TableCommandState } from "./types";
+import { findBookmarkPosition, normalizeBookmarkName } from "./bookmarks";
+import { normalizeDocLink } from "./links";
+import { documentFieldResult, normalizeDocumentFieldKind, type DocumentFieldKind } from "./fields";
+import { buildTocContent, sanitizeTocAnchor, type TocEntry } from "./toc";
+import type { DocContent, DocEditorProps, ReviewComment, TableCommandState } from "./types";
+import { mapReviewCommentAnchors } from "./review";
+import { compareDocContent, findCompareSource } from "./compare";
+import {
+  BUILT_IN_STYLES,
+  customStylesForDoc,
+  normalizeStyleName,
+  styleBlockAttrs,
+  styleIdFromName,
+  styleInlineAttrs,
+  type NamedStyleDef,
+} from "./styles";
+import {
+  newFootnoteId,
+  readFootnotes,
+  syncFootnotesWithRefs,
+  type Footnote,
+} from "./footnotes";
+import {
+  getTrackedChangeStats,
+  getTrackedChangeSummaries,
+  resolveTrackedChange,
+  resolveTrackedChanges,
+  insertedRangesFromTransaction,
+  TRACK_DELETE_MARK,
+  TRACK_INSERT_MARK,
+  type TrackedChangeDecision,
+  type TrackedChangeKind,
+} from "./trackedChanges";
 
-/** Persist as bold/italic so DOCX/PDF exporters match. */
-const customMarks: Record<string, MarkSpec> = {
-  bold: {
-    parseDOM: [
-      { tag: "strong" },
-      { tag: "b" },
-      { style: "font-weight=bold" },
-      { style: "font-weight=700" },
-    ],
-    toDOM: () => ["strong", 0],
-  },
-  italic: {
-    parseDOM: [{ tag: "em" }, { tag: "i" }, { style: "font-style=italic" }],
-    toDOM: () => ["em", 0],
-  },
-  link: basicSchema.spec.marks.get("link")!,
-  underline: {
-    parseDOM: [{ tag: "u" }, { style: "text-decoration=underline" }],
-    toDOM: () => ["u", 0],
-  },
-  strike: {
-    parseDOM: [{ tag: "s" }, { tag: "del" }, { style: "text-decoration=line-through" }],
-    toDOM: () => ["s", 0],
-  },
-  color: {
-    attrs: { color: { default: "#111827" } },
-    parseDOM: [{ style: "color", getAttrs: (value) => ({ color: value }) }],
-    toDOM: (mark) => ["span", { style: `color: ${mark.attrs.color}` }, 0],
-  },
-  highlight: {
-    attrs: { color: { default: "#fef08a" } },
-    parseDOM: [{ style: "background-color", getAttrs: (value) => ({ color: value }) }],
-    toDOM: (mark) => ["span", { style: `background-color: ${mark.attrs.color}` }, 0],
-  },
-  fontFamily: {
-    attrs: { family: { default: "Liberation Serif" } },
-    parseDOM: [
-      {
-        style: "font-family",
-        getAttrs: (value) => ({ family: String(value).split(",")[0].replace(/['"]/g, "").trim() }),
-      },
-    ],
-    toDOM: (mark) => ["span", { style: `font-family: ${mark.attrs.family}` }, 0],
-  },
-  fontSize: {
-    attrs: { size: { default: "12" } },
-    parseDOM: [
-      {
-        style: "font-size",
-        getAttrs: (value) => {
-          const m = String(value).match(/([\d.]+)/);
-          return m ? { size: m[1] } : null;
-        },
-      },
-    ],
-    toDOM: (mark) => ["span", { style: `font-size: ${mark.attrs.size}pt` }, 0],
-  },
-  superscript: {
-    excludes: "subscript",
-    parseDOM: [{ tag: "sup" }, { style: "vertical-align=super" }],
-    toDOM: () => ["sup", 0],
-  },
-  subscript: {
-    excludes: "superscript",
-    parseDOM: [{ tag: "sub" }, { style: "vertical-align=sub" }],
-    toDOM: () => ["sub", 0],
-  },
-};
+import { mySchema } from "./schema";
 
-const pageBreakSpec: NodeSpec = {
-  group: "block",
-  selectable: true,
-  atom: true,
-  parseDOM: [{ tag: "div[data-page-break]" }],
-  toDOM: () => [
-    "div",
-    {
-      "data-page-break": "true",
-      class: "doc-page-break",
-      style:
-        "page-break-after:always;border-top:1px dashed #9aa0a6;margin:24px 0;height:0;position:relative;",
-      contenteditable: "false",
-    },
-  ],
-};
-
-const styledNodes = addListNodes(basicSchema.spec.nodes, "paragraph block*", "block")
-  .update("paragraph", {
-    ...basicSchema.spec.nodes.get("paragraph"),
-    attrs: {
-      align: { default: "left" },
-      indent: { default: 0 },
-      lineHeight: { default: 1.5 },
-      spacingBefore: { default: 0 },
-      spacingAfter: { default: 0 },
-    },
-    parseDOM: [
-      {
-        tag: "p",
-        getAttrs: (dom) => {
-          const el = dom as HTMLElement;
-          const mt = el.style.marginTop?.replace("pt", "");
-          const mb = el.style.marginBottom?.replace("pt", "");
-          return {
-            spacingBefore: mt ? Number(mt) || 0 : 0,
-            spacingAfter: mb ? Number(mb) || 0 : 0,
-          };
-        },
-      },
-    ],
-    toDOM: (node) => [
-      "p",
-      {
-        style: `text-align:${node.attrs.align};margin-left:${node.attrs.indent}em;line-height:${node.attrs.lineHeight};margin-top:${node.attrs.spacingBefore}pt;margin-bottom:${node.attrs.spacingAfter}pt`,
-      },
-      0,
-    ],
-  })
-  .update("heading", {
-    ...basicSchema.spec.nodes.get("heading"),
-    attrs: {
-      level: { default: 1 },
-      align: { default: "left" },
-      indent: { default: 0 },
-      lineHeight: { default: 1.5 },
-      spacingBefore: { default: 0 },
-      spacingAfter: { default: 0 },
-    },
-    parseDOM: [
-      {
-        tag: "h1",
-        attrs: { level: 1 },
-        getAttrs: (dom) => {
-          const el = dom as HTMLElement;
-          const mt = el.style.marginTop?.replace("pt", "");
-          const mb = el.style.marginBottom?.replace("pt", "");
-          return {
-            level: 1,
-            spacingBefore: mt ? Number(mt) || 0 : 0,
-            spacingAfter: mb ? Number(mb) || 0 : 0,
-          };
-        },
-      },
-      {
-        tag: "h2",
-        attrs: { level: 2 },
-        getAttrs: (dom) => {
-          const el = dom as HTMLElement;
-          const mt = el.style.marginTop?.replace("pt", "");
-          const mb = el.style.marginBottom?.replace("pt", "");
-          return { level: 2, spacingBefore: mt ? Number(mt) || 0 : 0, spacingAfter: mb ? Number(mb) || 0 : 0 };
-        },
-      },
-      {
-        tag: "h3",
-        attrs: { level: 3 },
-        getAttrs: (dom) => {
-          const el = dom as HTMLElement;
-          const mt = el.style.marginTop?.replace("pt", "");
-          const mb = el.style.marginBottom?.replace("pt", "");
-          return { level: 3, spacingBefore: mt ? Number(mt) || 0 : 0, spacingAfter: mb ? Number(mb) || 0 : 0 };
-        },
-      },
-      {
-        tag: "h4",
-        attrs: { level: 4 },
-        getAttrs: (dom) => {
-          const el = dom as HTMLElement;
-          const mt = el.style.marginTop?.replace("pt", "");
-          const mb = el.style.marginBottom?.replace("pt", "");
-          return { level: 4, spacingBefore: mt ? Number(mt) || 0 : 0, spacingAfter: mb ? Number(mb) || 0 : 0 };
-        },
-      },
-      {
-        tag: "h5",
-        attrs: { level: 5 },
-        getAttrs: (dom) => {
-          const el = dom as HTMLElement;
-          const mt = el.style.marginTop?.replace("pt", "");
-          const mb = el.style.marginBottom?.replace("pt", "");
-          return { level: 5, spacingBefore: mt ? Number(mt) || 0 : 0, spacingAfter: mb ? Number(mb) || 0 : 0 };
-        },
-      },
-      {
-        tag: "h6",
-        attrs: { level: 6 },
-        getAttrs: (dom) => {
-          const el = dom as HTMLElement;
-          const mt = el.style.marginTop?.replace("pt", "");
-          const mb = el.style.marginBottom?.replace("pt", "");
-          return { level: 6, spacingBefore: mt ? Number(mt) || 0 : 0, spacingAfter: mb ? Number(mb) || 0 : 0 };
-        },
-      },
-    ],
-    toDOM: (node) => [
-      `h${node.attrs.level}`,
-      {
-        style: `text-align:${node.attrs.align};margin-left:${node.attrs.indent}em;line-height:${node.attrs.lineHeight};margin-top:${node.attrs.spacingBefore}pt;margin-bottom:${node.attrs.spacingAfter}pt`,
-      },
-      0,
-    ],
-  })
-  .addToEnd("table", {
-    group: "block",
-    content: "table_row+",
-    tableRole: "table",
-    isolating: true,
-    toDOM: () => [
-      "table",
-      { style: "border-collapse:collapse;width:100%;margin:8px 0" },
-      ["tbody", 0],
-    ],
-  })
-  .addToEnd("table_row", {
-    content: "table_cell+",
-    tableRole: "row",
-    toDOM: () => ["tr", 0],
-  })
-  .addToEnd("table_cell", {
-    content: "block+",
-    attrs: {
-      header: { default: false },
-      colspan: { default: 1 },
-      rowspan: { default: 1 },
-      colwidth: { default: null },
-    },
-    tableRole: "cell",
-    isolating: true,
-    parseDOM: [
-      {
-        tag: "td",
-        getAttrs: (dom) => {
-          const el = dom as HTMLElement;
-          const widthAttr = el.getAttribute("data-colwidth");
-          const widths = widthAttr
-            ? widthAttr.split(",").map((s) => Number(s) || 0)
-            : el.style.width
-              ? [parseInt(el.style.width, 10)]
-              : null;
-          return {
-            header: false,
-            colspan: Number(el.getAttribute("colspan") || 1),
-            rowspan: Number(el.getAttribute("rowspan") || 1),
-            colwidth: widths && widths.some((w) => w > 0) ? widths : null,
-          };
-        },
-      },
-      {
-        tag: "th",
-        getAttrs: (dom) => {
-          const el = dom as HTMLElement;
-          const widthAttr = el.getAttribute("data-colwidth");
-          const widths = widthAttr
-            ? widthAttr.split(",").map((s) => Number(s) || 0)
-            : el.style.width
-              ? [parseInt(el.style.width, 10)]
-              : null;
-          return {
-            header: true,
-            colspan: Number(el.getAttribute("colspan") || 1),
-            rowspan: Number(el.getAttribute("rowspan") || 1),
-            colwidth: widths && widths.some((w) => w > 0) ? widths : null,
-          };
-        },
-      },
-    ],
-    toDOM: (node) => {
-      const widths = node.attrs.colwidth as number[] | null;
-      const styleParts = [
-        "border:1px solid #dadce0",
-        "padding:6px 8px",
-        "min-width:48px",
-        "vertical-align:top",
-      ];
-      if (widths?.[0]) styleParts.push(`width:${widths[0]}px`);
-      return [
-        node.attrs.header ? "th" : "td",
-        {
-          style: styleParts.join(";"),
-          colspan: node.attrs.colspan > 1 ? node.attrs.colspan : undefined,
-          rowspan: node.attrs.rowspan > 1 ? node.attrs.rowspan : undefined,
-          "data-colwidth": widths?.length ? widths.join(",") : undefined,
-        },
-        0,
-      ];
-    },
-  })
-  .addToEnd("page_break", pageBreakSpec);
-
-const imageBase = basicSchema.spec.nodes.get("image")!;
-const imageAttrs = imageBase.attrs ?? {};
-const nodesWithImage = styledNodes.update("image", {
-  ...imageBase,
-  attrs: {
-    src: imageAttrs.src ?? {},
-    alt: { default: null },
-    title: { default: null },
-    width: { default: null },
-    height: { default: null },
-  },
-  parseDOM: [
-    {
-      tag: "img[src]",
-      getAttrs(dom) {
-        const el = dom as HTMLElement;
-        const w = el.getAttribute("width") || el.style.width;
-        const h = el.getAttribute("height") || el.style.height;
-        return {
-          src: el.getAttribute("src"),
-          alt: el.getAttribute("alt"),
-          title: el.getAttribute("title"),
-          width: w ? Number.parseInt(String(w), 10) || null : null,
-          height: h ? Number.parseInt(String(h), 10) || null : null,
-        };
-      },
-    },
-  ],
-  toDOM(node) {
-    const style: string[] = [];
-    if (node.attrs.width) style.push(`width:${node.attrs.width}px`);
-    if (node.attrs.height) style.push(`height:${node.attrs.height}px`);
-    return [
-      "img",
-      {
-        src: node.attrs.src,
-        alt: node.attrs.alt || "",
-        style: style.length ? style.join(";") : undefined,
-      },
-    ];
-  },
-});
-
-const mySchema = new Schema({
-  nodes: nodesWithImage,
-  marks: customMarks,
-});
-
-function buildDocJson(doc: Node, setup: PageSetupConfig): DocContent {
+function buildDocJson(
+  doc: Node,
+  setup: PageSetupConfig,
+  comments: ReviewComment[] = [],
+  styles: NamedStyleDef[] = [],
+  footnotes: Footnote[] = [],
+): DocContent {
   return {
     ...(doc.toJSON() as DocContent),
     pageSetup: setup,
+    ...(comments.length ? { comments } : {}),
+    ...(styles.length ? { styles } : {}),
+    ...(footnotes.length ? { footnotes } : {}),
   };
 }
 
 function docJsonForCompare(json: DocContent): string {
   const copy = { ...json };
   delete copy.pageSetup;
+  delete (copy as Record<string, unknown>).styles;
+  delete copy.footnotes;
   return JSON.stringify(copy);
 }
 
@@ -449,15 +161,62 @@ function collectMatches(
   return matches;
 }
 
+/**
+ * Best-effort text extraction from a raw document JSON body. Used only when
+ * the schema cannot parse the document — we keep the user's words instead of
+ * silently substituting an empty page.
+ */
+function extractPlainText(content: unknown): string {
+  const parts: string[] = [];
+  const walk = (value: any) => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.forEach(walk);
+      return;
+    }
+    if (typeof value.text === "string") parts.push(value.text);
+    if (value.content) walk(value.content);
+  };
+  walk(content);
+  return parts.join("").trim();
+}
+
+function bookmarkNamesInDocument(doc: Node): Set<string> {
+  const names = new Set<string>();
+  doc.descendants((node) => {
+    if (!node.isText) return;
+    for (const mark of node.marks) {
+      if (mark.type.name !== "bookmark") continue;
+      const name = normalizeBookmarkName(String(mark.attrs.name || ""));
+      if (name) names.add(name.toLowerCase());
+    }
+  });
+  return names;
+}
+
 function findPlugin(getQuery: () => string, getMatchCase: () => boolean, getActive: () => number) {
+  // Matches depend only on (doc, query, matchCase) — memoize so selection
+  // changes and cursor blinks don't rescan the whole document.
+  let cacheDoc: EditorState["doc"] | null = null;
+  let cacheQuery = "";
+  let cacheMatchCase = false;
+  let cacheMatches: Array<{ from: number; to: number }> = [];
   return new Plugin({
     props: {
       decorations(state) {
         const query = getQuery();
         if (!query) return null;
-        const matches = collectMatches(state.doc, query, getMatchCase());
+        const matchCase = getMatchCase();
+        if (
+          state.doc !== cacheDoc || query !== cacheQuery || matchCase !== cacheMatchCase
+        ) {
+          cacheMatches = collectMatches(state.doc, query, matchCase);
+          cacheDoc = state.doc;
+          cacheQuery = query;
+          cacheMatchCase = matchCase;
+        }
         const active = getActive();
-        const decos = matches.map((m, i) =>
+        const decos = cacheMatches.map((m, i) =>
           Decoration.inline(m.from, m.to, {
             class: i === active ? "doc-find-active" : "doc-find-match",
             style:
@@ -467,6 +226,73 @@ function findPlugin(getQuery: () => string, getMatchCase: () => boolean, getActi
           })
         );
         return DecorationSet.create(state.doc, decos);
+      },
+    },
+  });
+}
+
+/**
+ * Word-style automatic track-changes: while the toggle is on, every inserted
+ * range produced by user transactions gets a trackInsert mark (skipping
+ * changes the plugin itself appends, marked with the "auto-track" meta).
+ */
+function autoTrackChangesPlugin(getEnabled: () => boolean, createMark: () => any) {
+  return new Plugin({
+    appendTransaction: (transactions, _oldState, newState) => {
+      if (!getEnabled()) return null;
+      let tr = newState.tr;
+      let marked = false;
+      for (const transaction of transactions) {
+        if (transaction.getMeta("auto-track")) continue;
+        if (!transaction.docChanged) continue;
+        for (const range of insertedRangesFromTransaction(transaction)) {
+          const from = Math.max(0, Math.min(range.from, newState.doc.content.size));
+          const to = Math.max(from, Math.min(range.to, newState.doc.content.size));
+          if (to <= from) continue;
+          // Only mark ranges that contain text (typing/paste). Block-level
+          // inserts such as tables, rules and hard breaks are left alone.
+          let hasText = false;
+          let hasBlock = false;
+          newState.doc.nodesBetween(from, to, (node) => {
+            if (node.isText) hasText = true;
+            if (node.isBlock && node.type.name !== "paragraph") hasBlock = true;
+            return true;
+          });
+          if (!hasText || hasBlock) continue;
+          tr = tr.addMark(from, to, createMark());
+          marked = true;
+        }
+      }
+      if (!marked) return null;
+      tr.setMeta("auto-track", true);
+      // Keep our appended mark transaction out of undo-history groups that
+      // would otherwise split it from the edit it decorates.
+      tr.setMeta("addToHistory", false);
+      return tr;
+    },
+  });
+}
+
+function reviewCommentPlugin(getComments: () => ReviewComment[]) {
+  return new Plugin({
+    props: {
+      decorations(state) {
+        const decorations: Decoration[] = [];
+        for (const comment of getComments()) {
+          if (comment.resolved || comment.from >= comment.to) continue;
+          if (comment.from < 0 || comment.to > state.doc.content.size) continue;
+          try {
+            decorations.push(
+              Decoration.inline(comment.from, comment.to, {
+                class: "doc-comment-highlight",
+                "data-comment-id": comment.id,
+              }),
+            );
+          } catch {
+            // Stale anchors are ignored until the next comment edit.
+          }
+        }
+        return decorations.length ? DecorationSet.create(state.doc, decorations) : null;
       },
     },
   });
@@ -493,9 +319,17 @@ export function DocEditor(props: DocEditorProps) {
   const [spacingAfter, setSpacingAfter] = createSignal(0);
   const [tabStops, setTabStops] = createSignal<number[]>([96, 192, 288]);
   const [pageCount, setPageCount] = createSignal(1);
+  // Browsers repeat position:fixed print headers on every page but expose no
+  // page counter to DOM content. For multi-page prints we omit the page
+  // number rather than print a wrong one; DOCX/PDF exports carry real fields.
+  const printPageIndex = () => (pageCount() > 1 ? "" : "1");
   const [headings, setHeadings] = createSignal<{ level: number; text: string; pos: number }[]>([]);
   const [linkDialogOpen, setLinkDialogOpen] = createSignal(false);
   const [linkHref, setLinkHref] = createSignal("https://");
+  const [bookmarkDialogOpen, setBookmarkDialogOpen] = createSignal(false);
+  const [bookmarkName, setBookmarkName] = createSignal("");
+  const [bookmarkError, setBookmarkError] = createSignal("");
+  const [linkError, setLinkError] = createSignal("");
   const [imageDialogOpen, setImageDialogOpen] = createSignal(false);
   const [imageSrc, setImageSrc] = createSignal("");
   const [printPreviewOpen, setPrintPreviewOpen] = createSignal(false);
@@ -509,13 +343,147 @@ export function DocEditor(props: DocEditorProps) {
   const [bubbleVisible, setBubbleVisible] = createSignal(false);
   const [bubbleTop, setBubbleTop] = createSignal(0);
   const [bubbleLeft, setBubbleLeft] = createSignal(0);
+  const [comments, setComments] = createSignal<ReviewComment[]>(props.initialContent?.comments ?? []);
+  const [commentDialogOpen, setCommentDialogOpen] = createSignal(false);
+  const [commentDraft, setCommentDraft] = createSignal("");
+  const [commentAnchor, setCommentAnchor] = createSignal<{ from: number; to: number } | null>(null);
+  const [selectedCommentId, setSelectedCommentId] = createSignal<string | null>(null);
+  const [trackedChangeRevision, setTrackedChangeRevision] = createSignal(0);
+  const [compareBaseline, setCompareBaseline] = createSignal<DocContent | null>(null);
+  const [compareBaselineLabel, setCompareBaselineLabel] = createSignal("Since opened");
+  const [compareSourceId, setCompareSourceId] = createSignal("");
+  const [compareDetailsOpen, setCompareDetailsOpen] = createSignal(false);
+  const [loadWarning, setLoadWarning] = createSignal<string | null>(null);
+  // Word-style "Track Changes" toggle: while on, typing is captured as
+  // trackInsert marks instead of silently editing the document.
+  const [trackChangesOn, setTrackChangesOn] = createSignal(false);
 
   const [pageSetupOpen, setPageSetupOpen] = createSignal(false);
-  const [pageSetup, setPageSetup] = createSignal<PageSetupConfig>({
-    margins: { top: 1, bottom: 1, left: 1, right: 1 },
-    orientation: "portrait",
-    paperSize: "letter"
-  });
+  const [pageSetup, setPageSetup] = createSignal<PageSetupConfig>(DEFAULT_PAGE_SETUP);
+  // Named paragraph styles: built-ins plus user-defined styles persisted on the doc.
+  const [customStyles, setCustomStyles] = createSignal<NamedStyleDef[]>(
+    Array.isArray((props.initialContent as Record<string, unknown> | null | undefined)?.styles)
+      ? customStylesForDoc((props.initialContent as Record<string, unknown>).styles as NamedStyleDef[])
+      : [],
+  );
+  const availableStyles = (): NamedStyleDef[] => [...BUILT_IN_STYLES, ...customStyles()];
+  const [activeStyleId, setActiveStyleId] = createSignal<string | null>(null);
+  // Footnotes: refs are inline footnote_ref nodes; texts live on the doc.
+  const [footnotes, setFootnotes] = createSignal<Footnote[]>(readFootnotes(props.initialContent));
+  const [footnoteEditingId, setFootnoteEditingId] = createSignal<string | null>(null);
+
+  const insertFootnote = () => {
+    if (!view) return;
+    const { state } = view;
+    const id = newFootnoteId();
+    const nextLabel = footnotes().length + 1;
+    const refType = state.schema.nodes.footnote_ref;
+    if (!refType) return;
+    const node = refType.create({ id, label: nextLabel });
+    view.dispatch(
+      state.tr.replaceSelectionWith(node).scrollIntoView(),
+    );
+    setFootnotes((prev) => [...prev, { id, label: nextLabel, text: "" }]);
+    setFootnoteEditingId(id);
+  };
+
+  const updateFootnoteText = (id: string, text: string) => {
+    setFootnotes((prev) => prev.map((note) => (note.id === id ? { ...note, text } : note)));
+    if (view) emitDocChangeDebounced(view.state.doc, pageSetup());
+  };
+
+  const removeFootnote = (id: string) => {
+    if (!view) return;
+    const { state } = view;
+    let tr = state.tr;
+    state.doc.descendants((node, pos) => {
+      if (node.type.name === "footnote_ref" && node.attrs.id === id) {
+        tr = tr.delete(tr.mapping.map(pos), tr.mapping.map(pos + node.nodeSize));
+      }
+    });
+    view.dispatch(tr);
+    setFootnotes((prev) => prev.filter((note) => note.id !== id));
+  };
+
+  const applyNamedStyle = (styleId: string) => {
+    const style = availableStyles().find((entry) => entry.id === styleId);
+    if (!style || !view) return;
+    const { state, dispatch } = view;
+    const blockAttrs = styleBlockAttrs(style);
+    const inlineMarks = styleInlineAttrs(style).map((mark) => state.schema.marks[mark.type].create(mark.attrs));
+    const { from, to } = state.selection;
+    let tr = state.tr;
+    if (style.blockType === "heading") {
+      const headingType = state.schema.nodes.heading;
+      if (headingType) {
+        state.doc.nodesBetween(from, to, (node, pos) => {
+          if (node.isBlock && pos >= from - 1 && pos < to) {
+            tr = tr.setNodeMarkup(tr.mapping.map(pos), headingType, { ...node.attrs, ...blockAttrs, level: style.headingLevel ?? 1 });
+          }
+        });
+      }
+    } else {
+      state.doc.nodesBetween(from, to, (node, pos) => {
+        if ((node.type.name === "paragraph" || node.type.name === "heading") && pos >= from - 1 && pos < to) {
+          tr = tr.setNodeMarkup(tr.mapping.map(pos), state.schema.nodes.paragraph, {
+            ...node.attrs,
+            ...blockAttrs,
+          });
+        }
+      });
+    }
+    if (inlineMarks.length && !state.selection.empty) {
+      for (const mark of inlineMarks) tr = tr.addMark(from, to, mark);
+    }
+    dispatch(tr.scrollIntoView());
+    setActiveStyleId(styleId);
+  };
+
+  const createStyleFromSelection = () => {
+    if (!view) return;
+    const { state } = view;
+    const parent = state.selection.$from.parent;
+    const marks = state.storedMarks || state.selection.$from.marks();
+    const bold = marks.some((mark) => mark.type.name === "bold");
+    const italic = marks.some((mark) => mark.type.name === "italic");
+    const colorMark = marks.find((mark) => mark.type.name === "color");
+    const sizeMark = marks.find((mark) => mark.type.name === "fontSize");
+    const baseName = "Custom style";
+    const name = window.prompt("Style name", baseName);
+    if (!name) return;
+    const normalizedName = normalizeStyleName(name) || baseName;
+    const next: NamedStyleDef = {
+      id: styleIdFromName(normalizedName),
+      name: normalizedName,
+      blockType: parent.type.name === "heading" ? "heading" : "paragraph",
+      headingLevel: parent.type.name === "heading" ? Number(parent.attrs.level) || 1 : undefined,
+      align: (parent.attrs.align as NamedStyleDef["align"]) || "left",
+      bold,
+      italic,
+      color: colorMark?.attrs.color as string | undefined,
+      fontSize: sizeMark ? Number(sizeMark.attrs.size) || undefined : undefined,
+      builtIn: false,
+    };
+    setCustomStyles((prev) => [...customStylesForDoc([...prev, next])]);
+    setActiveStyleId(next.id);
+    showToast(`Style "${next.name}" created`, "success");
+  };
+
+  const countPageBreaks = (json: DocContent): number => {
+    let count = 0;
+    const visit = (node: any) => {
+      if (!node || typeof node !== "object") return;
+      const breakType = node.attrs?.pageSetup?.breakType;
+      if (node.type === "page_break" || (node.type === "section_break" && breakType !== "continuous" && breakType !== "nextColumn")) {
+        count += 1;
+      }
+      if (Array.isArray(node.content)) {
+        for (const child of node.content) visit(child);
+      }
+    };
+    visit(json);
+    return count;
+  };
 
   const paperDimensions = () => {
     const config = pageSetup();
@@ -548,7 +516,67 @@ export function DocEditor(props: DocEditorProps) {
     setHeadings(newHeadings);
   };
 
-  const refreshStatus = (json: DocContent) => {
+  let lastWords = 0;
+  let lastChars = 0;
+  let wordCountTimeout: number | undefined;
+  let currentCurPage = 1;
+  let currentPages = 1;
+  let fieldRefreshScheduled = false;
+  let pendingFieldPages = 1;
+  let pendingFieldPageHeight = 1;
+  let documentHasFields = false;
+
+  const scanDocumentForFields = (doc: Node) => {
+    let found = false;
+    doc.descendants((node) => {
+      if (node.type.name === "field") found = true;
+      return !found;
+    });
+    return found;
+  };
+
+  const applyDocumentFieldResults = (pages: number, contentPageHeight: number) => {
+    if (!view || !editorRef) return;
+    const bounds = editorRef.getBoundingClientRect();
+    let transaction = view.state.tr;
+    let found = false;
+    view.state.doc.descendants((node, pos) => {
+      if (node.type.name !== "field") return;
+      found = true;
+      const kind = normalizeDocumentFieldKind(node.attrs.kind);
+      if (!kind) return;
+      let fieldPage = currentCurPage;
+      if (kind === "page") {
+        try {
+          const coords = view!.coordsAtPos(pos);
+          const relativeY = coords.top - bounds.top + editorRef.scrollTop;
+          fieldPage = Math.max(1, Math.min(pages, Math.floor(relativeY / contentPageHeight) + 1));
+        } catch {
+          fieldPage = currentCurPage;
+        }
+      }
+      const result = documentFieldResult(kind, pages, fieldPage);
+      if (String(node.attrs.result ?? "") !== result) {
+        transaction = transaction.setNodeMarkup(pos, node.type, { ...node.attrs, result }, node.marks);
+      }
+    });
+    documentHasFields = found;
+    if (!transaction.docChanged) return;
+    view.dispatch(transaction);
+  };
+
+  const queueDocumentFieldRefresh = (pages: number, contentPageHeight: number) => {
+    pendingFieldPages = pages;
+    pendingFieldPageHeight = contentPageHeight;
+    if (fieldRefreshScheduled) return;
+    fieldRefreshScheduled = true;
+    window.setTimeout(() => {
+      fieldRefreshScheduled = false;
+      applyDocumentFieldResults(pendingFieldPages, pendingFieldPageHeight);
+    }, 0);
+  };
+
+  const refreshStatus = (json: DocContent, docChanged = true) => {
     const paper = paperDimensions();
     const config = pageSetup();
     const topMarginPx = (config.margins.top || 1) * 96;
@@ -557,7 +585,7 @@ export function DocEditor(props: DocEditorProps) {
 
     const domHeight = editorRef ? editorRef.scrollHeight : 0;
     const estimatedPages = Math.max(1, Math.ceil(domHeight / contentPageHeight));
-    const explicitPageBreaks = (JSON.stringify(json).match(/"type"\s*:\s*"page_break"/g) || []).length;
+    const explicitPageBreaks = countPageBreaks(json);
     const pages = Math.max(1, explicitPageBreaks + 1, estimatedPages);
     setPageCount(pages);
 
@@ -570,38 +598,209 @@ export function DocEditor(props: DocEditorProps) {
       curPage = Math.max(1, Math.min(pages, Math.floor(relativeY / contentPageHeight) + 1));
     }
 
-    commands.computeDocWordCount(json).then((wc) => {
+    currentCurPage = curPage;
+    currentPages = pages;
+    if (documentHasFields) queueDocumentFieldRefresh(pages, contentPageHeight);
+
+    const updateLabel = (w: number, c: number) => {
       props.onWordCountChange?.(
-        `Page ${curPage} of ${pages} · ${wc.words} words, ${wc.characters} characters`
+        `Page ${currentCurPage} of ${currentPages} · ${w} words, ${c} characters`
       );
-    });
+    };
+
+    if (!docChanged) {
+      updateLabel(lastWords, lastChars);
+      return;
+    }
+
+    if (wordCountTimeout) window.clearTimeout(wordCountTimeout);
+    wordCountTimeout = window.setTimeout(() => {
+      commands.computeDocWordCount(json).then((wc) => {
+        lastWords = wc.words;
+        lastChars = wc.characters;
+        updateLabel(lastWords, lastChars);
+      });
+    }, 2000);
+  };
+
+  const compareSummary = () => {
+    trackedChangeRevision();
+    return compareDocContent(
+      compareBaseline(),
+      view ? (view.state.doc.toJSON() as DocContent) : null,
+    );
+  };
+
+  const comparePreview = (text: string) => {
+    const limit = 16_384;
+    return text.length > limit ? `${text.slice(0, limit)}\n…` : text;
+  };
+
+  const resetCompareBaseline = () => {
+    if (!view) return;
+    setCompareBaseline(view.state.doc.toJSON() as DocContent);
+    setCompareBaselineLabel("Since opened");
+    setCompareSourceId("");
+    setTrackedChangeRevision((revision) => revision + 1);
+  };
+
+  const compareWithDocument = (sourceId: string) => {
+    if (!sourceId || !view) return;
+    const source = findCompareSource(props.compareDocuments, sourceId);
+    if (!source?.content) return;
+    setCompareSourceId(sourceId);
+    setCompareBaseline(source.content);
+    setCompareBaselineLabel(`Compared with ${source.title || "open document"}`);
+    setTrackedChangeRevision((revision) => revision + 1);
   };
 
   const emitDocChange = (doc: Node, setup: PageSetupConfig) => {
     if (!props.onChange) return;
-    const payload = buildDocJson(doc, setup);
+    const payload = buildDocJson(doc, setup, comments(), customStyles(), footnotes());
     const serialized = JSON.stringify(payload);
     if (serialized === lastEmittedJson) return;
     lastEmittedJson = serialized;
     props.onChange(payload);
   };
 
+  // Trailing debounce for keystroke-driven emits: serializing the whole doc
+  // on every character is O(doc) per key; 300ms batching keeps typing smooth
+  // on large documents while autosave (2s) stays far behind the final emit.
+  let emitTimer: ReturnType<typeof setTimeout> | null = null;
+  const emitDocChangeDebounced = (doc: Node, setup: PageSetupConfig) => {
+    if (!props.onChange) return;
+    if (emitTimer) clearTimeout(emitTimer);
+    emitTimer = setTimeout(() => {
+      emitTimer = null;
+      emitDocChange(view?.state.doc ?? doc, pageSetup());
+    }, 300);
+  };
+  onCleanup(() => {
+    if (emitTimer) {
+      clearTimeout(emitTimer);
+      // Flush the pending emit so the shell's autosave sees the final doc.
+      emitDocChange(view?.state.doc ?? mySchema.node("doc"), pageSetup());
+    }
+  });
+
+  const refreshCommentDecorations = () => {
+    withView((v) => v.dispatch(v.state.tr.setMeta("comments-refresh", true)));
+  };
+
+  const openCommentDialog = () => {
+    withView((v) => {
+      const { from, to } = v.state.selection;
+      if (from === to) return;
+      setCommentAnchor({ from, to });
+      setCommentDraft("");
+      setCommentDialogOpen(true);
+    });
+  };
+
+  const saveComment = () => {
+    const text = commentDraft().trim();
+    const anchor = commentAnchor();
+    if (!text || !anchor || !view) return;
+    const comment: ReviewComment = {
+      id: `comment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      author: "You",
+      text,
+      from: anchor.from,
+      to: anchor.to,
+      resolved: false,
+      createdAt: new Date().toISOString(),
+    };
+    setComments((previous) => [...previous, comment]);
+    setSelectedCommentId(comment.id);
+    setCommentDialogOpen(false);
+    setCommentAnchor(null);
+    refreshCommentDecorations();
+    emitDocChange(view.state.doc, pageSetup());
+  };
+
+  const updateComment = (id: string, update: Partial<ReviewComment>) => {
+    setComments((previous) => previous.map((comment) => (comment.id === id ? { ...comment, ...update } : comment)));
+    refreshCommentDecorations();
+    if (view) emitDocChange(view.state.doc, pageSetup());
+  };
+
+  // Reply drafts are transient UI state; they are not part of the document.
+  const [replyDrafts, setReplyDrafts] = createSignal<Record<string, string>>({});
+  const submitReply = (commentId: string) => {
+    const text = (replyDrafts()[commentId] ?? "").trim();
+    if (!text) return;
+    setComments((previous) =>
+      previous.map((comment) =>
+        comment.id === commentId
+          ? {
+              ...comment,
+              replies: [
+                ...(comment.replies || []),
+                {
+                  id: `reply-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  author: "You",
+                  text,
+                  createdAt: new Date().toISOString(),
+                },
+              ],
+            }
+          : comment,
+      ),
+    );
+    setReplyDrafts((prev) => ({ ...prev, [commentId]: "" }));
+    refreshCommentDecorations();
+    if (view) emitDocChange(view.state.doc, pageSetup());
+  };
+
+  const removeComment = (id: string) => {
+    setComments((previous) => previous.filter((comment) => comment.id !== id));
+    if (selectedCommentId() === id) setSelectedCommentId(null);
+    refreshCommentDecorations();
+    if (view) emitDocChange(view.state.doc, pageSetup());
+  };
+
+  const selectComment = (comment: ReviewComment) => {
+    setSelectedCommentId(comment.id);
+    withView((v) => {
+      if (comment.from < 0 || comment.to > v.state.doc.content.size || comment.from >= comment.to) return;
+      v.dispatch(v.state.tr.setSelection(TextSelection.create(v.state.doc, comment.from, comment.to)).scrollIntoView());
+    });
+  };
+
   onMount(() => {
     const initial = props.initialContent;
     if (initial?.pageSetup && typeof initial.pageSetup === "object") {
-      setPageSetup(initial.pageSetup as PageSetupConfig);
+      setPageSetup(normalizePageSetupConfig(initial.pageSetup));
     }
 
     let docNode;
+    let loadWarning: string | null = null;
     try {
       const docJson = { ...(initial || {}) } as DocContent;
       delete docJson.pageSetup;
+      delete docJson.comments;
+      delete docJson.footnotes;
+      delete (docJson as Record<string, unknown>).styles;
       docNode = mySchema.nodeFromJSON(
         docJson.type ? docJson : { type: "doc", content: [{ type: "paragraph", content: [] }] }
       );
-    } catch {
-      docNode = mySchema.node("doc", null, [mySchema.node("paragraph")]);
+    } catch (err) {
+      // Never silently replace an unreadable document with an empty one: keep
+      // the raw text content so the user can recover instead of losing data.
+      console.error("DocEditor: failed to parse initial content", err);
+      loadWarning = "This document contained parts the editor could not read. " +
+        "Unknown elements were kept out of the editable view; save a copy before continuing.";
+      const fallbackText = extractPlainText(initial);
+      docNode = mySchema.node("doc", null, fallbackText.length
+        ? fallbackText.split(/\n{2,}/).map((para) =>
+            mySchema.node("paragraph", null, para.trim()
+              ? [mySchema.text(para.trim())]
+              : [])
+          )
+        : [mySchema.node("paragraph")]);
     }
+    if (loadWarning) setLoadWarning(loadWarning);
+    setCompareBaseline(docNode.toJSON() as DocContent);
 
     const state = EditorState.create({
       doc: docNode,
@@ -610,6 +809,14 @@ export function DocEditor(props: DocEditorProps) {
         columnResizing({ handleWidth: 5, cellMinWidth: 48 }),
         tableEditing(),
         findPlugin(findQuery, matchCase, matchIndex),
+        autoTrackChangesPlugin(trackChangesOn, () =>
+          mySchema.marks[TRACK_INSERT_MARK].create({
+            author: "You",
+            changeId: `change-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            createdAt: new Date().toISOString(),
+          }),
+        ),
+        reviewCommentPlugin(comments),
         new Plugin({
           props: {
             transformPastedHTML: (html) => transformPastedHTML(html),
@@ -722,12 +929,37 @@ export function DocEditor(props: DocEditorProps) {
           syncToolbarFromSelection(newState, setFontFamily, setFontSize, setTextColor, setHighlightColor);
         }
 
-        const json = buildDocJson(newState.doc, pageSetup());
-        refreshStatus(json);
+        if (transaction.docChanged && comments().length > 0) {
+          setComments((previous) => mapReviewCommentAnchors(
+            previous,
+            (position) => transaction.mapping.map(position, 1),
+            (position) => transaction.mapping.map(position, -1),
+          ));
+        }
+
+        const json = buildDocJson(newState.doc, pageSetup(), comments(), customStyles(), footnotes());
+        refreshStatus(json, transaction.docChanged);
+        // Keep footnote labels in sync with reference order after edits.
+        if (transaction.docChanged) {
+          const synced = syncFootnotesWithRefs(footnotes(), newState.doc.toJSON() as DocContent);
+          if (JSON.stringify(synced) !== JSON.stringify(footnotes())) {
+            setFootnotes(synced);
+          }
+        }
+        // Track the active paragraph's named style for the Styles sidebar.
+        const activeParent = newState.selection.$from.parent;
+        setActiveStyleId(
+          activeParent.attrs?.styleName
+            ? String(activeParent.attrs.styleName)
+            : activeParent.type.name === "heading"
+              ? `Heading${activeParent.attrs.level || 1}`
+              : null,
+        );
 
         if (transaction.docChanged) {
+          setTrackedChangeRevision((revision) => revision + 1);
           refreshHeadings(newState.doc);
-          emitDocChange(newState.doc, pageSetup());
+          emitDocChangeDebounced(newState.doc, pageSetup());
         }
 
         if (view!.hasFocus() && !newState.selection.empty) {
@@ -806,9 +1038,24 @@ export function DocEditor(props: DocEditorProps) {
         }
         return false;
       },
+      handleClick(clickedView, _position, event) {
+        const target = event.target instanceof Element ? event.target.closest("a") : null;
+        const href = target?.getAttribute("href");
+        const normalized = href ? normalizeDocLink(href) : null;
+        if (!normalized?.startsWith("internal:")) return false;
+        const bookmarkPosition = findBookmarkPosition(clickedView.state.doc, normalized.slice("internal:".length));
+        if (bookmarkPosition == null) return false;
+        clickedView.dispatch(
+          clickedView.state.tr
+            .setSelection(TextSelection.create(clickedView.state.doc, bookmarkPosition))
+            .scrollIntoView(),
+        );
+        return true;
+      },
     });
 
-    refreshStatus(buildDocJson(view.state.doc, pageSetup()));
+    documentHasFields = scanDocumentForFields(view.state.doc);
+    refreshStatus(buildDocJson(view.state.doc, pageSetup(), comments(), customStyles(), footnotes()));
     refreshHeadings(view.state.doc);
     syncToolbarFromSelection(view.state, setFontFamily, setFontSize, setTextColor, setHighlightColor);
   });
@@ -819,16 +1066,19 @@ export function DocEditor(props: DocEditorProps) {
     if (JSON.stringify(content) === lastEmittedJson) return;
     try {
       if (content.pageSetup && typeof content.pageSetup === "object") {
-        setPageSetup(content.pageSetup as PageSetupConfig);
+        setPageSetup(normalizePageSetupConfig(content.pageSetup));
       }
       const docJson = { ...content } as DocContent;
       delete docJson.pageSetup;
+      delete docJson.footnotes;
+      delete (docJson as Record<string, unknown>).styles;
       const nextDoc = mySchema.nodeFromJSON(docJson);
       if (docJsonForCompare(content) !== docJsonForCompare(view.state.doc.toJSON() as DocContent)) {
+        documentHasFields = scanDocumentForFields(nextDoc);
         const tr = view.state.tr.replaceWith(0, view.state.doc.content.size, nextDoc.content);
         if (tr.docChanged) {
           view.dispatch(tr);
-          refreshStatus(buildDocJson(view.state.doc, pageSetup()));
+          refreshStatus(buildDocJson(view.state.doc, pageSetup(), comments(), customStyles(), footnotes()));
           refreshHeadings(view.state.doc);
         }
       }
@@ -873,6 +1123,65 @@ export function DocEditor(props: DocEditorProps) {
 
   const withView = (fn: (v: EditorView) => void) => {
     if (view) fn(view);
+  };
+
+  const trackedStats = () => {
+    trackedChangeRevision();
+    return view
+      ? getTrackedChangeStats(view.state.doc.toJSON())
+      : { insertions: 0, deletions: 0, insertedCharacters: 0, deletedCharacters: 0 };
+  };
+
+  const trackedChangeSummaries = () => {
+    trackedChangeRevision();
+    return view ? getTrackedChangeSummaries(view.state.doc.toJSON()) : [];
+  };
+
+  const markSelectionAsChange = (kind: TrackedChangeKind) => {
+    withView((v) => {
+      const { from, to } = v.state.selection;
+      if (from === to) return;
+      const markName = kind === "insert" ? TRACK_INSERT_MARK : TRACK_DELETE_MARK;
+      const oppositeName = kind === "insert" ? TRACK_DELETE_MARK : TRACK_INSERT_MARK;
+      const mark = mySchema.marks[markName].create({
+        author: "You",
+        changeId: `change-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        createdAt: new Date().toISOString(),
+      });
+      const tr = v.state.tr
+        .removeMark(from, to, mySchema.marks[oppositeName])
+        .addMark(from, to, mark)
+        .scrollIntoView();
+      v.dispatch(tr);
+    });
+  };
+
+  const resolveAllTrackedChanges = (decision: TrackedChangeDecision) => {
+    withView((v) => {
+      const resolved = resolveTrackedChanges(v.state.doc.toJSON(), decision);
+      let nextDoc: Node;
+      try {
+        nextDoc = mySchema.nodeFromJSON(resolved);
+      } catch {
+        return;
+      }
+      const tr = v.state.tr.replaceWith(0, v.state.doc.content.size, nextDoc.content).scrollIntoView();
+      if (tr.docChanged) v.dispatch(tr);
+    });
+  };
+
+  const resolveOneTrackedChange = (changeId: string, decision: TrackedChangeDecision) => {
+    withView((v) => {
+      const resolved = resolveTrackedChange(v.state.doc.toJSON(), changeId, decision);
+      let nextDoc: Node;
+      try {
+        nextDoc = mySchema.nodeFromJSON(resolved);
+      } catch {
+        return;
+      }
+      const tr = v.state.tr.replaceWith(0, v.state.doc.content.size, nextDoc.content).scrollIntoView();
+      if (tr.docChanged) v.dispatch(tr);
+    });
   };
 
   const execToggleBold = () => withView((v) => toggleMark(mySchema.marks.bold)(v.state, v.dispatch));
@@ -973,11 +1282,77 @@ export function DocEditor(props: DocEditorProps) {
     });
   };
 
+  const insertDocumentField = (kind: DocumentFieldKind) => {
+    withView((v) => {
+      const fieldType = mySchema.nodes.field;
+      const normalized = normalizeDocumentFieldKind(kind);
+      if (!fieldType || !normalized) return;
+      documentHasFields = true;
+      v.dispatch(v.state.tr.replaceSelectionWith(fieldType.create({ kind: normalized })).scrollIntoView());
+    });
+  };
+
+  const insertSectionBreak = () => {
+    withView((v) => {
+      const setup = normalizePageSetupConfig(pageSetup());
+      v.dispatch(
+        v.state.tr
+          .replaceSelectionWith(mySchema.nodes.section_break.create({ pageSetup: setup }))
+          .scrollIntoView(),
+      );
+    });
+  };
+
+  const openLinkDialog = () => {
+    setLinkError("");
+    setLinkDialogOpen(true);
+  };
+
   const applyLink = () => {
-    const href = linkHref().trim();
-    if (!href) return;
+    const href = normalizeDocLink(linkHref());
+    if (!href) {
+      setLinkError("Use an https/http, mailto, tel, or internal bookmark link.");
+      return;
+    }
     withView((v) => toggleMark(mySchema.marks.link, { href, title: null })(v.state, v.dispatch));
     setLinkDialogOpen(false);
+    setLinkError("");
+  };
+
+  const openBookmarkDialog = () => {
+    setBookmarkName("");
+    setBookmarkError("");
+    withView((v) => {
+      if (v.state.selection.empty) {
+        setBookmarkError("Select the text that should be the bookmark target first.");
+      }
+      setBookmarkDialogOpen(true);
+    });
+  };
+
+  const applyBookmark = () => {
+    const name = normalizeBookmarkName(bookmarkName());
+    if (!name) {
+      setBookmarkError("Enter a bookmark name using letters, numbers, or underscores.");
+      return;
+    }
+    withView((v) => {
+      const { from, to } = v.state.selection;
+      if (from === to) {
+        setBookmarkError("Select the text that should be the bookmark target first.");
+        return;
+      }
+      const existing = bookmarkNamesInDocument(v.state.doc);
+      if (existing.has(name.toLowerCase())) {
+        setBookmarkError(`A bookmark named “${name}” already exists in this document.`);
+        return;
+      }
+      const mark = mySchema.marks.bookmark.create({ name, id: null });
+      v.dispatch(v.state.tr.addMark(from, to, mark).scrollIntoView());
+      setBookmarkName(name);
+      setBookmarkError("");
+      setBookmarkDialogOpen(false);
+    });
   };
 
   const applyImage = () => {
@@ -993,18 +1368,73 @@ export function DocEditor(props: DocEditorProps) {
   const insertTable = (rows = 3, cols = 3) => {
     withView((v) => {
       const cellType = mySchema.nodes.table_cell;
+      const headerType = mySchema.nodes.table_header;
       const rowType = mySchema.nodes.table_row;
       const tableType = mySchema.nodes.table;
-      if (!cellType || !rowType || !tableType) return;
+      if (!cellType || !headerType || !rowType || !tableType) return;
       const built = Array.from({ length: rows }, (_, r) =>
         rowType.create(
           null,
           Array.from({ length: cols }, () =>
-            cellType.createAndFill({ header: r === 0 })!
+            (r === 0 ? headerType : cellType).createAndFill()!
           )
         )
       );
       v.dispatch(v.state.tr.replaceSelectionWith(tableType.create(null, built)));
+    });
+  };
+
+  /**
+   * Insert a table of contents built from the document's headings.
+   * Each heading text gets a bookmark mark; the TOC entries are real
+   * paragraphs with internal `internal:` links, so DOCX/PDF/print export
+   * the TOC through the existing paragraph/link paths.
+   */
+  const insertTableOfContents = () => {
+    withView((v) => {
+      // Collect heading nodes with their text ranges first.
+      const headingRanges: Array<{ from: number; to: number; level: number; text: string }> = [];
+      v.state.doc.descendants((node, pos) => {
+        if (node.type.name === "heading") {
+          headingRanges.push({
+            from: pos + 1,
+            to: pos + node.nodeSize - 1,
+            level: Number(node.attrs.level) || 1,
+            text: node.textContent,
+          });
+        }
+      });
+      const usable = headingRanges.filter((range) => range.text.trim());
+      if (!usable.length) return;
+
+      const entries: TocEntry[] = [];
+      const used = new Set<string>();
+      let tr = v.state.tr;
+      // Attach bookmark marks from the end so earlier positions stay valid.
+      for (let i = usable.length - 1; i >= 0; i -= 1) {
+        const range = usable[i];
+        const anchor = sanitizeTocAnchor(range.text, used);
+        const mark = mySchema.marks.bookmark.create({ name: anchor, id: null });
+        tr = tr.addMark(range.from, range.to, mark);
+        entries.unshift({ level: range.level, text: range.text.trim().slice(0, 120), anchor });
+      }
+
+      const paragraphType = mySchema.nodes.paragraph;
+      const linkMarkType = mySchema.marks.link;
+      if (!paragraphType || !linkMarkType) return;
+      const tocNodes = buildTocContent(entries).map((entryJson) => {
+        const linkMark = linkMarkType.create({ href: `internal:${entryJson.anchor}` });
+        const textNode = mySchema.text(
+          (entryJson.content![0] as { text: string }).text,
+          [linkMark],
+        );
+        return paragraphType.create(entryJson.attrs as Record<string, never>, [textNode]);
+      });
+      tr = tr.replaceSelectionWith(tocNodes[0]);
+      for (let i = 1; i < tocNodes.length; i += 1) {
+        tr = tr.insert(tr.selection.from, tocNodes[i]);
+      }
+      v.dispatch(tr.scrollIntoView());
     });
   };
 
@@ -1039,24 +1469,11 @@ export function DocEditor(props: DocEditorProps) {
   };
 
   const toggleHeaderRow = () => {
-    withView((v) => {
-      const { tablePos } = findTableContext(v);
-      if (tablePos == null) return;
-      const table = v.state.doc.nodeAt(tablePos);
-      if (!table || table.childCount === 0) return;
-      const firstRow = table.child(0);
-      let tr = v.state.tr;
-      let cellPos = tablePos + 1 + 1;
-      for (let c = 0; c < firstRow.childCount; c++) {
-        const cell = firstRow.child(c);
-        tr = tr.setNodeMarkup(cellPos, undefined, {
-          ...cell.attrs,
-          header: !cell.attrs.header,
-        });
-        cellPos += cell.nodeSize;
-      }
-      if (tr.docChanged) v.dispatch(tr);
-    });
+    withView((v) => pmToggleHeaderRow(v.state, v.dispatch));
+  };
+
+  const execDeleteTable = () => {
+    withView((v) => deleteTable(v.state, v.dispatch));
   };
 
   const execMergeCells = () => withView((v) => mergeCells(v.state, v.dispatch));
@@ -1154,16 +1571,64 @@ export function DocEditor(props: DocEditorProps) {
           setImageDialogOpen(true);
           break;
         case "insert-link":
-          setLinkDialogOpen(true);
+          openLinkDialog();
+          break;
+        case "insert-bookmark":
+          openBookmarkDialog();
+          break;
+        case "add-comment":
+          openCommentDialog();
+          break;
+        case "mark-insertion":
+          markSelectionAsChange("insert");
+          break;
+        case "mark-deletion":
+          markSelectionAsChange("delete");
+          break;
+        case "accept-all-changes":
+          resolveAllTrackedChanges("accept");
+          break;
+        case "reject-all-changes":
+          resolveAllTrackedChanges("reject");
           break;
         case "insert-page-break":
           insertPageBreak();
+          break;
+        case "insert-page-field":
+          insertDocumentField("page");
+          break;
+        case "insert-num-pages-field":
+          insertDocumentField("numPages");
+          break;
+        case "insert-section-break":
+          insertSectionBreak();
+          break;
+        case "insert-toc":
+          insertTableOfContents();
           break;
         case "merge-cells":
           execMergeCells();
           break;
         case "split-cell":
           execSplitCell();
+          break;
+        case "add-table-row":
+          addTableRow();
+          break;
+        case "delete-table-row":
+          deleteTableRow();
+          break;
+        case "add-table-column":
+          addTableColumn();
+          break;
+        case "delete-table-column":
+          deleteTableColumn();
+          break;
+        case "delete-table":
+          execDeleteTable();
+          break;
+        case "toggle-header-row":
+          toggleHeaderRow();
           break;
         case "style-default":
           execBlockType("paragraph");
@@ -1218,9 +1683,6 @@ export function DocEditor(props: DocEditorProps) {
     setMatchCount(matches.length);
     if (matches.length === 0) setMatchIndex(0);
     else if (matchIndex() >= matches.length) setMatchIndex(0);
-    commands.searchDocText(view.state.doc.toJSON(), findQuery(), matchCase()).then((m) => {
-      setMatchCount(m.length);
-    });
     refreshMatchDecorations();
   };
 
@@ -1318,6 +1780,7 @@ export function DocEditor(props: DocEditorProps) {
           <div>Format: <span style={{ "text-transform": "capitalize" }}>{pageSetup().paperSize}</span> ({paperDimensions().width} × {paperDimensions().height})</div>
           <div>Margins: {pageSetup().margins.top}″ / {pageSetup().margins.bottom}″ / {pageSetup().margins.left}″ / {pageSetup().margins.right}″</div>
           <div>Orientation: <span style={{ "text-transform": "capitalize" }}>{pageSetup().orientation}</span></div>
+          <div>Text columns: {Math.max(1, Math.min(4, pageSetup().columns || 1))}</div>
           <div>Pages: {pageCount()}</div>
           <button type="button" class="g-toolbar-btn" onClick={() => setPageSetupOpen(true)}>
              Page Setup…
@@ -1331,23 +1794,90 @@ export function DocEditor(props: DocEditorProps) {
       icon: <IconStyles />,
       content: (
         <div style={{ display: "flex", "flex-direction": "column", gap: "4px" }}>
-          {[
-            ["paragraph", "Default Paragraph Style"],
-            ["heading1", "Heading 1"],
-            ["heading2", "Heading 2"],
-            ["heading3", "Heading 3"],
-            ["blockquote", "Block Quote"],
-            ["code_block", "Preformatted Text"],
-          ].map(([value, label]) => (
+          <For each={availableStyles()}>
+            {(style) => (
+              <button
+                type="button"
+                class="g-toolbar-btn"
+                title={`Apply ${style.name}`}
+                style={{
+                  "justify-content": "flex-start",
+                  width: "100%",
+                  height: "auto",
+                  padding: "4px 6px",
+                  background: activeStyleId() === style.id ? "var(--bg-selected, #505050)" : "transparent",
+                  "font-weight": style.bold ? "bold" : undefined,
+                  "font-style": style.italic ? "italic" : undefined,
+                  color: style.color || undefined,
+                }}
+                onClick={() => applyNamedStyle(style.id)}
+              >
+                {style.name}
+              </button>
+            )}
+          </For>
+          <div style={{ "border-top": "1px solid var(--border-color)", "margin-top": "4px", "padding-top": "6px" }}>
             <button
               type="button"
               class="g-toolbar-btn"
               style={{ "justify-content": "flex-start", width: "100%", height: "auto", padding: "4px 6px" }}
-              onClick={() => execBlockType(value)}
+              onClick={() => createStyleFromSelection()}
             >
-              {label}
+              + New style from selection
             </button>
-          ))}
+            <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-top": "4px" }}>
+              Named styles persist through DOCX round-trips as Word styles.
+            </div>
+          </div>
+        </div>
+      ),
+    },
+    {
+      id: "footnotes",
+      title: "Footnotes",
+      icon: <IconList />,
+      content: (
+        <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+          <button
+            type="button"
+            class="g-toolbar-btn"
+            style={{ "justify-content": "flex-start", width: "100%", height: "auto", padding: "4px 6px" }}
+            onClick={() => insertFootnote()}
+          >
+            + Insert footnote at cursor
+          </button>
+          <For each={footnotes()}>
+            {(note) => (
+              <div style={{ display: "flex", "flex-direction": "column", gap: "3px", padding: "4px", background: "var(--bg-tertiary)", "border-radius": "4px" }}>
+                <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
+                  <span style={{ "font-size": "12px", "font-weight": "600", color: "var(--doc-accent)" }}>{note.label}.</span>
+                  <span style={{ flex: 1 }} />
+                  <button
+                    type="button"
+                    class="g-toolbar-btn"
+                    aria-label={`Delete footnote ${note.label}`}
+                    title="Delete footnote"
+                    style={{ width: "22px", height: "20px", padding: 0, "font-size": "11px" }}
+                    onClick={() => removeFootnote(note.id)}
+                  >
+                    ✕
+                  </button>
+                </div>
+                <textarea
+                  aria-label={`Footnote ${note.label} text`}
+                  rows={2}
+                  value={note.text}
+                  onInput={(e) => updateFootnoteText(note.id, e.currentTarget.value)}
+                  style={{ "font-size": "12px", width: "100%", resize: "vertical" }}
+                />
+              </div>
+            )}
+          </For>
+          <Show when={footnotes().length === 0}>
+            <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
+              No footnotes yet. Insert one at the cursor; notes export as native Word footnotes.
+            </div>
+          </Show>
         </div>
       ),
     },
@@ -1413,17 +1943,242 @@ export function DocEditor(props: DocEditorProps) {
         </div>
       ),
     },
+    {
+      id: "review",
+      title: "Review",
+      icon: <span aria-hidden="true" style={{ "font-size": "15px" }}>💬</span>,
+      content: (
+        <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
+          <button type="button" class="g-toolbar-btn active" style={{ width: "100%" }} onClick={openCommentDialog}>
+            New comment
+          </button>
+          <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
+            Tracked changes: {trackedStats().insertions} insertions ({trackedStats().insertedCharacters} chars), {trackedStats().deletions} deletions ({trackedStats().deletedCharacters} chars)
+          </div>
+          <Show when={trackedChangeSummaries().length > 0}>
+            <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "7px" }}>
+              <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "5px" }}>Individual changes</div>
+              <For each={trackedChangeSummaries()}>
+                {(change) => (
+                  <div style={{ display: "flex", "align-items": "center", gap: "5px", "font-size": "11px", "margin-top": "4px" }}>
+                    <span style={{ flex: 1, overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }} title={change.text}>
+                      {change.kind === "insert" ? "Insertion" : "Deletion"} · {change.author} · {change.text || "(empty)"}
+                    </span>
+                    <button type="button" class="g-toolbar-btn" onClick={() => resolveOneTrackedChange(change.id, "accept")}>Accept</button>
+                    <button type="button" class="g-toolbar-btn" onClick={() => resolveOneTrackedChange(change.id, "reject")}>Reject</button>
+                  </div>
+                )}
+              </For>
+            </div>
+          </Show>
+          <div style={{ "font-size": "11px", color: "var(--text-muted)", "border-top": "1px solid var(--border-color)", "padding-top": "7px" }}>
+            {(() => {
+              const comparison = compareSummary();
+              return comparison.changed
+                ? `${compareBaselineLabel()}: +${comparison.insertedWords} / −${comparison.deletedWords} words${comparison.truncated ? " (large-document summary)" : ""}`
+                : `No text changes ${compareBaselineLabel().toLowerCase()}`;
+            })()}
+          </div>
+          <Show when={(props.compareDocuments?.length ?? 0) > 0}>
+            <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "11px" }}>
+              Compare with open Writer document
+              <select
+                class="g-toolbar-select"
+                aria-label="Compare with open Writer document"
+                value={compareSourceId()}
+                onChange={(event) => compareWithDocument(event.currentTarget.value)}
+                style={{ height: "28px", padding: "0 6px" }}
+              >
+                <option value="">Select a document…</option>
+                <For each={props.compareDocuments ?? []}>
+                  {(document) => <option value={document.id}>{document.title || "Untitled document"}</option>}
+                </For>
+              </select>
+            </label>
+          </Show>
+          <button type="button" class="g-toolbar-btn" onClick={resetCompareBaseline}>
+            Reset compare baseline
+          </button>
+          <button
+            type="button"
+            class="g-toolbar-btn"
+            aria-expanded={compareDetailsOpen()}
+            onClick={() => setCompareDetailsOpen((open) => !open)}
+          >
+            {compareDetailsOpen() ? "Hide comparison" : "Show before/after comparison"}
+          </button>
+          <Show when={compareDetailsOpen()}>
+            {(() => {
+              const comparison = compareSummary();
+              return (
+                <div style={{ display: "flex", "flex-direction": "column", gap: "6px", "font-size": "11px" }}>
+                  <div style={{ display: "grid", "grid-template-columns": "1fr 1fr", gap: "6px" }}>
+                    <div>
+                      <div style={{ "font-weight": "600", "margin-bottom": "3px" }}>Before</div>
+                      <div style={{ "max-height": "180px", overflow: "auto", "white-space": "pre-wrap", padding: "6px", border: "1px solid var(--border-color)", "border-radius": "4px", background: "var(--bg-secondary, transparent)" }}>
+                        {comparePreview(comparison.beforeText) || "(empty)"}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ "font-weight": "600", "margin-bottom": "3px" }}>After</div>
+                      <div style={{ "max-height": "180px", overflow: "auto", "white-space": "pre-wrap", padding: "6px", border: "1px solid var(--border-color)", "border-radius": "4px", background: "var(--bg-secondary, transparent)" }}>
+                        {comparePreview(comparison.afterText) || "(empty)"}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ "font-weight": "600" }}>Token diff</div>
+                  <div style={{ "max-height": "120px", overflow: "auto", "white-space": "pre-wrap", padding: "6px", border: "1px solid var(--border-color)", "border-radius": "4px" }}>
+                    <For each={comparison.segments}>
+                      {(segment) => (
+                        <span style={{
+                          background: segment.kind === "insert" ? "#dcfce7" : segment.kind === "delete" ? "#fee2e2" : "transparent",
+                          color: segment.kind === "delete" ? "#991b1b" : "inherit",
+                          "text-decoration": segment.kind === "delete" ? "line-through" : "none",
+                        }}>
+                          {segment.text}
+                        </span>
+                      )}
+                    </For>
+                  </div>
+                  <Show when={comparison.truncated}>
+                    <div style={{ color: "var(--text-muted)" }}>Large-document preview is capped for responsiveness.</div>
+                  </Show>
+                </div>
+              );
+            })()}
+          </Show>
+          <div style={{ display: "flex", gap: "6px", "flex-wrap": "wrap" }}>
+            <button
+              type="button"
+              class="g-toolbar-btn"
+              aria-pressed={trackChangesOn()}
+              onClick={() => setTrackChangesOn(!trackChangesOn())}
+              style={trackChangesOn() ? { "font-weight": "700", outline: "2px solid var(--doc-accent, #7c3aed)", "outline-offset": "-2px" } : undefined}
+              title="Automatically mark typed insertions as tracked changes"
+            >
+              {trackChangesOn() ? "✓ Track Changes: On" : "Track Changes"}
+            </button>
+            <button type="button" class="g-toolbar-btn" onClick={() => markSelectionAsChange("insert")}>
+              Mark insertion
+            </button>
+            <button type="button" class="g-toolbar-btn" onClick={() => markSelectionAsChange("delete")}>
+              Mark deletion
+            </button>
+          </div>
+          <div style={{ display: "flex", gap: "6px", "flex-wrap": "wrap" }}>
+            <button type="button" class="g-toolbar-btn" onClick={() => resolveAllTrackedChanges("accept")}>
+              Accept all
+            </button>
+            <button type="button" class="g-toolbar-btn" onClick={() => resolveAllTrackedChanges("reject")}>
+              Reject all
+            </button>
+          </div>
+          <Show
+            when={comments().length > 0}
+            fallback={<div style={{ color: "var(--text-muted)", "font-size": "12px", padding: "8px 0" }}>Select text and add a comment to start a review thread.</div>}
+          >
+            <For each={comments()}>
+              {(comment) => (
+                <div
+                  style={{
+                    padding: "8px",
+                    border: "1px solid var(--border-color)",
+                    "border-radius": "6px",
+                    background: selectedCommentId() === comment.id ? "var(--bg-hover)" : "transparent",
+                    opacity: comment.resolved ? "0.65" : "1",
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => selectComment(comment)}
+                    style={{ display: "block", width: "100%", padding: "0", background: "transparent", "text-align": "left", "font-size": "12px" }}
+                    title="Select comment anchor"
+                  >
+                    <strong>{comment.author}</strong>
+                    <span style={{ display: "block", "margin-top": "4px", "white-space": "pre-wrap", color: "var(--text-primary)" }}>{comment.text}</span>
+                  </button>
+                  {/* Threaded replies */}
+                  <Show when={(comment.replies?.length ?? 0) > 0}>
+                    <div style={{ "margin-top": "6px", "padding-left": "8px", "border-left": "2px solid var(--border-color)" }}>
+                      <For each={comment.replies}>
+                        {(reply) => (
+                          <div style={{ "font-size": "12px", "margin-bottom": "4px" }}>
+                            <strong>{reply.author}</strong>
+                            <span style={{ display: "block", "white-space": "pre-wrap", color: "var(--text-primary)" }}>{reply.text}</span>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                  <Show when={selectedCommentId() === comment.id}>
+                    <div style={{ display: "flex", gap: "4px", "margin-top": "6px" }}>
+                      <input
+                        type="text"
+                        placeholder="Reply…"
+                        aria-label={`Reply to ${comment.author}'s comment`}
+                        value={replyDrafts()[comment.id] ?? ""}
+                        onInput={(e) => { setReplyDrafts((prev) => ({ ...prev, [comment.id]: e.currentTarget.value })); }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            submitReply(comment.id);
+                          }
+                        }}
+                        style={{ flex: 1, "font-size": "12px", padding: "3px 8px", border: "1px solid var(--border-color)", "border-radius": "4px", background: "var(--bg-input, transparent)", color: "inherit" }}
+                      />
+                      <button type="button" class="g-toolbar-btn" onClick={() => submitReply(comment.id)}>Reply</button>
+                    </div>
+                  </Show>
+                  <div style={{ display: "flex", gap: "6px", "margin-top": "7px" }}>
+                    <button type="button" class="g-toolbar-btn" onClick={() => updateComment(comment.id, { resolved: !comment.resolved })}>
+                      {comment.resolved ? "Reopen" : "Resolve"}
+                    </button>
+                    <button type="button" class="g-toolbar-btn" onClick={() => removeComment(comment.id)}>Delete</button>
+                  </div>
+                </div>
+              )}
+            </For>
+          </Show>
+        </div>
+      ),
+    },
   ];
 
   const zoom = () => props.zoomLevel ?? 100;
 
   return (
     <div style={{ display: "flex", "flex-direction": "column", height: "100%", background: "var(--bg-canvas)", overflow: "hidden" }}>
+      <Show when={loadWarning()}>
+        <div
+          data-testid="doc-load-warning"
+          style={{
+            display: "flex", "align-items": "center", "justify-content": "space-between",
+            gap: "12px", padding: "8px 16px",
+            background: "var(--warn-bg, #3a2b0b)", color: "var(--warn-fg, #ffd479)",
+            "font-size": "13px", "border-bottom": "1px solid rgba(255, 212, 121, 0.35)",
+          }}
+          role="status"
+        >
+          <span>{loadWarning()}</span>
+          <button
+            type="button"
+            aria-label="Dismiss warning"
+            style={{
+              background: "transparent", border: "1px solid currentColor",
+              color: "inherit", "border-radius": "6px", padding: "2px 10px", cursor: "pointer",
+            }}
+            onClick={() => setLoadWarning(null)}
+          >
+            Dismiss
+          </button>
+        </div>
+      </Show>
       <DocToolbar
         onRequestNew={props.onRequestNew}
         onRequestOpen={props.onRequestOpen}
         onRequestSave={props.onRequestSave}
         onRequestExportPdf={props.onRequestExportPdf}
+        onRequestExportDocx={props.onRequestExportDocx}
         onPageSetup={() => setPageSetupOpen(true)}
         onCut={() => clipboard("cut")}
         onCopy={() => clipboard("copy")}
@@ -1434,12 +2189,18 @@ export function DocEditor(props: DocEditorProps) {
         onToggleFind={() => setFindOpen(!findOpen())}
         onInsertTable={() => insertTable()}
         onInsertImage={() => setImageDialogOpen(true)}
-        onInsertLink={() => setLinkDialogOpen(true)}
+        onInsertLink={openLinkDialog}
+        onInsertBookmark={openBookmarkDialog}
         onInsertPageBreak={insertPageBreak}
+        onInsertPageField={() => insertDocumentField("page")}
+        onInsertNumPagesField={() => insertDocumentField("numPages")}
+        onInsertSectionBreak={insertSectionBreak}
+        onInsertToc={insertTableOfContents}
         onAddTableRow={addTableRow}
         onDeleteTableRow={deleteTableRow}
         onAddTableColumn={addTableColumn}
         onDeleteTableColumn={deleteTableColumn}
+        onDeleteTable={execDeleteTable}
         onMergeCells={execMergeCells}
         onSplitCell={execSplitCell}
         onToggleHeaderRow={toggleHeaderRow}
@@ -1601,20 +2362,18 @@ export function DocEditor(props: DocEditorProps) {
 
       <Show when={pageSetup().header}>
         <div class="doc-print-header">
-          {pageSetup().header
-            ?.replace(/{pages}/g, String(pageCount()))
-            ?.replace(/{total}/g, String(pageCount()))
-            ?.replace(/{page}/g, "1")}
+          {formatPrintHeaderFooter(pageSetup().header, pageCount(), currentCurPage)}
         </div>
       </Show>
       <Show when={pageSetup().footer}>
         <div class="doc-print-footer">
-          {pageSetup().footer
-            ?.replace(/{pages}/g, String(pageCount()))
-            ?.replace(/{total}/g, String(pageCount()))
-            ?.replace(/{page}/g, "1")}
+          {formatPrintHeaderFooter(pageSetup().footer, pageCount(), currentCurPage)}
         </div>
       </Show>
+
+      <style>{`.doc-comment-highlight { background: color-mix(in srgb, var(--doc-accent) 24%, transparent); border-bottom: 2px solid var(--doc-accent); } .doc-track-insert { background: color-mix(in srgb, #22c55e 18%, transparent); border-bottom: 2px solid #22c55e; } .doc-track-delete { background: color-mix(in srgb, #ef4444 14%, transparent); color: #b91c1c; text-decoration: line-through; }`}</style>
+
+      <style>{`.doc-spell-misspelled { text-decoration: underline wavy #e74c3c; text-underline-offset: 2px; }`}</style>
 
       <Ruler
         zoom={zoom()}
@@ -1627,6 +2386,8 @@ export function DocEditor(props: DocEditorProps) {
 
       <div style={{ flex: 1, display: "flex", "min-height": "0", overflow: "hidden" }}>
         <main
+          data-pane="canvas"
+          aria-label="Document canvas"
           style={{
             flex: 1,
             overflow: "auto",
@@ -1656,7 +2417,15 @@ export function DocEditor(props: DocEditorProps) {
           >
             <div
               ref={editorRef}
-              style={{ "min-height": "800px", outline: "none", "font-family": "Liberation Serif, serif", "font-size": "12pt" }}
+              spellcheck={props.spellcheckEnabled !== false}
+              style={{
+                "min-height": "800px",
+                outline: "none",
+                "font-family": "Liberation Serif, serif",
+                "font-size": "12pt",
+                "column-count": Math.max(1, Math.min(4, pageSetup().columns || 1)),
+                "column-gap": "36px",
+              }}
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => {
                 e.preventDefault();
@@ -1677,9 +2446,19 @@ export function DocEditor(props: DocEditorProps) {
                   { id: "italic", label: "Italic", action: () => emitEditorCommand("italic") },
                   { id: "sep2", label: "", separator: true },
                   { id: "insert-link", label: "Insert Link…", action: () => emitEditorCommand("insert-link") },
+                  { id: "insert-bookmark", label: "Insert Bookmark…", action: () => emitEditorCommand("insert-bookmark") },
                   { id: "insert-table", label: "Insert Table", action: () => emitEditorCommand("insert-table") },
+                  { id: "insert-section-break", label: "Insert Section Break", action: () => emitEditorCommand("insert-section-break") },
+                  { id: "insert-toc", label: "Insert Table of Contents", action: () => emitEditorCommand("insert-toc") },
+                  { id: "sep-table", label: "", separator: true },
+                  { id: "add-table-row", label: "Add Row", action: () => emitEditorCommand("add-table-row") },
+                  { id: "delete-table-row", label: "Delete Row", action: () => emitEditorCommand("delete-table-row") },
+                  { id: "add-table-column", label: "Add Column", action: () => emitEditorCommand("add-table-column") },
+                  { id: "delete-table-column", label: "Delete Column", action: () => emitEditorCommand("delete-table-column") },
+                  { id: "delete-table", label: "Delete Table", action: () => emitEditorCommand("delete-table") },
                   { id: "merge-cells", label: "Merge cells", action: () => emitEditorCommand("merge-cells") },
                   { id: "split-cell", label: "Split cell", action: () => emitEditorCommand("split-cell") },
+                  { id: "toggle-header-row", label: "Toggle Header", action: () => emitEditorCommand("toggle-header-row") },
                   { id: "sep3", label: "", separator: true },
                   { id: "find", label: "Find…", action: () => emitEditorCommand("find") },
                 ];
@@ -1689,6 +2468,7 @@ export function DocEditor(props: DocEditorProps) {
             <Show when={selectedImage() && view}>
               <div
                 role="button"
+                tabindex="0"
                 aria-label="Resize image"
                 title="Drag to resize image"
                 style={{
@@ -1749,9 +2529,66 @@ export function DocEditor(props: DocEditorProps) {
               style={{ width: "100%", height: "28px", padding: "0 8px" }}
             />
           </label>
+          <Show when={linkError()}>
+            <div role="alert" style={{ "font-size": "12px", color: "var(--danger, #b91c1c)" }}>{linkError()}</div>
+          </Show>
           <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
             <button type="button" class="g-toolbar-btn" onClick={() => setLinkDialogOpen(false)}>Cancel</button>
             <button type="button" class="g-toolbar-btn active" onClick={applyLink}>Apply</button>
+          </div>
+          <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
+            For a same-document target, use <code>internal:BookmarkName</code> or <code>#BookmarkName</code>.
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog open={bookmarkDialogOpen()} title="Insert bookmark" onClose={() => setBookmarkDialogOpen(false)}>
+        <div style={{ display: "flex", "flex-direction": "column", gap: "12px", "min-width": "360px" }}>
+          <div style={{ "font-size": "12px", color: "var(--text-muted)" }}>
+            Select text before opening this dialog. Word-compatible names are limited to 40 characters.
+          </div>
+          <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+            Bookmark name
+            <input
+              class="g-toolbar-input"
+              value={bookmarkName()}
+              onInput={(event) => {
+                setBookmarkName(event.currentTarget.value);
+                setBookmarkError("");
+              }}
+              maxlength={40}
+              autofocus
+              aria-label="Bookmark name"
+              placeholder="ProjectPlan"
+              style={{ width: "100%", height: "28px", padding: "0 8px" }}
+            />
+          </label>
+          <Show when={bookmarkError()}>
+            <div role="alert" style={{ "font-size": "12px", color: "var(--danger, #b91c1c)" }}>{bookmarkError()}</div>
+          </Show>
+          <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
+            <button type="button" class="g-toolbar-btn" onClick={() => setBookmarkDialogOpen(false)}>Cancel</button>
+            <button type="button" class="g-toolbar-btn active" onClick={applyBookmark}>Insert</button>
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog open={commentDialogOpen()} title="New comment" onClose={() => setCommentDialogOpen(false)}>
+        <div style={{ display: "flex", "flex-direction": "column", gap: "10px", "min-width": "360px" }}>
+          <div style={{ "font-size": "12px", color: "var(--text-muted)" }}>Your comment will be attached to the selected text.</div>
+          <textarea
+            class="g-toolbar-input"
+            value={commentDraft()}
+            onInput={(event) => setCommentDraft(event.currentTarget.value)}
+            rows={5}
+            autofocus
+            aria-label="Comment text"
+            placeholder="Write a comment…"
+            style={{ width: "100%", resize: "vertical", padding: "8px" }}
+          />
+          <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
+            <button type="button" class="g-toolbar-btn" onClick={() => setCommentDialogOpen(false)}>Cancel</button>
+            <button type="button" class="g-toolbar-btn active" disabled={!commentDraft().trim()} onClick={saveComment}>Add comment</button>
           </div>
         </div>
       </Dialog>
@@ -1798,7 +2635,7 @@ export function DocEditor(props: DocEditorProps) {
         onItalic={execToggleItalic}
         onUnderline={execToggleUnderline}
         onStrikethrough={execToggleStrike}
-        onLink={() => setLinkDialogOpen(true)}
+        onLink={openLinkDialog}
       />
 
       <PageSetupDialog
@@ -1806,14 +2643,29 @@ export function DocEditor(props: DocEditorProps) {
         onClose={() => setPageSetupOpen(false)}
         config={pageSetup()}
         onApply={(config) => {
-          setPageSetup(config);
-          if (view) emitDocChange(view.state.doc, config);
+          const normalized = normalizePageSetupConfig(config);
+          setPageSetup(normalized);
+          if (view) {
+            refreshStatus(buildDocJson(view.state.doc, normalized, comments(), customStyles(), footnotes()), false);
+            emitDocChange(view.state.doc, normalized);
+          }
         }}
       />
 
       <Show when={printPreviewOpen()}>
         <PrintPreview
-          content={editorRef?.innerHTML || ""}
+          content={
+            view
+              ? (() => {
+                  const div = document.createElement("div");
+                  const v = view as any as EditorView;
+                  div.appendChild(DOMSerializer.fromSchema(mySchema).serializeFragment(v.state.doc.content));
+                  return div.innerHTML;
+                })()
+              : ""
+          }
+          pageSetup={pageSetup()}
+          pageCount={pageCount()}
           onClose={() => setPrintPreviewOpen(false)}
         />
       </Show>

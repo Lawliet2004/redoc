@@ -81,7 +81,12 @@ export function SettingsDialog(props: SettingsDialogProps) {
               min="8"
               max="72"
               value={fontSizeDefault()}
-              onInput={(e) => setFontSizeDefault(Number(e.currentTarget.value))}
+              onInput={(e) => {
+                let val = Number(e.currentTarget.value);
+                if (val < 8) val = 8;
+                if (val > 72) val = 72;
+                setFontSizeDefault(val);
+              }}
               style={inputStyle}
             />
           </div>
@@ -92,7 +97,12 @@ export function SettingsDialog(props: SettingsDialogProps) {
               min="50"
               max="200"
               value={zoomLevel()}
-              onInput={(e) => setZoomLevel(Number(e.currentTarget.value))}
+              onInput={(e) => {
+                let val = Number(e.currentTarget.value);
+                if (val < 50) val = 50;
+                if (val > 200) val = 200;
+                setZoomLevel(val);
+              }}
               style={inputStyle}
             />
           </div>

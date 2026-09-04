@@ -4,19 +4,19 @@ overview: "Full technical design and phased implementation plan for \"Redoc\": a
 todos:
   - id: phase-1
     content: "Phase 1: scaffold monorepo, Tauri shell, home screen, core services (file-io, autosave, recovery), doc editor MVP"
-    status: pending
+    status: done
   - id: phase-2
     content: "Phase 2: spreadsheet MVP (canvas grid, formula engine, CSV, multi-sheet)"
-    status: pending
+    status: done
   - id: phase-3
     content: "Phase 3: presentation MVP (deck model, thumbnails, themes, layouts, PDF export)"
-    status: pending
+    status: done
   - id: phase-4
     content: "Phase 4: import/export hardening (PDF all modes, DOCX, XLSX, PPTX, regression suite)"
-    status: pending
+    status: done
   - id: phase-5
     content: "Phase 5: polish, accessibility, performance budgets, packaging, updater, 1.0 release"
-    status: pending
+    status: in_progress
 isProject: false
 ---
 

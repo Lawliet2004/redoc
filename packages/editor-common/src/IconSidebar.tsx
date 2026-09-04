@@ -33,7 +33,7 @@ export function IconSidebar(props: IconSidebarProps) {
   };
 
   return (
-    <div class="g-no-print" style={{ display: "flex", height: "100%", "flex-shrink": "0" }}>
+    <div class="g-no-print" data-pane="inspector" style={{ display: "flex", height: "100%", "flex-shrink": "0" }}>
       <Show when={currentPanel() && activePanel()}>
         <aside class="g-sidebar-panel" aria-label={activePanel()!.title}>
           <div class="g-sidebar-panel-title">{activePanel()!.title}</div>

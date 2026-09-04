@@ -13,7 +13,7 @@ This document tracks external crate dependencies, their purposes, approximate bi
 | `calamine` | `export` | XLSX import / spreadsheet parsing | ~200 KB | Manual OOXML parsing |
 | `unicode-segmentation` | `export`, `doc-engine` | Grapheme-aware text segmentation for layout | ~30 KB | Byte-index string slicing |
 | `thiserror` | Workspace-wide | Idiomatic typed error definition | ~20 KB | Hand-rolled `Display` / `Error` boilerplate |
-| `tracing`, `tracing-appender` | `core` | Structured logging and daily log file rotation | ~120 KB | `log` + `env_logger` (lacks log file rotation) |
+| `tracing`, `tracing-appender` | `core` | Structured logging with size-bounded rotation (5 MiB active file + 4 rotated backups via non-blocking `SizeRollingWriter`) | ~120 KB | `log` + `env_logger` (lacks log file rotation) |
 | `parking_lot` | `core` | High performance sync primitives (`Mutex`, `RwLock`) | ~40 KB | `std::sync` (higher contention overhead on Windows) |
 | `uuid` | `core`, `file-io` | UUIDv7 document ID generation | ~30 KB | Custom random strings (lack timestamp sorting) |
 | `sha2` | `file-io` | Content-addressed asset deduplication (SHA-256) | ~40 KB | `md-5` (cryptographically broken) |
@@ -26,12 +26,12 @@ This document tracks external crate dependencies, their purposes, approximate bi
 
 ## Version notes
 
-### `zip` (split versions — known tech debt)
+### `zip` (unified at 2.4)
 
 | Crate | `Cargo.toml` pin |
 | ----- | ---------------- |
-| `redoc-core` | `zip = "8.6.0"` |
-| `redoc-file-io` | `zip = "0.6"` |
-| `redoc-export` | `zip = "0.6"` |
+| `redoc-core` | `zip = "2.4"` |
+| `redoc-file-io` | `zip = "2.4"` |
+| `redoc-export` | `zip = "2.4"` |
 
-`core` upgraded to the 8.x line while container I/O and export crates remain on 0.6. Cargo resolves both into the workspace binary today; unifying on a single `zip` major version is a future cleanup item.
+All workspace members use the single `zip` 2.4 line (deflate-only features) for `.redoc` containers and OOXML packages.

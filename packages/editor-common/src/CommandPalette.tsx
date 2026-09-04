@@ -1,10 +1,12 @@
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { CommandItem, shortcutRegistry } from "./ShortcutRegistry";
+import { createSignal, For, Show } from "solid-js";
+import { shortcutRegistry } from "./ShortcutRegistry";
 import { IconSearch } from "@redoc/icons";
+import { t } from "@redoc/ui";
 
 interface CommandPaletteProps {
   open: boolean;
   onClose: () => void;
+  activeMode?: "home" | "doc" | "sheet" | "slide";
 }
 
 export function CommandPalette(props: CommandPaletteProps) {
@@ -13,9 +15,31 @@ export function CommandPalette(props: CommandPaletteProps) {
 
   const filteredCommands = () => {
     const q = query().toLowerCase().trim();
-    const all = shortcutRegistry.getAll();
+    const mode = props.activeMode || "home";
+    let all = shortcutRegistry.getAll().filter(c => {
+      if (!c.mode || c.mode === "global") return true;
+      if (mode === "home") return false;
+      return c.mode === mode;
+    });
+    
     if (!q) return all;
-    return all.filter((c) => c.title.toLowerCase().includes(q) || c.id.toLowerCase().includes(q));
+    
+    return all.map((c) => {
+      const target = (c.title + " " + c.id).toLowerCase();
+      let qIdx = 0;
+      let score = 0;
+      for (let i = 0; i < target.length; i++) {
+        if (target[i] === q[qIdx]) {
+          score++;
+          qIdx++;
+          if (qIdx === q.length) break;
+        }
+      }
+      return { item: c, score, target };
+    })
+      .filter((x) => x.score === q.length)
+      .sort((a, b) => a.target.length - b.target.length)
+      .map((x) => x.item);
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
@@ -41,6 +65,9 @@ export function CommandPalette(props: CommandPaletteProps) {
   return (
     <Show when={props.open}>
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("palette.searchLabel")}
         style={{
           position: "fixed",
           top: 0,
@@ -85,8 +112,11 @@ export function CommandPalette(props: CommandPaletteProps) {
             <IconSearch color="var(--text-muted)" />
             <input
               type="text"
-              aria-label="Command search"
-              placeholder="Type a command or search..."
+              role="combobox"
+              aria-expanded="true"
+              aria-controls="cmd-palette-listbox"
+              aria-label={t("palette.searchLabel")}
+              placeholder={t("palette.placeholder")}
               value={query()}
               onInput={(e) => {
                 setQuery(e.currentTarget.value);
@@ -102,12 +132,19 @@ export function CommandPalette(props: CommandPaletteProps) {
               }}
             />
           </div>
-          <div style={{ "max-height": "320px", "overflow-y": "auto", padding: "6px" }}>
+          <div id="cmd-palette-listbox" role="listbox" aria-label={t("palette.searchLabel")} style={{ "max-height": "320px", "overflow-y": "auto", padding: "6px" }} aria-live="polite">
+            <Show when={filteredCommands().length === 0}>
+              <div style={{ padding: "12px", color: "var(--text-muted)", "font-size": "13px" }}>{t("palette.noResults")}</div>
+            </Show>
+            <div style={{ padding: "6px 12px", color: "var(--text-muted)", "font-size": "11px" }}>{t("palette.hint")}</div>
             <For each={filteredCommands()}>
               {(item, index) => {
                 const selected = () => index() === selectedIndex();
                 return (
                   <div
+                    role="option"
+                    aria-selected={selected()}
+                    tabindex="-1"
                     onClick={() => {
                       item.action();
                       props.onClose();

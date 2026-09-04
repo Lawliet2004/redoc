@@ -78,7 +78,7 @@ export function FindBar(props: FindBarProps) {
         </label>
       </Show>
       <Show when={typeof props.matchCount === "number"}>
-        <span style={{ "font-size": "11px", color: "var(--text-muted)" }} aria-live="polite">
+        <span class="g-status-count" style={{ "font-size": "11px", color: "var(--text-muted)" }} aria-live="polite" aria-atomic="true" role="status">
           {props.matchCount === 0
             ? "0 matches"
             : `${(props.matchIndex ?? 0) + 1} of ${props.matchCount} matches`}

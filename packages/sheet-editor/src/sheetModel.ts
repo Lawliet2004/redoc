@@ -1,5 +1,7 @@
 import type { Accessor, Setter } from "solid-js";
-import type { GridCell, SheetSnapshot } from "./sheetTypes";
+import type { ConditionalFormattingRule, GridCell, PivotTableConfig, ScenarioConfig, SheetSnapshot, SlicerConfig } from "./sheetTypes";
+import { buildPivotTable } from "./pivotTables";
+import { rowMatchesSlicers } from "./slicers";
 
 export interface SheetHistoryOptions {
   historyPast: Accessor<SheetSnapshot[]>;
@@ -51,7 +53,7 @@ export interface BuildWorkbookContext {
   rowHeights: Accessor<Record<number, number>>;
   selectionAnchor: Accessor<{ row: number; col: number }>;
   activeCell: Accessor<{ row: number; col: number }>;
-  chartType: Accessor<"bar" | "line" | "pie" | null>;
+  chartType: Accessor<"bar" | "line" | "pie" | "area" | "scatter" | "doughnut" | null>;
   chartTitle: Accessor<string>;
   chartRange: Accessor<{ startRow: number; endRow: number; startCol: number; endCol: number }>;
   filterQuery: Accessor<string>;
@@ -60,12 +62,17 @@ export interface BuildWorkbookContext {
   filterRange: Accessor<{ startRow: number; endRow: number; startCol: number; endCol: number } | null>;
   columnFilters: Accessor<Record<number, string[]>>;
   namedRanges: Accessor<Array<{ name: string; rangeStr: string; sheet: string | null }>>;
+  conditionalFormatting?: Accessor<ConditionalFormattingRule[]>;
+  pivotTables?: Accessor<PivotTableConfig[]>;
+  scenarios?: Accessor<ScenarioConfig[]>;
+  slicers?: Accessor<SlicerConfig[]>;
+  comments?: Accessor<import("./sheetTypes").CellComment[]>;
 }
 
 export function buildWorkbookFromCells(ctx: BuildWorkbookContext, cellMap: Record<string, GridCell>) {
   const existing = ctx.initialContent?.sheets?.length
     ? structuredClone(ctx.initialContent)
-    : { sheets: [{ id: "sheet-1", name: "Sheet1", cells: {}, colWidths: {}, rowHeights: {}, freezeRows: 0, freezeCols: 0 }], activeSheetIndex: 0 };
+    : { sheets: [{ id: "sheet-1", name: "Sheet1", cells: {}, colWidths: {}, rowHeights: {}, freezeRows: 0, freezeCols: 0, conditionalFormatting: [], spills: [] }], activeSheetIndex: 0 };
   const currentMeta = ctx.sheets();
   if (existing.sheets) {
     existing.sheets = currentMeta.map((s, idx) => {
@@ -83,6 +90,13 @@ export function buildWorkbookFromCells(ctx: BuildWorkbookContext, cellMap: Recor
         filterQuery: found?.filterQuery || null,
         merges: found?.merges || [],
         autoFilter: found?.autoFilter || null,
+        conditionalFormatting: found?.conditionalFormatting || [],
+        pivotTables: found?.pivotTables || [],
+        tables: found?.tables || [],
+        scenarios: found?.scenarios || [],
+        slicers: found?.slicers || [],
+        spills: found?.spills || [],
+        comments: found?.comments || [],
       };
     });
   }
@@ -93,7 +107,12 @@ export function buildWorkbookFromCells(ctx: BuildWorkbookContext, cellMap: Recor
   sheet.rowHeights = { 0: ctx.rowHeight(), ...ctx.rowHeights() };
   const anchor = ctx.selectionAnchor();
   const active = ctx.activeCell();
-  sheet.charts = ctx.chartType()
+  // Single-chart editing context: the active chart replaces slot 0; when no
+  // chart is being edited, every persisted chart survives untouched.
+  const preservedCharts = ctx.chartType()
+    ? (sheet.charts || []).slice(1)
+    : (sheet.charts || []);
+  const activeChart = ctx.chartType()
     ? [{
         chartType: ctx.chartType(),
         title: ctx.chartTitle(),
@@ -103,8 +122,14 @@ export function buildWorkbookFromCells(ctx: BuildWorkbookContext, cellMap: Recor
         endCol: ctx.chartRange().endCol,
       }]
     : [];
+  sheet.charts = [...activeChart, ...preservedCharts];
   sheet.filterQuery = ctx.filterQuery() || null;
   sheet.merges = ctx.merges();
+  sheet.conditionalFormatting = ctx.conditionalFormatting?.() ?? [];
+  sheet.pivotTables = ctx.pivotTables?.() ?? [];
+  sheet.scenarios = ctx.scenarios?.() ?? [];
+  sheet.slicers = ctx.slicers?.() ?? [];
+  sheet.comments = ctx.comments?.() ?? [];
   const fr = ctx.filterRange() || {
     startRow: Math.min(anchor.row, active.row),
     endRow: Math.max(anchor.row, active.row),
@@ -121,7 +146,28 @@ export function buildWorkbookFromCells(ctx: BuildWorkbookContext, cellMap: Recor
         columnFilters: Object.fromEntries(Object.entries(ctx.columnFilters()).map(([k, v]) => [k, v])),
       }
     : null;
-  sheet.cells = Object.fromEntries(Object.entries(cellMap).map(([key, value]) => [key, {
+  // Dynamic-array spill values are render-only. Persist the origin formula and
+  // the bounded spill metadata, never synthetic neighbor cells as literals.
+  const materializedCells = Object.fromEntries(
+    Object.entries(cellMap).filter(([, value]) => !value.spill),
+  );
+  for (const pivot of sheet.pivotTables) {
+    const rowCount = pivot.outputRowCount || 0;
+    for (let row = pivot.outputStartRow; row < pivot.outputStartRow + rowCount; row += 1) {
+      delete materializedCells[`${row}:${pivot.outputStartCol}`];
+      delete materializedCells[`${row}:${pivot.outputStartCol + 1}`];
+    }
+    const result = buildPivotTable(
+      materializedCells,
+      pivot,
+      (row) => rowMatchesSlicers(materializedCells, row, sheet.slicers),
+    );
+    if (!result.warning) {
+      pivot.outputRowCount = result.rowCount;
+      Object.assign(materializedCells, result.cells);
+    }
+  }
+  sheet.cells = Object.fromEntries(Object.entries(materializedCells).map(([key, value]) => [key, {
     rawValue: value.raw,
     displayValue: value.display,
     formula: value.raw.startsWith("=") ? value.raw : null,
@@ -141,6 +187,7 @@ export function buildWorkbookFromCells(ctx: BuildWorkbookContext, cellMap: Recor
           vAlign: value.style.vAlign,
           fontFamily: value.style.fontFamily,
           fontSize: value.style.fontSize,
+          image: value.style.image,
         }
       : null,
   }]));
