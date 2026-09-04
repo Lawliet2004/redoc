@@ -55,6 +55,8 @@ interface SheetEditorProps {
   zoomLevel?: number;
   /** Enables the platform spellchecker on the cell/formula inputs. */
   spellcheckEnabled?: boolean;
+  /** Display name used to attribute cell comments. */
+  authorName?: string;
 }
 
 export function SheetEditor(props: SheetEditorProps) {
@@ -1665,7 +1667,7 @@ export function SheetEditor(props: SheetEditorProps) {
   // —— Cell comments (offline review) ————————————————
   const addCommentToActiveCell = () => {
     const cell = activeCell();
-    const made = makeCellComment(cell.row, cell.col, commentDraft(), "You", cellComments());
+    const made = makeCellComment(cell.row, cell.col, commentDraft(), props.authorName?.trim() || "You", cellComments());
     if ("error" in made) {
       showToast(made.error, "warning");
       return;

@@ -4,6 +4,13 @@ import { gzipSync } from "node:zlib";
 import { join, relative } from "node:path";
 import { runInstallerSizeGate } from "./installer-size-gate.mjs";
 import { runPerfBudgetGate } from "./perf-budget.mjs";
+import { validateCapabilityLedger } from "./validate-capability-ledger.mjs";
+
+const ledgerFailures = validateCapabilityLedger(process.cwd());
+if (ledgerFailures.length) {
+  for (const failure of ledgerFailures) console.error(`Quality gate: capability ledger: ${failure}`);
+  process.exit(1);
+}
 
 const dist = join(process.cwd(), "apps", "desktop", "dist");
 if (!existsSync(dist)) {

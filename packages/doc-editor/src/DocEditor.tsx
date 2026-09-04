@@ -703,7 +703,7 @@ export function DocEditor(props: DocEditorProps) {
     if (!text || !anchor || !view) return;
     const comment: ReviewComment = {
       id: `comment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      author: "You",
+      author: props.authorName?.trim() || "You",
       text,
       from: anchor.from,
       to: anchor.to,
@@ -738,7 +738,7 @@ export function DocEditor(props: DocEditorProps) {
                 ...(comment.replies || []),
                 {
                   id: `reply-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                  author: "You",
+                  author: props.authorName?.trim() || "You",
                   text,
                   createdAt: new Date().toISOString(),
                 },
@@ -811,7 +811,7 @@ export function DocEditor(props: DocEditorProps) {
         findPlugin(findQuery, matchCase, matchIndex),
         autoTrackChangesPlugin(trackChangesOn, () =>
           mySchema.marks[TRACK_INSERT_MARK].create({
-            author: "You",
+            author: props.authorName?.trim() || "You",
             changeId: `change-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             createdAt: new Date().toISOString(),
           }),
@@ -1144,7 +1144,7 @@ export function DocEditor(props: DocEditorProps) {
       const markName = kind === "insert" ? TRACK_INSERT_MARK : TRACK_DELETE_MARK;
       const oppositeName = kind === "insert" ? TRACK_DELETE_MARK : TRACK_INSERT_MARK;
       const mark = mySchema.marks[markName].create({
-        author: "You",
+        author: props.authorName?.trim() || "You",
         changeId: `change-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         createdAt: new Date().toISOString(),
       });

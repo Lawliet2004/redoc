@@ -221,8 +221,6 @@ export const en = {
     defaultStyle: "Default",
     english: "English",
     wordCount: "Word count",
-    aggregates: "Selection aggregates",
-    position: "Find position",
   },
   toolbar: {
     moreActions: "More formatting actions",

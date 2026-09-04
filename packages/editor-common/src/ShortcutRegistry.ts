@@ -116,13 +116,17 @@ export function matchShortcut(e: KeyboardEvent, shortcut: string): boolean {
   const ctrl = parts.includes("ctrl") || parts.includes("cmd");
   const alt = parts.includes("alt");
   const shift = parts.includes("shift");
-  const key = parts[parts.length - 1];
+  // "Ctrl+=" / "Ctrl+-" use the last part directly; "Ctrl++" splits to an
+  // empty key part, so map it to the physical Equal key (unshifted "+").
+  let key = parts[parts.length - 1];
+  if (key === "") key = "=";
+  const code = e.code.replace(/Key|Digit|Numpad/, "").toLowerCase();
 
   return (
     (e.ctrlKey || e.metaKey) === ctrl &&
     e.altKey === alt &&
     e.shiftKey === shift &&
-    (e.key.toLowerCase() === key || e.code.replace(/Key|Digit/, '').toLowerCase() === key)
+    (e.key.toLowerCase() === key || code === key)
   );
 }
 

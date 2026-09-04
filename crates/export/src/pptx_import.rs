@@ -642,6 +642,10 @@ fn parse_slide_transition(xml: &[u8]) -> String {
                     let transition = match name.as_slice() {
                         b"fade" => Some("fade"),
                         b"dissolve" => Some("dissolve"),
+                        // PowerPoint 2016+ morph transition (p14 extension).
+                        b"prstTrans" if attribute(&event, b"prst").as_deref() == Some("morph") => {
+                            Some("morph")
+                        }
                         b"zoom" if attribute(&event, b"dir").as_deref() != Some("out") => {
                             Some("zoom")
                         }
@@ -2040,10 +2044,16 @@ mod tests {
             (&br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:transition><p:wipe dir="r"/></p:transition></p:sld>"#[..], "wipe-right"),
             (&br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:transition><p:zoom dir="in"/></p:transition></p:sld>"#[..], "zoom"),
             (&br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:transition><p:dissolve/></p:transition></p:sld>"#[..], "dissolve"),
+            (&br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main"><p:transition><p14:prstTrans prst="morph" option="byObject"/></p:transition></p:sld>"#[..], "morph"),
         ];
         for (xml, expected) in cases {
             assert_eq!(parse_slide_transition(xml), expected);
         }
+        // A non-morph prstTrans is not mapped.
+        assert_eq!(
+            parse_slide_transition(br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main"><p:transition><p14:prstTrans prst="ripple"/></p:transition></p:sld>"#),
+            "none"
+        );
         assert_eq!(
             parse_slide_transition(br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:transition><p:zoom dir="out"/></p:transition></p:sld>"#),
             "none"

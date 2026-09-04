@@ -504,6 +504,12 @@ export function App() {
   };
 
   onMount(async () => {
+    // Startup budget record (prompt.md §10: cold start < 1.5 s).
+    const evalMs = (window as unknown as Record<string, number>).__redocEvalMs;
+    if (typeof evalMs === "number") {
+      console.info(`[redoc-perf] script-eval→mounted: ${Math.round(performance.now() - evalMs)} ms`);
+    }
+
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const mqHandler = (e: MediaQueryListEvent) => setSystemTheme(e.matches ? "dark" : "light");
     mq.addEventListener("change", mqHandler);
@@ -1250,6 +1256,7 @@ export function App() {
                       .map((session) => ({ id: session.id, title: session.title, content: session.content }))}
                     zoomLevel={zoomLevel()}
                     spellcheckEnabled={settings().spellcheckEnabled !== false}
+                    authorName={settings().author?.displayName}
                     onRequestNew={() => void handleNewDoc("doc")}
                     onRequestOpen={() => void handleOpenFile()}
                     onRequestSave={() => void handleSave()}
@@ -1273,6 +1280,7 @@ export function App() {
                     initialContent={docContent()}
                     zoomLevel={zoomLevel()}
                     spellcheckEnabled={settings().spellcheckEnabled !== false}
+                    authorName={settings().author?.displayName}
                     onImportCsv={handleImportCsv}
                     onExportCsv={handleExportCsv}
                     onRequestNew={() => void handleNewDoc("sheet")}
@@ -1298,6 +1306,7 @@ export function App() {
                     initialContent={docContent()}
                     zoomLevel={zoomLevel()}
                     onZoomChange={setZoomLevel}
+                    authorName={settings().author?.displayName}
                     onRequestNew={() => void handleNewDoc("slide")}
                     onRequestOpen={() => void handleOpenFile()}
                     onRequestSave={() => void handleSave()}

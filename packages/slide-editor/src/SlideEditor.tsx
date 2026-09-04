@@ -46,6 +46,8 @@ interface SlideEditorProps {
   onRequestExportPptx?: () => void;
   zoomLevel?: number;
   onZoomChange?: (zoom: number) => void;
+  /** Display name used to attribute slide comments. */
+  authorName?: string;
 }
 
 type ResizeHandle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
@@ -111,7 +113,7 @@ export function SlideEditor(props: SlideEditorProps) {
     pushSlideHistory();
     const comment = {
       id: `comment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      author: "You",
+      author: props.authorName?.trim() || "You",
       text: text.slice(0, 2000),
       resolved: false,
       createdAt: new Date().toISOString(),
@@ -573,6 +575,25 @@ export function SlideEditor(props: SlideEditorProps) {
     const [item] = elements.splice(index, 1);
     if (toFront) elements.push(item);
     else elements.unshift(item);
+    const list = [...slides()];
+    list[activeSlideIndex()] = { ...slide, elements };
+    setSlides(list);
+    emitChange(list);
+  };
+
+  /** Step the selected element one layer toward front/back (PowerPoint-style). */
+  const stepSelectedZOrder = (forward: boolean) => {
+    pushSlideHistory();
+    const id = selectedElementId();
+    const slide = activeSlide();
+    if (!id || !slide) return;
+    const elements = [...slide.elements];
+    const index = elements.findIndex((el) => el.id === id);
+    if (index < 0) return;
+    const target = forward ? Math.min(elements.length - 1, index + 1) : Math.max(0, index - 1);
+    if (target === index) return;
+    const [item] = elements.splice(index, 1);
+    elements.splice(target, 0, item);
     const list = [...slides()];
     list[activeSlideIndex()] = { ...slide, elements };
     setSlides(list);
@@ -1232,6 +1253,7 @@ export function SlideEditor(props: SlideEditorProps) {
               <option value="wipe-right">Wipe right</option>
               <option value="zoom">Zoom</option>
               <option value="dissolve">Dissolve</option>
+              <option value="morph">Morph</option>
             </select>
           </label>
           <label style={{ "font-size": "11px" }}>
@@ -1843,6 +1865,8 @@ export function SlideEditor(props: SlideEditorProps) {
                 { id: "insert-image", label: "Insert Image", action: addImage },
                 { id: "sep2", label: "", separator: true },
                 { id: "bring-front", label: "Bring to Front", disabled: !selectedElementId(), action: () => reorderSelected(true) },
+                { id: "bring-forward", label: "Bring Forward", disabled: !selectedElementId(), action: () => stepSelectedZOrder(true) },
+                { id: "send-backward", label: "Send Backward", disabled: !selectedElementId(), action: () => stepSelectedZOrder(false) },
                 { id: "send-back", label: "Send to Back", disabled: !selectedElementId(), action: () => reorderSelected(false) },
                 { id: "rotate", label: "Rotate +15°", disabled: !selectedElementId(), action: () => rotateSelected(15) },
               ];

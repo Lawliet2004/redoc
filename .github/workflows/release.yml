@@ -24,6 +24,15 @@ jobs:
     env:
       TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
       TAURI_UPDATER_ENDPOINT: ${{ secrets.TAURI_UPDATER_ENDPOINT }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      TAURI_WINDOWS_SIGNTOOL_PATH: ${{ secrets.TAURI_WINDOWS_SIGNTOOL_PATH }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -75,3 +84,28 @@ jobs:
       - name: Installer size gate
         run: node scripts/installer-size-gate.mjs
         # Release-CI-only: fails if any built installer under target/release/bundle exceeds 55 MB.
+      - name: Verify Windows artifact signing
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $signtool = if ($env:TAURI_WINDOWS_SIGNTOOL_PATH) { $env:TAURI_WINDOWS_SIGNTOOL_PATH } else { "signtool" }
+          $bundles = Get-ChildItem -Path "apps/desktop/src-tauri/target/release/bundle" -Recurse -Include *.msi,*.exe -ErrorAction SilentlyContinue
+          foreach ($b in $bundles) {
+            Write-Host "== Verifying signature: $($b.Name)"
+            & $signtool verify /pa /all "$($b.FullName)" 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              if ($env:WINDOWS_CERTIFICATE) { Write-Host "::error::Artifact not signed but WINDOWS_CERTIFICATE was provided: $($b.Name)"; exit 1 }
+              else { Write-Host "::warning::Artifact is unsigned (no WINDOWS_CERTIFICATE secret configured): $($b.Name)" }
+            } else { Write-Host "Signed OK: $($b.Name)" }
+          }
+      - name: Verify macOS artifact signing
+        if: runner.os == 'macOS'
+        run: |
+          shopt -s nullglob
+          for app in apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg; do
+            echo "== DMG present: $app (codesign verification happens at build time via APPLE_* secrets)"
+          done
+          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+            echo "::warning::macOS artifacts are unsigned (no APPLE_CERTIFICATE secret configured)"
+          fi

@@ -678,6 +678,8 @@ fn transition_xml(transition: &str) -> String {
         "wipe-right" => r#"<p:transition><p:wipe dir="r"/></p:transition>"#.to_string(),
         "zoom" => r#"<p:transition><p:zoom dir="in"/></p:transition>"#.to_string(),
         "dissolve" => r#"<p:transition><p:dissolve/></p:transition>"#.to_string(),
+        // Morph is a PowerPoint 2016+ extension (mc:AlternateContent + p14).
+        "morph" => r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main"><mc:Choice xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" Requires="p14"><p:transition spd="slow" p14:dur="2000"><p14:prstTrans prst="morph" option="byObject"/></p:transition></mc:Choice><mc:Fallback xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:transition spd="slow"><p:fade/></p:transition></mc:Fallback></mc:AlternateContent>"#.to_string(),
         _ => String::new(),
     }
 }
@@ -1289,6 +1291,7 @@ mod tests {
             ("wipe-right", "<p:wipe dir=\"r\"/>"),
             ("zoom", "<p:zoom dir=\"in\"/>"),
             ("dissolve", "<p:dissolve/>"),
+            ("morph", "p14:prstTrans prst=\"morph\""),
         ];
         for (transition, expected) in cases {
             let mut deck = DeckModel::new_default();

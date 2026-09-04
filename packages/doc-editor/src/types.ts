@@ -39,6 +39,8 @@ export interface DocEditorProps {
   zoomLevel?: number;
   /** Enables the platform spellchecker on the editing surface. */
   spellcheckEnabled?: boolean;
+  /** Display name used to attribute comments and tracked changes. */
+  authorName?: string;
   onRequestNew?: () => void;
   onRequestOpen?: () => void;
   onRequestSave?: () => void;

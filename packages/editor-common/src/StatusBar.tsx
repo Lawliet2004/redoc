@@ -10,10 +10,6 @@ interface StatusBarProps {
   /** Extra middle status (e.g. page style, language) */
   pageStyle?: string;
   language?: string;
-  /** Selection stats for sheets (aggregates: Sum/Avg/Count) */
-  selectionStats?: string;
-  /** Find position "n of N" / "n/N" */
-  findPosition?: string;
 }
 
 export function StatusBar(props: StatusBarProps) {
@@ -82,25 +78,6 @@ export function StatusBar(props: StatusBarProps) {
             style={{ "white-space": "nowrap", overflow: "hidden", "text-overflow": "ellipsis" }}
           >
             {props.wordCountInfo}
-          </span>
-        )}
-        {props.selectionStats && (
-          <span
-            class="g-status-count"
-            aria-label={t("statusbar.aggregates")}
-            style={{ "white-space": "nowrap", overflow: "hidden", "text-overflow": "ellipsis" }}
-          >
-            {props.selectionStats}
-          </span>
-        )}
-        {props.findPosition && (
-          <span
-            class="g-status-count"
-            aria-label={t("statusbar.position")}
-            aria-live="polite"
-            style={{ "white-space": "nowrap" }}
-          >
-            {props.findPosition}
           </span>
         )}
       </div>

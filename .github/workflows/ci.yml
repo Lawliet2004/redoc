@@ -21,6 +21,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm generate:bindings
+      - run: pnpm ledger:check
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm performance:check

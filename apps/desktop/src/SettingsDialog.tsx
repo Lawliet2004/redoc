@@ -17,6 +17,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const [spellcheckEnabled, setSpellcheckEnabled] = createSignal(props.settings.spellcheckEnabled ?? true);
   const [telemetryEnabled, setTelemetryEnabled] = createSignal(props.settings.telemetryEnabled ?? false);
   const [checkForUpdates, setCheckForUpdates] = createSignal(props.settings.checkForUpdates !== false);
+  const [authorName, setAuthorName] = createSignal(props.settings.author?.displayName || "You");
+  const [authorEmail, setAuthorEmail] = createSignal(props.settings.author?.email || "");
+  const [authorColor, setAuthorColor] = createSignal(props.settings.author?.color || "#5b9bd5");
 
   createEffect(() => {
     if (props.open) {
@@ -27,6 +30,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
       setSpellcheckEnabled(props.settings.spellcheckEnabled ?? true);
       setTelemetryEnabled(props.settings.telemetryEnabled ?? false);
       setCheckForUpdates(props.settings.checkForUpdates !== false);
+      setAuthorName(props.settings.author?.displayName || "You");
+      setAuthorEmail(props.settings.author?.email || "");
+      setAuthorColor(props.settings.author?.color || "#5b9bd5");
     }
   });
 
@@ -40,6 +46,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
       spellcheckEnabled: spellcheckEnabled(),
       telemetryEnabled: telemetryEnabled(),
       checkForUpdates: checkForUpdates(),
+      author: {
+        displayName: authorName().trim() || "You",
+        email: authorEmail().trim() ? authorEmail().trim() : null,
+        color: authorColor(),
+      },
     });
     props.onClose();
   };
@@ -117,6 +128,40 @@ export function SettingsDialog(props: SettingsDialogProps) {
             onInput={(e) => setAutosaveInterval(Number(e.currentTarget.value))}
             style={inputStyle}
           />
+        </div>
+
+        <div>
+          <label style={labelStyle}>Display Name (used for comments and tracked changes)</label>
+          <input
+            type="text"
+            maxlength="80"
+            value={authorName()}
+            onInput={(e) => setAuthorName(e.currentTarget.value)}
+            style={inputStyle}
+          />
+        </div>
+
+        <div style={{ display: "flex", gap: "16px" }}>
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>Email (optional)</label>
+            <input
+              type="email"
+              maxlength="254"
+              value={authorEmail()}
+              onInput={(e) => setAuthorEmail(e.currentTarget.value)}
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label style={labelStyle}>Author Color</label>
+            <input
+              type="color"
+              value={authorColor()}
+              onInput={(e) => setAuthorColor(e.currentTarget.value)}
+              aria-label="Author color"
+              style={{ ...inputStyle, width: "64px", height: "36px", padding: "2px", "margin-top": "4px", cursor: "pointer" }}
+            />
+          </div>
         </div>
 
         <div style={{ display: "flex", "flex-direction": "column", gap: "8px", "margin-top": "4px" }}>

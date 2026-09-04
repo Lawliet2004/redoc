@@ -15,7 +15,8 @@
     "performance:check": "node scripts/perf-budget.mjs",
     "typecheck": "pnpm exec tsc -p apps/desktop/tsconfig.json --noEmit",
     "lint": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings",
-    "quality:check": "node scripts/quality-gates.mjs"
+    "quality:check": "node scripts/quality-gates.mjs",
+    "ledger:check": "node scripts/validate-capability-ledger.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0",

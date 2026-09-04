@@ -463,6 +463,7 @@ export function PresenterView() {
     else if (transition === "wipe-right") setAnimClass("g-slide-anim-wipe-right");
     else if (transition === "zoom") setAnimClass("g-slide-anim-zoom");
     else if (transition === "dissolve") setAnimClass("g-slide-anim-dissolve");
+    else if (transition === "morph") setAnimClass("g-slide-anim-morph");
     else setAnimClass("");
     if (transition !== "none") {
       window.setTimeout(() => setAnimClass(""), transition === "dissolve" ? 550 : 450);

@@ -142,6 +142,7 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
       {
         id: "zoom-in",
         title: "Zoom In",
+        shortcut: "Ctrl+=",
         mode: "global" as const,
         menuPath: ["View", "Zoom In"],
         action: () => {
@@ -153,6 +154,7 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
       {
         id: "zoom-out",
         title: "Zoom Out",
+        shortcut: "Ctrl+-",
         mode: "global" as const,
         menuPath: ["View", "Zoom Out"],
         action: () => {
@@ -164,6 +166,7 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
       {
         id: "zoom-100",
         title: "Zoom 100%",
+        shortcut: "Ctrl+0",
         mode: "global" as const,
         menuPath: ["View", "Zoom 100%"],
         action: () => {
