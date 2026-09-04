@@ -17,6 +17,8 @@ import type { SheetToolbarProps } from "./sheetTypes";
 
 export function SheetToolbar(props: SheetToolbarProps) {
   const { fontFamily, setFontFamily, fontSize, setFontSize, activeStyle, updateActiveStyle, selectedBounds, activeCell, setMerges, pushHistory, makeWorkbook, cellsData, drawGrid } = props;
+  const [borderStyle, setBorderStyle] = createSignal("thin");
+  const [borderColor, setBorderColor] = createSignal("#0f172a");
   return (
     <>
       {/* Formatting toolbar */}
@@ -155,6 +157,44 @@ export function SheetToolbar(props: SheetToolbarProps) {
         <ToolbarSep />
         <ToolbarButton title="Number format…" onClick={() => props.onOpenNumberFormat?.()}>Format…</ToolbarButton>
         <ToolbarButton title="Data validation list…" onClick={() => props.onOpenValidation?.()}>List ▾</ToolbarButton>
+        <ToolbarSep />
+        <ToolbarSelect
+          ariaLabel="Border style"
+          width="90px"
+          value={borderStyle()}
+          onChange={(v) => setBorderStyle(v)}
+          options={[
+            { value: "thin", label: "Thin" },
+            { value: "medium", label: "Medium" },
+            { value: "thick", label: "Thick" },
+            { value: "dashed", label: "Dashed" },
+            { value: "dotted", label: "Dotted" },
+            { value: "double", label: "Double" },
+          ]}
+        />
+        <ToolbarColor
+          title="Border color"
+          value={borderColor()}
+          onChange={(color) => setBorderColor(color)}
+        >
+          <span style={{ width: "14px", height: "14px", border: "2px solid currentColor", display: "block", "border-radius": "2px" }} />
+        </ToolbarColor>
+        <ToolbarSelect
+          ariaLabel="Apply borders"
+          width="110px"
+          value=""
+          onChange={(v) => {
+            if (v) props.onApplyBorders?.(v as any, borderStyle(), borderColor());
+          }}
+          options={[
+            { value: "", label: "Borders…" },
+            { value: "all", label: "All borders" },
+            { value: "outer", label: "Outer border" },
+            { value: "top", label: "Top border" },
+            { value: "bottom", label: "Bottom border" },
+            { value: "none", label: "No borders" },
+          ]}
+        />
       </ToolbarRow>
 
       

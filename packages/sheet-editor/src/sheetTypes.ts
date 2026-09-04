@@ -1,6 +1,20 @@
 import type { Accessor, Setter } from "solid-js";
 import type { ListValidation } from "./DataValidationDialog";
 
+export type BorderLineStyle = "thin" | "medium" | "thick" | "dashed" | "dotted" | "double";
+
+export type BorderEdge = {
+  style: BorderLineStyle;
+  color?: string;
+};
+
+export type CellBorders = {
+  top?: BorderEdge;
+  right?: BorderEdge;
+  bottom?: BorderEdge;
+  left?: BorderEdge;
+};
+
 export type GridCellStyle = {
   bold?: boolean;
   italic?: boolean;
@@ -18,6 +32,8 @@ export type GridCellStyle = {
   wrap?: boolean;
   fontFamily?: string;
   fontSize?: number;
+  /** Per-side cell borders; round-trips through native XLSX. */
+  borders?: CellBorders;
   /** Ephemeral render metadata added by conditional formatting. */
   conditionalBarPercent?: number;
   conditionalBarColor?: string;
@@ -139,6 +155,8 @@ export interface SheetToolbarProps {
   onChange?: (json: any) => void;
   onOpenNumberFormat?: () => void;
   onOpenValidation?: () => void;
+  /** Applies a border preset + line style + optional color across the selection. */
+  onApplyBorders?: (preset: "all" | "outer" | "top" | "bottom" | "none", style: string, color?: string) => void;
 }
 
 export interface GridCanvasProps {

@@ -188,6 +188,7 @@ export function buildWorkbookFromCells(ctx: BuildWorkbookContext, cellMap: Recor
           fontFamily: value.style.fontFamily,
           fontSize: value.style.fontSize,
           image: value.style.image,
+          borders: value.style.borders,
         }
       : null,
   }]));

@@ -1119,6 +1119,41 @@ mod tests {
     }
 
     #[test]
+    fn cell_borders_survive_serialization() {
+        use crate::cell::{BorderEdge, CellBorders, CellStyle};
+        let mut workbook = WorkbookModel::new_default();
+        workbook.set_cell_value(0, 1, 1, "boxed".to_string());
+        if let Some(cell) = workbook.sheets[0].cells.get_mut("1:1") {
+            cell.style = Some(CellStyle {
+                borders: Some(CellBorders {
+                    top: Some(BorderEdge { style: "thin".to_string(), color: Some("#000000".to_string()) }),
+                    bottom: Some(BorderEdge { style: "medium".to_string(), color: None }),
+                    left: Some(BorderEdge { style: "dashed".to_string(), color: Some("#1f2937".to_string()) }),
+                    right: None,
+                }),
+                ..Default::default()
+            });
+        }
+        let json = serde_json::to_string(&workbook).expect("serialize workbook");
+        let restored: WorkbookModel = serde_json::from_str(&json).expect("deserialize workbook");
+        let borders = restored.sheets[0]
+            .cells
+            .get("1:1")
+            .and_then(|cell| cell.style.as_ref())
+            .and_then(|style| style.borders.as_ref())
+            .expect("borders survive round-trip");
+        assert_eq!(borders.top.as_ref().unwrap().style, "thin");
+        assert_eq!(borders.top.as_ref().unwrap().color.as_deref(), Some("#000000"));
+        assert_eq!(borders.bottom.as_ref().unwrap().style, "medium");
+        assert_eq!(borders.left.as_ref().unwrap().style, "dashed");
+        assert!(borders.right.is_none());
+
+        // Legacy styles without borders still deserialize.
+        let legacy: CellStyle = serde_json::from_str(r#"{"bold":true}"#).expect("legacy style");
+        assert!(legacy.borders.is_none());
+    }
+
+    #[test]
     fn test_adjust_formula_references() {
         assert_eq!(
             adjust_formula_references("=SUM(A1:B10) + $C$5 + D$2 + $E3", 1, 2),

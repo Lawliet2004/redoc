@@ -34,6 +34,32 @@ pub struct CellStyle {
     /// Digits after the decimal point for numeric display (0-10).
     #[serde(default)]
     pub decimals: Option<u32>,
+    /// Per-side cell borders; round-trips through native XLSX border styles.
+    #[serde(default)]
+    pub borders: Option<CellBorders>,
+}
+
+/// Per-side border definition shared by the editor, model, and XLSX round-trip.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CellBorders {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<BorderEdge>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<BorderEdge>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<BorderEdge>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<BorderEdge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BorderEdge {
+    /// Bounded Excel-compatible border line styles.
+    pub style: String, // "thin" | "medium" | "thick" | "dashed" | "dotted" | "double"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]

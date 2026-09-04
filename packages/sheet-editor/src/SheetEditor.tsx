@@ -41,6 +41,7 @@ import { normalizeSheetHyperlink, parseInternalSheetLocation } from "./hyperlink
 import { setRichClipboard, takeRichClipboard, shiftFormulaReferences, type RichClipboard } from "./richClipboard";
 import { SortDialog } from "./dialogs/SortDialog";
 import { PrintDialog } from "./dialogs/PrintDialog";
+import { applyBorderPresetToStyle, drawCellBorders, rangePosition, type BorderPreset } from "./cellBorders";
 
 interface SheetEditorProps {
   initialContent?: any;
@@ -944,6 +945,7 @@ export function SheetEditor(props: SheetEditorProps) {
       ctx.strokeStyle = "#e2e8f0";
       ctx.lineWidth = 1;
       ctx.strokeRect(cellX, cellY, cellWidth, cellHeight);
+      drawCellBorders(ctx, style?.borders, cellX, cellY, cellWidth, cellHeight);
 
       if (cell) {
         const link = cellHyperlink(cell);
@@ -1009,6 +1011,7 @@ export function SheetEditor(props: SheetEditorProps) {
           }
           drawConditionalBar(style, column.x, row.y, column.width, row.height);
           drawCellImage(style?.image, column.x, row.y, column.width, row.height);
+          drawCellBorders(ctx, style?.borders, column.x, row.y, column.width, row.height);
           ctx.fillStyle = link ? "#2563eb" : style?.fontColor || "#0f172a";
           const fontStr = cellFont(style, r);
           ctx.font = fontStr;
@@ -2165,6 +2168,34 @@ export function SheetEditor(props: SheetEditorProps) {
     drawGrid();
   };
 
+  /**
+   * Apply a border preset (all/outer/top/bottom/none) across the selection.
+   * Unlike updateActiveStyle, edges are position-dependent: inner cells get
+   * separators for "all" but nothing for "outer".
+   */
+  const applyBorderPreset = (preset: BorderPreset, edgeStyle: string, edgeColor?: string) => {
+    const bounds = selectedBounds();
+    const next = { ...cellsData() };
+    for (let row = bounds.startRow; row <= bounds.endRow; row += 1) {
+      for (let col = bounds.startCol; col <= bounds.endCol; col += 1) {
+        const key = `${row}:${col}`;
+        const current = next[key] || { raw: "", display: "" };
+        const style = applyBorderPresetToStyle(
+          current.style,
+          preset,
+          { style: edgeStyle as any, ...(edgeColor ? { color: edgeColor } : {}) },
+          rangePosition(bounds, row, col),
+        );
+        next[key] = { ...current, style };
+      }
+    }
+    pushHistory();
+    setCellsData(next);
+    props.onChange?.(makeWorkbook(next));
+    markSelectionDirty();
+    drawGrid();
+  };
+
   const applyActiveHyperlink = () => {
     const raw = hyperlinkDraft().trim();
     if (!raw) {
@@ -3124,9 +3155,9 @@ export function SheetEditor(props: SheetEditorProps) {
           onChange: props.onChange,
           onOpenNumberFormat: () => setNumberFormatOpen(true),
           onOpenValidation: () => setValidationOpen(true),
+          onApplyBorders: applyBorderPreset,
         }}
       />
-      {/* aria-label="Formula input" */}
       <FormulaBar
         {...{
           activeCell,

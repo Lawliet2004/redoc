@@ -397,6 +397,15 @@ export type AutoFilterState = { enabled: boolean; startRow: number; endRow: numb
  * Per-column selected values (empty = show all). Key = column index.
  */
 columnFilters: { [key in number]: string[] } }
+export type BorderEdge = { 
+/**
+ * Bounded Excel-compatible border line styles.
+ */
+style: string; color?: string | null }
+/**
+ * Per-side border definition shared by the editor, model, and XLSX round-trip.
+ */
+export type CellBorders = { top?: BorderEdge | null; right?: BorderEdge | null; bottom?: BorderEdge | null; left?: BorderEdge | null }
 export type CellCommentModel = { id: string; row: number; col: number; author: string; text: string; resolved?: boolean; createdAt?: string }
 export type CellRange = { startRow: number; endRow: number; startCol: number; endCol: number }
 export type CellStyle = { bold: boolean | null; italic: boolean | null; underline: boolean | null; fontColor: string | null; bgColor: string | null; align: string | null; format: string | null; wrap?: boolean | null; vAlign?: string | null; validation?: ListValidation | null; hyperlink?: string | null; 
@@ -417,7 +426,11 @@ fontSize?: number | null;
 /**
  * Digits after the decimal point for numeric display (0-10).
  */
-decimals?: number | null }
+decimals?: number | null; 
+/**
+ * Per-side cell borders; round-trips through native XLSX border styles.
+ */
+borders?: CellBorders | null }
 export type ChartModel = { chartType: string; title?: string | null; startRow: number; endRow: number; startCol: number; endCol: number }
 export type ConditionalFormattingRange = { startRow: number; endRow: number; startCol: number; endCol: number }
 export type ConditionalFormattingRule = { range: ConditionalFormattingRange; type: string; value?: string | null; value2?: string | null; style?: ConditionalFormattingStyle | null; scaleColors?: string[] }
@@ -425,8 +438,12 @@ export type ConditionalFormattingStyle = { fontColor?: string | null; bgColor?: 
 export type DeckModel = { slides: Slide[]; theme: SlideTheme; canvasWidth: number; canvasHeight: number; activeSlideIndex: number; fadeBetweenSlides?: boolean }
 export type DocWordCount = { words: number; characters: number; paragraphs: number }
 export type DocxImportResponse = { document: any; warnings: string[] }
+export type ElementKind = { Text: { text: string; fontSize: number; fontFamily: string; color: string; align: string; bold?: boolean; italic?: boolean; underline?: boolean; bullets?: boolean } } | { Shape: { shapeType: string; fillColor: string; strokeColor: string; strokeWidth: number; text?: string; fillGradient?: ShapeGradient | null; shadow?: boolean; fontFamily?: string | null; bold?: boolean; italic?: boolean; underline?: boolean } } | { Image: { assetHash: string; mime: string } } | { Table: { rows: number; cols: number; data: string[][]; 
+/**
+ * Merged ranges anchored at (row, col) with row/col spans.
+ */
+merges: TableMerge[]; headerRow?: boolean; tableStyle?: string | null } } | { Chart: { chartType: string; data: number[]; labels: string[]; legend?: boolean; showLabels?: boolean; showAxes?: boolean } }
 export type ExportFixupResponse = { body: any; applied: string[]; warnings: string[] }
-export type ElementKind = { Text: { text: string; fontSize: number; fontFamily: string; color: string; align: string; bold?: boolean; italic?: boolean; underline?: boolean; bullets?: boolean } } | { Shape: { shapeType: string; fillColor: string; strokeColor: string; strokeWidth: number; text?: string } } | { Image: { assetHash: string; mime: string } } | { Table: { rows: number; cols: number; data: string[][] } } | { Chart: { chartType: string; data: number[]; labels: string[] } }
 /**
  * One entry in the local-first version history: a rotated `.bak*`
  * snapshot plus the attribution captured in its container meta.
@@ -468,6 +485,10 @@ permissions?: string[]; appVersion: string; assets: AssetInfo[]; dirtyOnCrash: b
 export type ScenarioCellChange = { row: number; col: number; rawValue: string }
 export type ScenarioModel = { id: string; name: string; changes: ScenarioCellChange[] }
 export type SearchMatch = { text: string; index: number; lineNumber: number }
+/**
+ * Bounded linear-gradient fill for closed shapes.
+ */
+export type ShapeGradient = { from: string; to: string; angle?: number }
 export type SheetCell = { rawValue: string; displayValue: string; formula: string | null; style: CellStyle | null }
 export type SheetData = { id: string; name: string; cells: { [key in string]: SheetCell }; colWidths: { [key in number]: number }; rowHeights: { [key in number]: number }; freezeRows: number; freezeCols: number; charts?: ChartModel[]; filterQuery?: string | null; merges?: MergeRange[]; autoFilter?: AutoFilterState | null; conditionalFormatting?: ConditionalFormattingRule[]; pivotTables?: PivotTableModel[]; tables?: TableModel[]; scenarios?: ScenarioModel[]; slicers?: SlicerModel[]; 
 /**
@@ -516,6 +537,10 @@ exit?: string; exitDurationMs?: number | null;
  */
 hyperlink?: string | null; kind: ElementKind }
 export type SlideTheme = { id: string; name: string; bgColor: string; textColor: string; accentColor: string; fontFamily: string }
+/**
+ * Merged table range anchored at (row, col).
+ */
+export type TableMerge = { r: number; c: number; rowspan: number; colspan: number }
 export type TableModel = { id: string; name: string; range: CellRange; columns?: string[]; style?: string | null; showHeaderRow?: boolean; showTotalRow?: boolean }
 export type WorkbookModel = { sheets: SheetData[]; activeSheetIndex: number; namedRanges?: NamedRange[] }
 export type XlsxImportResponse = { workbook: WorkbookModel; warnings: string[] }

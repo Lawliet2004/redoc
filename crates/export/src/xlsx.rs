@@ -12,7 +12,7 @@ use rust_xlsxwriter::{
     Chart, ChartType, Color, ConditionalFormat2ColorScale, ConditionalFormat3ColorScale,
     ConditionalFormatCell, ConditionalFormatCellRule, ConditionalFormatDataBar,
     ConditionalFormatText, ConditionalFormatTextRule, DataValidation, FilterCondition, Format,
-    FormatAlign, FormatUnderline, Image, Table, TableColumn, TableStyle, Workbook,
+    FormatAlign, FormatBorder, FormatUnderline, Image, Table, TableColumn, TableStyle, Workbook,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read, Write};
@@ -66,6 +66,7 @@ struct ImportedXf {
     alignment: Option<String>,
     font_id: usize,
     fill_id: usize,
+    border_id: usize,
     bold: Option<bool>,
     italic: Option<bool>,
     underline: Option<bool>,
@@ -74,6 +75,7 @@ struct ImportedXf {
     font_family: Option<String>,
     font_size: Option<f64>,
     decimals: Option<u32>,
+    borders: Option<redoc_sheet_engine::CellBorders>,
 }
 
 #[derive(Default)]
@@ -89,6 +91,20 @@ struct ImportedFont {
 #[derive(Default)]
 struct ImportedFill {
     color: Option<String>,
+}
+
+#[derive(Default, Clone)]
+struct ImportedBorderEdge {
+    style: Option<String>,
+    color: Option<String>,
+}
+
+#[derive(Default, Clone)]
+struct ImportedBorder {
+    top: ImportedBorderEdge,
+    right: ImportedBorderEdge,
+    bottom: ImportedBorderEdge,
+    left: ImportedBorderEdge,
 }
 
 fn normalize_rgb(value: &str) -> Option<String> {
@@ -128,6 +144,11 @@ fn parse_xlsx_styles(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) ->
     let mut in_fills = false;
     let mut fills = Vec::new();
     let mut current_fill: Option<ImportedFill> = None;
+    // Border parsing: <borders><border><left style=".."><color rgb=".."/>
+    let mut in_borders = false;
+    let mut borders = Vec::new();
+    let mut current_border: Option<ImportedBorder> = None;
+    let mut current_border_side: Option<u8> = None; // 0=top 1=right 2=bottom 3=left
     let mut buffer = Vec::new();
     loop {
         match reader.read_event_into(&mut buffer) {
@@ -222,6 +243,63 @@ fn parse_xlsx_styles(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) ->
                     fill.color = xml_attr(&element, b"rgb").and_then(|value| normalize_rgb(&value));
                 }
             }
+            Ok(Event::Start(element)) if element.name().as_ref() == b"borders" => {
+                in_borders = true;
+            }
+            Ok(Event::End(element)) if element.name().as_ref() == b"borders" => {
+                in_borders = false;
+            }
+            Ok(Event::Start(element)) if in_borders && element.name().as_ref() == b"border" => {
+                current_border = Some(ImportedBorder::default());
+            }
+            Ok(Event::End(element))
+                if current_border.is_some() && element.name().as_ref() == b"border" =>
+            {
+                if let Some(border) = current_border.take() {
+                    borders.push(border);
+                }
+                current_border_side = None;
+            }
+            Ok(Event::Start(element)) | Ok(Event::Empty(element))
+                if current_border.is_some() && matches!(element.name().as_ref(), b"top" | b"right" | b"bottom" | b"left") =>
+            {
+                let side = match element.name().as_ref() {
+                    b"top" => 0u8,
+                    b"right" => 1u8,
+                    b"bottom" => 2u8,
+                    _ => 3u8,
+                };
+                current_border_side = Some(side);
+                let style = xml_attr(&element, b"style");
+                if let Some(border) = current_border.as_mut() {
+                    let edge = match side {
+                        0 => &mut border.top,
+                        1 => &mut border.right,
+                        2 => &mut border.bottom,
+                        _ => &mut border.left,
+                    };
+                    edge.style = style;
+                }
+            }
+            Ok(Event::End(element))
+                if current_border.is_some() && matches!(element.name().as_ref(), b"top" | b"right" | b"bottom" | b"left") =>
+            {
+                current_border_side = None;
+            }
+            Ok(Event::Empty(element))
+                if current_border.is_some() && element.name().as_ref() == b"color" =>
+            {
+                let rgb = xml_attr(&element, b"rgb").and_then(|value| normalize_rgb(&value));
+                if let (Some(side), Some(border)) = (current_border_side, current_border.as_mut()) {
+                    let edge = match side {
+                        0 => &mut border.top,
+                        1 => &mut border.right,
+                        2 => &mut border.bottom,
+                        _ => &mut border.left,
+                    };
+                    edge.color = rgb;
+                }
+            }
             Ok(Event::Start(element)) if element.name().as_ref() == b"cellXfs" => {
                 in_cell_xfs = true;
             }
@@ -242,6 +320,9 @@ fn parse_xlsx_styles(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) ->
                     fill_id: xml_attr(&element, b"fillId")
                         .and_then(|value| value.parse().ok())
                         .unwrap_or_default(),
+                    border_id: xml_attr(&element, b"borderId")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or_default(),
                     ..Default::default()
                 });
             }
@@ -257,6 +338,9 @@ fn parse_xlsx_styles(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) ->
                         .and_then(|value| value.parse().ok())
                         .unwrap_or_default(),
                     fill_id: xml_attr(&element, b"fillId")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or_default(),
+                    border_id: xml_attr(&element, b"borderId")
                         .and_then(|value| value.parse().ok())
                         .unwrap_or_default(),
                     ..Default::default()
@@ -293,6 +377,37 @@ fn parse_xlsx_styles(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) ->
         }
         if let Some(code) = style.format_code.as_deref() {
             style.decimals = decimals_in_format_code(code);
+        }
+        if let Some(border) = borders.get(style.border_id) {
+            let edge = |edge: &ImportedBorderEdge| {
+                let style = edge.style.as_deref()?;
+                // Excel has more border styles than the bounded Redoc set;
+                // approximate exotic ones rather than dropping them.
+                let normalized = match style {
+                    "thin" | "hair" => "thin",
+                    "medium" | "mediumDashDot" | "mediumDashDotDot" | "mediumDashed" => "medium",
+                    "thick" => "thick",
+                    "dashed" | "dashDot" | "dashDotDot" | "slantDashDot" => "dashed",
+                    "dotted" => "dotted",
+                    "double" => "double",
+                    _ => "thin",
+                };
+                Some(redoc_sheet_engine::BorderEdge {
+                    style: normalized.to_string(),
+                    color: edge.color.clone(),
+                })
+            };
+            let borders = redoc_sheet_engine::CellBorders {
+                top: edge(&border.top),
+                right: edge(&border.right),
+                bottom: edge(&border.bottom),
+                left: edge(&border.left),
+            };
+            style.borders = (borders.top.is_some()
+                || borders.right.is_some()
+                || borders.bottom.is_some()
+                || borders.left.is_some())
+            .then_some(borders);
         }
     }
     styles
@@ -859,7 +974,8 @@ fn imported_style(metadata: &ImportedXlsxMetadata, reference: &str) -> Option<Ce
         || style.font_color.is_some()
         || style.bg_color.is_some()
         || style.font_family.is_some()
-        || style.font_size.is_some())
+        || style.font_size.is_some()
+        || style.borders.is_some())
     .then_some(CellStyle {
         bold: style.bold,
         italic: style.italic,
@@ -876,6 +992,7 @@ fn imported_style(metadata: &ImportedXlsxMetadata, reference: &str) -> Option<Ce
         font_family: style.font_family.clone(),
         font_size: style.font_size,
         decimals: style.decimals,
+        borders: style.borders.clone(),
     })
 }
 
@@ -1086,6 +1203,21 @@ fn color(value: &str) -> Option<Color> {
         .map(Color::RGB)
 }
 
+/// Map the bounded Redoc border style vocabulary to native XLSX border kinds.
+/// Unknown styles map to thin (the editor never produces them; imported files
+/// are normalized on read).
+fn border_kind(style: &str) -> Option<FormatBorder> {
+    match style {
+        "thin" => Some(FormatBorder::Thin),
+        "medium" => Some(FormatBorder::Medium),
+        "thick" => Some(FormatBorder::Thick),
+        "dashed" => Some(FormatBorder::Dashed),
+        "dotted" => Some(FormatBorder::Dotted),
+        "double" => Some(FormatBorder::Double),
+        _ => None,
+    }
+}
+
 fn format_for_style(style: Option<&CellStyle>) -> Format {
     let mut format = Format::new();
     let Some(style) = style else {
@@ -1105,6 +1237,39 @@ fn format_for_style(style: Option<&CellStyle>) -> Format {
     }
     if let Some(bg_color) = style.bg_color.as_deref().and_then(color) {
         format = format.set_background_color(bg_color);
+    }
+    if let Some(borders) = style.borders.as_ref() {
+        let edge = |edge: Option<&redoc_sheet_engine::BorderEdge>| {
+            edge.and_then(|edge| {
+                let border = border_kind(&edge.style)?;
+                let color = edge.color.as_deref().and_then(color);
+                Some((border, color))
+            })
+        };
+        if let Some((kind, border_color)) = edge(borders.top.as_ref()) {
+            format = match border_color {
+                Some(c) => format.set_border_top(kind).set_border_top_color(c),
+                None => format.set_border_top(kind),
+            };
+        }
+        if let Some((kind, border_color)) = edge(borders.bottom.as_ref()) {
+            format = match border_color {
+                Some(c) => format.set_border_bottom(kind).set_border_bottom_color(c),
+                None => format.set_border_bottom(kind),
+            };
+        }
+        if let Some((kind, border_color)) = edge(borders.left.as_ref()) {
+            format = match border_color {
+                Some(c) => format.set_border_left(kind).set_border_left_color(c),
+                None => format.set_border_left(kind),
+            };
+        }
+        if let Some((kind, border_color)) = edge(borders.right.as_ref()) {
+            format = match border_color {
+                Some(c) => format.set_border_right(kind).set_border_right_color(c),
+                None => format.set_border_right(kind),
+            };
+        }
     }
     if let Some(align) = style.align.as_deref() {
         format = format.set_align(match align {
@@ -3776,6 +3941,61 @@ mod tests {
                 .as_ref()
                 .and_then(|style| style.bg_color.as_deref()),
             Some("#FFC7CE")
+        );
+        std::fs::remove_file(path).expect("cleanup xlsx");
+    }
+
+    #[test]
+    fn xlsx_round_trips_cell_borders() {
+        use redoc_sheet_engine::{BorderEdge, CellBorders, CellStyle};
+        let mut workbook = WorkbookModel::new_default();
+        workbook.sheets[0].cells.insert(
+            "1:1".to_string(),
+            SheetCell {
+                raw_value: "boxed".to_string(),
+                display_value: "boxed".to_string(),
+                formula: None,
+                style: Some(CellStyle {
+                    borders: Some(CellBorders {
+                        top: Some(BorderEdge { style: "thin".to_string(), color: Some("#000000".to_string()) }),
+                        bottom: Some(BorderEdge { style: "medium".to_string(), color: None }),
+                        left: Some(BorderEdge { style: "dashed".to_string(), color: Some("#1f2937".to_string()) }),
+                        right: Some(BorderEdge { style: "dotted".to_string(), color: None }),
+                    }),
+                    ..Default::default()
+                }),
+            },
+        );
+        let path = std::env::temp_dir().join(format!(
+            "redoc-xlsx-borders-{}-{}.xlsx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            export_workbook_to_xlsx(&workbook).expect("export xlsx"),
+        )
+        .expect("write xlsx");
+        let imported = import_workbook_from_xlsx_with_report(&path).expect("import xlsx");
+        let borders = imported
+            .workbook
+            .sheets[0]
+            .cells
+            .get("1:1")
+            .and_then(|cell| cell.style.as_ref())
+            .and_then(|style| style.borders.as_ref())
+            .expect("borders survive xlsx round-trip");
+        assert_eq!(borders.top.as_ref().unwrap().style, "thin");
+        assert_eq!(borders.bottom.as_ref().unwrap().style, "medium");
+        assert_eq!(borders.left.as_ref().unwrap().style, "dashed");
+        assert_eq!(borders.right.as_ref().unwrap().style, "dotted");
+        // Border colors survive where the writer emits them.
+        assert_eq!(
+            borders.top.as_ref().unwrap().color.as_deref(),
+            Some("#000000")
         );
         std::fs::remove_file(path).expect("cleanup xlsx");
     }
