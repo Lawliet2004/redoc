@@ -13,7 +13,7 @@ thiserror = "1.0"
 printpdf = { version = "0.7", features = ["embedded_images"] }
 image = { version = "0.24.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 docx-rs = "0.4"
-rust_xlsxwriter = "0.79"
+rust_xlsxwriter = "0.99"
 calamine = "0.26"
 quick-xml = "0.36"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
