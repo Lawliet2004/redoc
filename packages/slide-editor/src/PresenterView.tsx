@@ -2,7 +2,8 @@ import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
 import { commands } from "@redoc/api-client";
 import { loadPresenterSession } from "./presenterSession";
 import { advancePresenter, backPresenter, clampPresenterIndex, formatPresenterTimer } from "./presenterControls";
-import { ShapeBody, isFilledShape } from "./shapeUtils";
+import { normalizeMasters, slideChromeOverlays } from "./deckNormalize";
+import { ShapeBody, isFilledShape, mergeAt } from "./shapeUtils";
 import "./SlideEditor.css";
 
 type ElementEntrance = "none" | "fade" | "zoom";
@@ -34,26 +35,35 @@ type PresenterElement = {
   tableRows?: number;
   tableCols?: number;
   tableData?: string[][];
-  chartType?: "bar" | "pie";
+  tableMerges?: Array<{ r: number; c: number; rowspan: number; colspan: number }>;
+  tableHeaderRow?: boolean;
+  chartType?: "bar" | "pie" | "line";
   chartTitle?: string;
   chartData?: number[];
   chartLabels?: string[];
 };
 
-type PresenterSlide = {
+export type PresenterSlide = {
   id: string;
   title?: string;
   notes?: string;
   transition?: string;
   bgOverride?: string | null;
   elements: PresenterElement[];
+  masterId?: string;
+  showHeader?: boolean;
+  showFooter?: boolean;
+  showDate?: boolean;
+  showSlideNumber?: boolean;
+  index?: number;
 };
 
-type PresenterDeck = {
+export type PresenterDeck = {
   slides: PresenterSlide[];
   theme?: { bgColor?: string; textColor?: string; accentColor?: string; fontFamily?: string };
   canvasWidth?: number;
   canvasHeight?: number;
+  masters?: unknown;
 };
 
 function normalizeDeck(raw: unknown): PresenterDeck {
@@ -131,6 +141,8 @@ function parseElement(element: any): PresenterElement | null {
       tableRows: kind.Table.rows,
       tableCols: kind.Table.cols,
       tableData: kind.Table.data,
+      tableMerges: kind.Table.merges ?? [],
+      tableHeaderRow: Boolean(kind.Table.headerRow),
     };
   }
   if (kind.Chart) {
@@ -139,7 +151,10 @@ function parseElement(element: any): PresenterElement | null {
     return {
       ...base,
       type: "chart",
-      chartType: kind.Chart.chartType === "pie" ? "pie" : "bar",
+      chartType:
+        kind.Chart.chartType === "pie" || kind.Chart.chartType === "line"
+          ? kind.Chart.chartType
+          : "bar",
       chartTitle: title,
       chartData: kind.Chart.data,
       chartLabels: labels,
@@ -148,14 +163,27 @@ function parseElement(element: any): PresenterElement | null {
   return null;
 }
 
+/** Normalize raw deck JSON into presenter-renderable slides (shared with the
+ * in-window audience slideshow). */
+export function normalizePresenterSlides(raw: unknown): PresenterSlide[] {
+  const deck = normalizeDeck(raw);
+  return normalizeSlides(deck);
+}
+
 function normalizeSlides(deck: PresenterDeck): PresenterSlide[] {
-  return deck.slides.map((slide: any) => ({
+  return deck.slides.map((slide: any, index: number) => ({
     id: slide.id,
     title: slide.title,
     notes: slide.notes || "",
     transition: slide.transition || "none",
     bgOverride: slide.bgOverride ?? slide.bg_override ?? null,
+    masterId: typeof slide.masterId === "string" ? slide.masterId : undefined,
+    showHeader: typeof slide.showHeader === "boolean" ? slide.showHeader : undefined,
+    showFooter: typeof slide.showFooter === "boolean" ? slide.showFooter : undefined,
+    showDate: typeof slide.showDate === "boolean" ? slide.showDate : undefined,
+    showSlideNumber: typeof slide.showSlideNumber === "boolean" ? slide.showSlideNumber : undefined,
     elements: (slide.elements || []).map(parseElement).filter(Boolean) as PresenterElement[],
+    index,
   }));
 }
 
@@ -253,24 +281,35 @@ function SlideElementView(props: {
         <table style={{ width: "100%", height: "100%", "border-collapse": "collapse", "font-size": "12px" }}>
           <tbody>
             <For each={el.tableData.slice(0, rows)}>
-              {(row) => (
+              {(row, ri) => (
                 <tr>
                   <For each={row.slice(0, cols)}>
-                    {(cell) => (
-                      <td
-                        contentEditable={props.editable}
-                        style={{ border: "1px solid #cbd5e1", padding: "4px", "min-width": "24px" }}
-                        onInput={(e) => {
-                          if (!props.editable) return;
-                          const r = el.tableData!;
-                          const ri = el.tableData!.indexOf(row);
-                          const ci = row.indexOf(cell);
-                          if (ri >= 0 && ci >= 0) r[ri][ci] = e.currentTarget.textContent || "";
-                        }}
-                      >
-                        {cell}
-                      </td>
-                    )}
+                    {(cell, ci) => {
+                      // Mirror the editor's merge rendering so presenter view
+                      // doesn't visually split merged cells.
+                      const merge = mergeAt(el.tableMerges ?? [], ri(), ci());
+                      if (merge && (merge.r !== ri() || merge.c !== ci())) {
+                        return <td style={{ display: "none" }} />;
+                      }
+                      const span = merge ?? { rowspan: 1, colspan: 1 };
+                      return (
+                        <td
+                          rowSpan={span.rowspan}
+                          colSpan={span.colspan}
+                          contentEditable={props.editable}
+                          style={{ border: "1px solid #cbd5e1", padding: "4px", "min-width": "24px" }}
+                          onInput={(e) => {
+                            if (!props.editable) return;
+                            const r = el.tableData!;
+                            const cellIndex = el.tableData!.indexOf(row);
+                            const colIndex = row.indexOf(cell);
+                            if (cellIndex >= 0 && colIndex >= 0) r[cellIndex][colIndex] = e.currentTarget.textContent || "";
+                          }}
+                        >
+                          {cell}
+                        </td>
+                      );
+                    }}
                   </For>
                 </tr>
               )}
@@ -345,23 +384,49 @@ function SlideElementView(props: {
           onInput={(e) => props.onChartTitleChange?.(e.currentTarget.value)}
           style={{ "font-size": "14px", "font-weight": "600", border: "none", background: "transparent", "margin-bottom": "4px" }}
         />
-        <div style={{ flex: 1, display: "flex", "align-items": "flex-end", gap: "4px", padding: "4px 0" }}>
-          <For each={data}>
-            {(v, i) => (
-              <div style={{ flex: 1, display: "flex", "flex-direction": "column", "align-items": "center", gap: "2px" }}>
-                <div
-                  style={{
-                    width: "100%",
-                    height: `${(v / max) * 100}%`,
-                    "min-height": "2px",
-                    background: `hsl(${(i() * 47) % 360}, 65%, 55%)`,
-                  }}
-                />
-                <span style={{ "font-size": "9px", color: "#64748b" }}>{labels[i()]}</span>
-              </div>
-            )}
-          </For>
-        </div>
+        {el.chartType === "line" ? (
+          <>
+            <svg viewBox={`0 0 ${data.length * 40} 100`} preserveAspectRatio="none" style={{ flex: 1, width: "100%" }}>
+              <For each={data.slice(0, -1)}>
+                {(_, i) => {
+                  const x1 = i() * 40 + 20;
+                  const x2 = (i() + 1) * 40 + 20;
+                  const y1 = 100 - (data[i()] / max) * 100;
+                  const y2 = 100 - (data[i() + 1] / max) * 100;
+                  return <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#3b82f6" stroke-width="3" vector-effect="non-scaling-stroke" />;
+                }}
+              </For>
+              <For each={data}>
+                {(v, i) => {
+                  const cx = i() * 40 + 20;
+                  const cy = 100 - (v / max) * 100;
+                  return <circle cx={cx} cy={cy} r="3" fill={`hsl(${(i() * 47) % 360}, 65%, 55%)`} />;
+                }}
+              </For>
+            </svg>
+            <div style={{ display: "flex", "font-size": "9px", color: "#64748b", "justify-content": "space-around" }}>
+              <For each={labels}>{(label) => <span>{label}</span>}</For>
+            </div>
+          </>
+        ) : (
+          <div style={{ flex: 1, display: "flex", "align-items": "flex-end", gap: "4px", padding: "4px 0" }}>
+            <For each={data}>
+              {(v, i) => (
+                <div style={{ flex: 1, display: "flex", "flex-direction": "column", "align-items": "center", gap: "2px" }}>
+                  <div
+                    style={{
+                      width: "100%",
+                      height: `${(v / max) * 100}%`,
+                      "min-height": "2px",
+                      background: `hsl(${(i() * 47) % 360}, 65%, 55%)`,
+                    }}
+                  />
+                  <span style={{ "font-size": "9px", color: "#64748b" }}>{labels[i()]}</span>
+                </div>
+              )}
+            </For>
+          </div>
+        )}
       </div>
     );
   }
@@ -369,7 +434,7 @@ function SlideElementView(props: {
   return null;
 }
 
-function SlideStage(props: {
+export function SlideStage(props: {
   slide: PresenterSlide;
   theme: PresenterDeck["theme"];
   revealCount: number;
@@ -377,15 +442,38 @@ function SlideStage(props: {
   scale?: number;
   exiting?: boolean;
   onClick?: () => void;
+  canvasWidth?: number;
+  canvasHeight?: number;
+  masters?: unknown;
+  slideIndex?: number;
 }) {
-  const w = 960;
-  const h = 540;
+  const w = props.canvasWidth || 960;
+  const h = props.canvasHeight || 540;
   const scale = props.scale ?? 1;
   const entranceEls = () =>
     props.slide.elements
       .filter((e) => e.entrance !== "none")
       .slice()
       .sort((a, b) => (a.entranceOrder ?? 0) - (b.entranceOrder ?? 0));
+  const chromeOverlays = () => slideChromeOverlays(
+    {
+      id: props.slide.id,
+      title: props.slide.title ?? "",
+      layout: "blank",
+      elements: [],
+      notes: "",
+      transition: "none",
+      masterId: props.slide.masterId,
+      showHeader: props.slide.showHeader,
+      showFooter: props.slide.showFooter,
+      showDate: props.slide.showDate,
+      showSlideNumber: props.slide.showSlideNumber,
+    },
+    normalizeMasters(props.masters),
+    props.slideIndex ?? 0,
+    w,
+    h,
+  );
   return (
     <div
       class={props.animClass || ""}
@@ -420,6 +508,25 @@ function SlideStage(props: {
               />
             );
           }}
+        </For>
+        <For each={chromeOverlays()}>
+          {(overlay) => (
+            <div
+              style={{
+                position: "absolute",
+                left: `${overlay.x}px`,
+                top: `${overlay.y}px`,
+                width: `${overlay.width}px`,
+                "font-size": `${overlay.fontSize}px`,
+                color: "#94a3b8",
+                "text-align": overlay.align,
+                "pointer-events": "none",
+                "user-select": "none",
+              }}
+            >
+              {overlay.text}
+            </div>
+          )}
         </For>
       </div>
     </div>
@@ -621,12 +728,12 @@ export function PresenterView() {
       <div style={{ flex: 1, display: "flex", gap: "16px", "min-height": 0 }}>
         <div style={{ flex: 2, display: "flex", "flex-direction": "column", gap: "10px", "min-width": 0 }}>
           <div style={{ flex: 1, display: "flex", "align-items": "center", "justify-content": "center", background: "#020617", "border-radius": "6px", border: "1px solid #334155", padding: "12px" }}>
-            <SlideStage slide={currentSlide()} theme={theme()} revealCount={revealCount()} animClass={animClass()} exiting={exiting()} onClick={advance} />
+            <SlideStage slide={currentSlide()} theme={theme()} revealCount={revealCount()} animClass={animClass()} exiting={exiting()} onClick={advance} canvasWidth={deckRaw().canvasWidth} canvasHeight={deckRaw().canvasHeight} masters={deckRaw().masters} slideIndex={slideIndex()} />
           </div>
           <Show when={nextSlide()}>
             <div style={{ display: "flex", "align-items": "center", gap: "10px" }}>
               <span style={{ "font-size": "11px", color: "#94a3b8", width: "72px" }}>Next slide</span>
-              <SlideStage slide={nextSlide()!} theme={theme()} revealCount={999} scale={0.22} />
+              <SlideStage slide={nextSlide()!} theme={theme()} revealCount={999} scale={0.22} canvasWidth={deckRaw().canvasWidth} canvasHeight={deckRaw().canvasHeight} masters={deckRaw().masters} slideIndex={slideIndex() + 1} />
             </div>
           </Show>
         </div>

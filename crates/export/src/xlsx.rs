@@ -47,6 +47,9 @@ struct ImportedXlsxMetadata {
     cell_style_ids: HashMap<String, usize>,
     col_widths: BTreeMap<u32, f64>,
     row_heights: BTreeMap<u32, f64>,
+    hidden_cols: std::collections::BTreeSet<u32>,
+    hidden_rows: std::collections::BTreeSet<u32>,
+    tab_color: Option<String>,
     freeze_rows: u32,
     freeze_cols: u32,
     styles: Vec<ImportedXf>,
@@ -893,6 +896,10 @@ fn parse_xlsx_sheet_metadata(
             }
             Ok(Event::Empty(element)) | Ok(Event::Start(element)) => {
                 match element.name().as_ref() {
+                    b"tabColor" => {
+                        metadata.tab_color =
+                            xml_attr(&element, b"rgb").and_then(|value| normalize_rgb(&value));
+                    }
                     b"c" => {
                         if let (Some(reference), Some(style_id)) = (
                             xml_attr(&element, b"r"),
@@ -911,8 +918,21 @@ fn parse_xlsx_sheet_metadata(
                         if let Some(width) =
                             xml_attr(&element, b"width").and_then(|value| value.parse::<f64>().ok())
                         {
-                            for column in start..=end {
-                                metadata.col_widths.insert(column, width);
+                            let count = end.saturating_sub(start).saturating_add(1);
+                            if count <= 16_384 {
+                                for column in start..=end {
+                                    metadata.col_widths.insert(column, width);
+                                }
+                            }
+                        }
+                        if xml_attr(&element, b"hidden").as_deref() == Some("1")
+                            || xml_attr(&element, b"hidden").as_deref() == Some("true")
+                        {
+                            let count = end.saturating_sub(start).saturating_add(1);
+                            if count <= MAX_HIDDEN_DIMENSIONS {
+                                for column in start..=end {
+                                    metadata.hidden_cols.insert(column);
+                                }
                             }
                         }
                     }
@@ -922,6 +942,16 @@ fn parse_xlsx_sheet_metadata(
                             xml_attr(&element, b"ht").and_then(|value| value.parse().ok()),
                         ) {
                             metadata.row_heights.insert(row, height);
+                        }
+                        let hidden_value = xml_attr(&element, b"hidden");
+                        if hidden_value.as_deref() == Some("1")
+                            || hidden_value.as_deref() == Some("true")
+                        {
+                            if let Some(row) =
+                                xml_attr(&element, b"r").and_then(|value| value.parse().ok())
+                            {
+                                metadata.hidden_rows.insert(row);
+                            }
                         }
                     }
                     b"pane" => {
@@ -957,21 +987,60 @@ fn parse_xlsx_sheet_metadata(
     metadata
 }
 
+/// Recognizes the exact numFmt codes our exporter writes for the coarse
+/// kinds so a Redoc→Redoc round trip keeps its preset label.
+fn recognized_builtin_kind(code: &str) -> Option<&'static str> {
+    let code = code.trim();
+    let strip_decimals = |pattern: &str| -> bool {
+        let (base, digits) = pattern.split_once('.').unwrap_or((pattern, ""));
+        base == "#,##0" && digits.chars().all(|c| c == '0')
+    };
+    // Only "$" is written by the coarse currency export; €/£ always stay custom.
+    if let Some(rest) = code.strip_prefix('$') {
+        if !code.contains('%') && strip_decimals(rest) {
+            return Some("currency");
+        }
+    }
+    if let Some(rest) = code.strip_suffix('%') {
+        let digits_ok =
+            rest == "0" || (rest.starts_with("0.") && rest[2..].chars().all(|c| c == '0'));
+        if digits_ok {
+            return Some("percent");
+        }
+    }
+    if strip_decimals(code) {
+        return Some("number");
+    }
+    None
+}
+
 fn imported_style(metadata: &ImportedXlsxMetadata, reference: &str) -> Option<CellStyle> {
     let style_id = *metadata.cell_style_ids.get(reference)?;
     let style = metadata.styles.get(style_id)?;
-    let format = match style.format_code.as_deref() {
-        Some(code) if code.contains('%') => Some("percent".to_string()),
-        Some(code) if code.contains('$') || code.contains('€') || code.contains('£') => {
-            Some("currency".to_string())
-        }
-        Some(code) if code.contains('0') || code.contains('#') => Some("number".to_string()),
-        _ => match style.num_format_id {
+    // An explicitly defined numFmt code is preserved verbatim unless it is
+    // exactly one of the patterns our exporter writes for the coarse kinds
+    // (those map back so Redoc's own saves keep format="percent"/"currency"/
+    // "number" and the Number Format dialog shows the right preset).
+    let builtin_format = style
+        .format_code
+        .as_deref()
+        .and_then(recognized_builtin_kind);
+    let custom_code = style
+        .format_code
+        .clone()
+        .filter(|code| !code.eq_ignore_ascii_case("general"));
+    let format = if builtin_format.is_some() {
+        builtin_format.map(|kind| kind.to_string())
+    } else if custom_code.is_some() {
+        Some("custom".to_string())
+    } else {
+        match style.num_format_id {
             9 | 10 => Some("percent".to_string()),
             1..=4 => Some("number".to_string()),
             44 => Some("currency".to_string()),
+            14..=17 => Some("date".to_string()),
             _ => None,
-        },
+        }
     };
     let align = style.alignment.clone();
     (format.is_some()
@@ -992,6 +1061,7 @@ fn imported_style(metadata: &ImportedXlsxMetadata, reference: &str) -> Option<Ce
         bg_color: style.bg_color.clone(),
         align,
         format,
+        format_code: custom_code,
         wrap: None,
         v_align: None,
         validation: None,
@@ -1305,6 +1375,16 @@ fn format_for_style(style: Option<&CellStyle>) -> Format {
         }
     }
     if let Some(number_format) = style.format.as_deref() {
+        if number_format == "custom" {
+            if let Some(code) = style
+                .format_code
+                .as_deref()
+                .filter(|code| !code.trim().is_empty())
+            {
+                format = format.set_num_format(code.to_string());
+            }
+            return format;
+        }
         // decimals takes precedence for numeric formats when present.
         let decimals = style.decimals.unwrap_or(2).min(10) as usize;
         let number_format = match number_format {
@@ -1924,12 +2004,21 @@ pub fn export_workbook_to_xlsx(workbook: &WorkbookModel) -> Result<Vec<u8>, Expo
     for sheet_data in &workbook.sheets {
         let ws = wb.add_worksheet();
         let _ = ws.set_name(&sheet_data.name);
+        if let Some(tab_color) = sheet_data.tab_color.as_deref().and_then(color) {
+            let _ = ws.set_tab_color(tab_color);
+        }
 
         for (column, width) in &sheet_data.col_widths {
             let _ = ws.set_column_width(column.saturating_sub(1) as u16, *width);
         }
         for (row, height) in &sheet_data.row_heights {
             let _ = ws.set_row_height(row.saturating_sub(1), *height);
+        }
+        for col in &sheet_data.hidden_cols {
+            let _ = ws.set_column_hidden((col.saturating_sub(1)) as u16);
+        }
+        for row in &sheet_data.hidden_rows {
+            let _ = ws.set_row_hidden(row.saturating_sub(1));
         }
         if sheet_data.freeze_rows > 0 || sheet_data.freeze_cols > 0 {
             let _ = ws.set_freeze_panes(sheet_data.freeze_rows, sheet_data.freeze_cols as u16);
@@ -2052,6 +2141,8 @@ fn archive_has_charts(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -
 const MAX_XLSX_XML_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_XLSX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_XLSX_ARCHIVE_ENTRIES: usize = 10_000;
+/// Bounds hidden <col> ranges so a malicious `max` cannot explode the set.
+const MAX_HIDDEN_DIMENSIONS: u32 = 100_000;
 const MAX_IMPORTED_TABLES: usize = 1_000;
 const MAX_IMPORTED_SCENARIOS: usize = 256;
 const MAX_IMPORTED_SCENARIO_CELLS: usize = 100_000;
@@ -2722,6 +2813,9 @@ pub fn import_workbook_from_xlsx_with_report(path: &Path) -> Result<XlsxImportRe
             sheet.row_heights = metadata.row_heights.clone();
             sheet.freeze_rows = metadata.freeze_rows;
             sheet.freeze_cols = metadata.freeze_cols;
+            sheet.hidden_cols = metadata.hidden_cols.clone();
+            sheet.hidden_rows = metadata.hidden_rows.clone();
+            sheet.tab_color = metadata.tab_color.clone();
             sheet.auto_filter = metadata.auto_filter.clone();
             sheet.merges = metadata.merges.clone();
             sheet.conditional_formatting = metadata.conditional_formatting.clone();
@@ -3721,6 +3815,131 @@ mod tests {
                 .and_then(|style| style.bg_color.as_deref()),
             Some("#FFFF00")
         );
+        std::fs::remove_file(path).expect("cleanup xlsx");
+    }
+
+    #[test]
+    fn xlsx_round_trips_custom_format_codes() {
+        let codes = [
+            "€#,##0",
+            "yyyy-mm-dd",
+            "dd/mm/yyyy",
+            "mm/dd/yyyy",
+            "h:mm",
+            "#,##0;[Red]-#,##0",
+        ];
+        let mut workbook = WorkbookModel::new_default();
+        for (index, code) in codes.iter().enumerate() {
+            workbook.sheets[0].cells.insert(
+                format!("{}:1", index + 1),
+                SheetCell {
+                    raw_value: "45000".to_string(),
+                    display_value: "45000".to_string(),
+                    formula: None,
+                    style: Some(CellStyle {
+                        format: Some("custom".to_string()),
+                        format_code: Some(code.to_string()),
+                        ..Default::default()
+                    }),
+                },
+            );
+        }
+        let path = std::env::temp_dir().join(format!(
+            "redoc-xlsx-custom-fmt-{}-{}.xlsx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            export_workbook_to_xlsx(&workbook).expect("export xlsx"),
+        )
+        .expect("write xlsx");
+        let loaded = import_workbook_from_xlsx(&path).expect("import xlsx");
+        let sheet = &loaded.sheets[0];
+        for (index, code) in codes.iter().enumerate() {
+            let key = format!("{}:1", index + 1);
+            let style = sheet
+                .cells
+                .get(&key)
+                .and_then(|cell| cell.style.as_ref())
+                .unwrap_or_else(|| panic!("style missing for {key}"));
+            assert_eq!(
+                style.format.as_deref(),
+                Some("custom"),
+                "format kind for {key}"
+            );
+            assert_eq!(
+                style.format_code.as_deref(),
+                Some(*code),
+                "format code for {key}"
+            );
+        }
+        std::fs::remove_file(path).expect("cleanup xlsx");
+    }
+
+    #[test]
+    fn xlsx_round_trips_hidden_rows_and_cols() {
+        let mut workbook = WorkbookModel::new_default();
+        workbook.sheets[0].cells.insert(
+            "3:2".to_string(),
+            SheetCell {
+                raw_value: "v".to_string(),
+                display_value: "v".to_string(),
+                formula: None,
+                style: None,
+            },
+        );
+        workbook.sheets[0].hidden_rows.insert(2);
+        workbook.sheets[0].hidden_rows.insert(4);
+        workbook.sheets[0].hidden_cols.insert(3);
+        let path = std::env::temp_dir().join(format!(
+            "redoc-xlsx-hidden-{}-{}.xlsx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            export_workbook_to_xlsx(&workbook).expect("export xlsx"),
+        )
+        .expect("write xlsx");
+        let loaded = import_workbook_from_xlsx(&path).expect("import xlsx");
+        let sheet = &loaded.sheets[0];
+        assert!(sheet.hidden_rows.contains(&2));
+        assert!(sheet.hidden_rows.contains(&4));
+        assert!(sheet.hidden_cols.contains(&3));
+        assert!(!sheet.hidden_rows.contains(&1));
+        std::fs::remove_file(path).expect("cleanup xlsx");
+    }
+
+    #[test]
+    fn xlsx_round_trips_sheet_tab_colors() {
+        let mut workbook = WorkbookModel::new_default();
+        workbook.sheets[0].tab_color = Some("#3b82f6".to_string());
+        let mut second = redoc_sheet_engine::SheetData::new("sheet-2", "Data");
+        second.tab_color = Some("#ef4444".to_string());
+        workbook.sheets.push(second);
+        let path = std::env::temp_dir().join(format!(
+            "redoc-xlsx-tab-color-{}-{}.xlsx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            export_workbook_to_xlsx(&workbook).expect("export xlsx"),
+        )
+        .expect("write xlsx");
+        let loaded = import_workbook_from_xlsx(&path).expect("import xlsx");
+        assert_eq!(loaded.sheets[0].tab_color.as_deref(), Some("#3B82F6"));
+        assert_eq!(loaded.sheets[1].tab_color.as_deref(), Some("#EF4444"));
         std::fs::remove_file(path).expect("cleanup xlsx");
     }
 

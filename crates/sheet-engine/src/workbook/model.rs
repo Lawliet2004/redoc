@@ -10,11 +10,20 @@ use std::sync::Arc;
 pub struct SheetData {
     pub id: String,
     pub name: String,
+    /// Sheet tab color (#RRGGBB) for XLSX round-trip and UI recolor.
+    #[serde(default)]
+    pub tab_color: Option<String>,
     pub cells: BTreeMap<String, SheetCell>, // Key format "row:col"
     pub col_widths: BTreeMap<u32, f64>,
     pub row_heights: BTreeMap<u32, f64>,
     pub freeze_rows: u32,
     pub freeze_cols: u32,
+    /// Hidden column indices (1-based); skipped by rendering and scroll math.
+    #[serde(default)]
+    pub hidden_cols: std::collections::BTreeSet<u32>,
+    /// Hidden row indices (1-based); skipped by rendering and scroll math.
+    #[serde(default)]
+    pub hidden_rows: std::collections::BTreeSet<u32>,
     #[serde(default)]
     pub charts: Vec<ChartModel>,
     #[serde(default)]
@@ -189,11 +198,14 @@ impl SheetData {
         Self {
             id: id.to_string(),
             name: name.to_string(),
+            tab_color: None,
             cells: BTreeMap::new(),
             col_widths: BTreeMap::new(),
             row_heights: BTreeMap::new(),
             freeze_rows: 0,
             freeze_cols: 0,
+            hidden_cols: std::collections::BTreeSet::new(),
+            hidden_rows: std::collections::BTreeSet::new(),
             charts: Vec::new(),
             filter_query: None,
             merges: Vec::new(),
@@ -253,6 +265,9 @@ pub struct RecalcPlan {
     pub(crate) formulas: HashMap<(u32, u32), Arc<Expr>>,
     pub(crate) order: Option<Vec<(u32, u32)>>,
     pub(crate) dependents: HashMap<(u32, u32), HashSet<(u32, u32)>>,
+    /// Cells trapped inside (or downstream of) a dependency cycle. Only these
+    /// evaluate to #CYCLE!; the rest of the sheet recalculates normally.
+    pub(crate) poisoned: Vec<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]

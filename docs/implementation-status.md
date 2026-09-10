@@ -69,13 +69,17 @@ Evidence-based snapshot of the current repository. Claims below are tied to sour
 - **Typed Tauri bindings** via `tauri-specta`; `pnpm generate:bindings` produces `packages/api-client/src/generated.ts`; quality gate enforces no direct `@tauri-apps/api` outside generated client.
 - **Panic boundaries** on Tauri commands via `handle_panic!` macro wrapping `catch_unwind` (`lib.rs`).
 - **Size-bounded log rotation** via non-blocking `SizeRollingWriter` (5 MiB active-file bound, 4 bounded rotated backups `redoc.log.1..4`; oversized single records stay intact, rotation failure reopens current file) (`crates/core/src/logging.rs`).
+- **Single-instance app**: a second launch forwards its `.redoc` argv to the running instance over the existing `redoc-open-file` path and exits (`tauri-plugin-single-instance` in `apps/desktop/src-tauri/src/lib.rs`).
+- **Atomic JSON state writes**: `settings.json`/`recents.json` go through temp+fsync+rename (backup-restore on failed replace) like document saves (`crates/core/src/state.rs`).
+- **Magic-byte verification before import**: `.redoc`/`.docx`/`.xlsx`/`.pptx` must start with the ZIP local-file-header magic and `.csv` must be text, or the import returns a typed error (`lib.rs` `ensure_zip_magic`, `packages/editor-common/src/fileRouting.ts` `verifyMagicBytes`).
+- **Read-only guard for newer formats**: opening a container with a newer `formatVersion` surfaces a non-blocking banner; Save is blocked with an explanatory dialog (Save As allowed) and the backend save refuses to silently downgrade (`container.rs`, `lib.rs`, `App.tsx`).
 - **Quality gates**: gzipped frontend budget, generated bindings check, installer size gate, optional perf gate (`scripts/quality-gates.mjs`).
 
 ## Known limitations / non-goals
 
 - **PPTX import is available** for text, shapes, media, notes, transitions, tables, and basic charts; unsupported graphic frames stay visible with compatibility warnings (see `implementation-status-addendum.md`).
 - **No macros, pivot charts, real-time collaboration, or cloud sync** (out of scope for v1).
-- **`zip` crate unified at 2.4** across `redoc-core`, `redoc-file-io`, and `redoc-export` (single major line in the workspace).
+- **`zip` crate is NOT unified**: our crates (`redoc-core`, `redoc-file-io`, `redoc-export`) pin `zip` 2.4, but transitive dependencies pull additional major lines — `calamine`/`rust_xlsxwriter` resolve zip 2.4.2, `tauri-plugin-updater` 4.6.1, and `docx-rs` 8.6.0 (see `Cargo.lock`). Unifying requires upstream major-version migrations and is out of scope for v1.
 - **DocEditor ProseMirror schema is parity-checked** against `crates/doc-engine` via the generated `schema-catalog.json` (`cargo test -p redoc-doc-engine` regenerates it; `schemaCatalog.test.ts` fails on drift).
 - **Log rotation is size-bounded** (5 MiB active file + 4 rotated backups), not calendar-daily.
 

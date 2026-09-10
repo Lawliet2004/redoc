@@ -23,7 +23,9 @@ export type GridCellStyle = {
   bgColor?: string;
   align?: "left" | "center" | "right";
   vAlign?: "top" | "middle" | "bottom";
-  format?: "general" | "currency" | "percent" | "number" | "date" | "text";
+  format?: "general" | "currency" | "percent" | "number" | "date" | "text" | "custom";
+  /** Excel-style format code used when format === "custom". */
+  formatCode?: string;
   decimals?: number;
   hyperlink?: string;
   /** Bounded inline data URI shown inside the cell in Redoc. */
@@ -34,6 +36,8 @@ export type GridCellStyle = {
   fontSize?: number;
   /** Per-side cell borders; round-trips through native XLSX. */
   borders?: CellBorders;
+  /** When true, cell is locked for editing when the sheet is protected. */
+  locked?: boolean;
   /** Ephemeral render metadata added by conditional formatting. */
   conditionalBarPercent?: number;
   conditionalBarColor?: string;
@@ -101,6 +105,14 @@ export type CellComment = {
   createdAt: string;
 };
 
+export type SheetProtection = {
+  enabled: boolean;
+  /** When true, locked cells cannot be selected. */
+  selectLockedCells: boolean;
+  /** When true, unlocked cells cannot be selected. */
+  selectUnlockedCells: boolean;
+};
+
 export type SheetSnapshot = {
   cells: Record<string, GridCell>;
   merges: MergeRange[];
@@ -109,6 +121,8 @@ export type SheetSnapshot = {
   columnFilters: Record<number, string[]>;
   columnWidths: Record<number, number>;
   rowHeights: Record<number, number>;
+  hiddenCols?: number[];
+  hiddenRows?: number[];
   chartType: "bar" | "line" | "pie" | "area" | "scatter" | "doughnut" | null;
   chartTitle: string;
   chartRange: { startRow: number; endRow: number; startCol: number; endCol: number };
@@ -117,8 +131,9 @@ export type SheetSnapshot = {
   scenarios?: ScenarioConfig[];
   slicers?: SlicerConfig[];
   comments?: CellComment[];
-  sheetsMeta: Array<{ id: string; name: string }>;
+  sheetsMeta: Array<{ id: string; name: string; color?: string }>;
   activeSheetIndex: number;
+  protection?: SheetProtection;
 };
 
 export interface FormulaBarProps {
@@ -192,6 +207,7 @@ export interface GridCanvasProps {
   setSuppressNextClick: Setter<boolean>;
   startDimensionDrag: (event: PointerEvent) => boolean;
   updateDimensionDrag: (event: PointerEvent) => void;
+  commitDimensionDrag: () => void;
   fillDragStart: Accessor<{ row: number; col: number } | null>;
   finishFillDrag: (event: MouseEvent) => void | Promise<void>;
   dimensionDrag: Accessor<{
@@ -210,11 +226,20 @@ export interface GridCanvasProps {
   cellsData: Accessor<Record<string, GridCell>>;
   cellHyperlink: (cell: GridCell | undefined) => string | null;
   onOpenHyperlink?: (href: string) => boolean;
+  toggleHideRows: (rows: number[], hidden: boolean) => void;
+  toggleHideCols: (cols: number[], hidden: boolean) => void;
+  unhideCandidateRows: () => number[];
+  unhideCandidateCols: () => number[];
+  hiddenRows: Accessor<number[]>;
+  hiddenCols: Accessor<number[]>;
   chartType: Accessor<"bar" | "line" | "pie" | "area" | "scatter" | "doughnut" | null>;
   chartTitle?: string;
   chartTop: () => number;
   chartLeft: () => number;
-  chartData: () => Array<{ label: string; value: number }>;
+  chartData: () => {
+    labels: string[];
+    series: Array<{ name: string; values: number[] }>;
+  };
   chartMax: () => number;
   pieSlices: () => Array<{
     isFullCircle: boolean;
@@ -223,5 +248,10 @@ export interface GridCanvasProps {
     label: string;
     value: number;
   }>;
+  SERIES_COLORS: string[];
   conditionalFormatting: Accessor<ConditionalFormattingRule[]>;
+  /** Clears raw contents of the current selection (Delete/Backspace). */
+  clearSelectionContents: () => void | Promise<void>;
+  /** Switches active sheet by relative offset (Ctrl+PgUp/PgDn); clamps at edges. */
+  switchSheetByOffset: (offset: number) => void;
 }

@@ -4,9 +4,7 @@ import { expect } from "vitest";
 const FAIL_IMPACTS = new Set(["serious", "critical"]);
 
 /** Rules that are noisy under jsdom / dark chrome CSS variables. */
-const DISABLED_RULES = {
-  "color-contrast": { enabled: false },
-} as const;
+const DISABLED_RULES = {} as const;
 
 export function formatViolations(violations: Result[]): string {
   return violations

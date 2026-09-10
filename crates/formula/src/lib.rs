@@ -9,8 +9,11 @@ pub use ast::{BinaryOp, Expr, FormulaError, FormulaValue};
 pub use catalog::{is_supported_function, SUPPORTED_FUNCTION_NAMES};
 pub use dep_graph::{CellCoord, DependencyGraph};
 pub use eval::{eval_expr, extract_dependencies, CellProvider};
-pub use functions::eval_func;
-pub use parser::{parse_a1_range, parse_a1_reference, parse_formula, tokenize, Token};
+pub use functions::{eval_func, MAX_DYNAMIC_ARRAY_CELLS};
+pub use parser::{
+    parse_a1_range, parse_a1_reference, parse_formula, tokenize, Token, MAX_EXCEL_COL,
+    MAX_EXCEL_ROW,
+};
 
 #[cfg(test)]
 mod tests {

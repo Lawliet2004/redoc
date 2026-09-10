@@ -8,6 +8,7 @@ import {
   IconSearch,
 } from "@redoc/icons";
 import { t } from "@redoc/ui";
+import { ContextMenu, ContextMenuItem } from "@redoc/editor-common";
 import { commands, RecentEntry } from "@redoc/api-client";
 import { formatDate } from "@redoc/utils";
 
@@ -18,6 +19,25 @@ interface HomeScreenProps {
   onOpenRecent: (entry: RecentEntry) => void;
   onTogglePin: (id: string) => void;
   onDropFile?: (file: File) => void;
+}
+
+const ONBOARDED_KEY = "redoc-onboarded";
+
+function shouldShowOnboarding(recentsCount: number): boolean {
+  if (recentsCount > 0) return false;
+  try {
+    return window.localStorage.getItem(ONBOARDED_KEY) !== "1";
+  } catch {
+    return false;
+  }
+}
+
+function markOnboarded() {
+  try {
+    window.localStorage.setItem(ONBOARDED_KEY, "1");
+  } catch {
+    /* storage unavailable */
+  }
 }
 
 type RailId = "new" | "recent" | "shared" | "templates";
@@ -64,6 +84,8 @@ export function HomeScreen(props: HomeScreenProps) {
   const [sortBy, setSortBy] = createSignal("Last opened");
   const [selectedId, setSelectedId] = createSignal<string | null>(null);
   const [fileExists, setFileExists] = createSignal<Record<string, boolean>>({});
+  const [rowMenu, setRowMenu] = createSignal<{ x: number; y: number; entry: RecentEntry } | null>(null);
+  const [showWelcome, setShowWelcome] = createSignal(shouldShowOnboarding(props.recents.length));
 
   const checkMissing = async () => {
     const recents = props.recents;
@@ -114,6 +136,28 @@ export function HomeScreen(props: HomeScreenProps) {
 
   const tiles = TILES(props.onNewDoc);
 
+  const rowMenuItems = (entry: RecentEntry): ContextMenuItem[] => [
+    {
+      id: "open",
+      label: t("home.previewOpen"),
+      disabled: fileExists()[entry.id] === false,
+      action: () => props.onOpenRecent(entry),
+    },
+    {
+      id: "copy-path",
+      label: t("home.rowMenu.copyPath", { defaultValue: "Copy path" }),
+      disabled: !entry.path,
+      action: () => {
+        if (entry.path) void navigator.clipboard?.writeText(entry.path);
+      },
+    },
+    {
+      id: "unpin",
+      label: entry.pinned ? t("home.unpin") : t("home.pin"),
+      action: () => props.onTogglePin(entry.id),
+    },
+  ];
+
   return (
     <div
       class="home-root"
@@ -123,7 +167,32 @@ export function HomeScreen(props: HomeScreenProps) {
         if (e.dataTransfer?.files?.length && props.onDropFile) props.onDropFile(e.dataTransfer.files[0]);
       }}
     >
-      {/* Collaborative topbar: brand + search + avatar stub */}
+        {/* Collaborative topbar: brand + search + avatar stub */}
+      <Show when={showWelcome()}>
+        <div class="home-welcome" role="region" aria-label={t("home.welcome.title", { defaultValue: "Welcome to Redoc" })}>
+          <div>
+            <h2 style={{ margin: "0 0 4px 0", "font-size": "18px" }}>{t("home.welcome.title", { defaultValue: "Welcome to Redoc" })}</h2>
+            <p style={{ margin: 0, color: "var(--text-secondary)", "font-size": "13px" }}>{t("home.welcome.body", { defaultValue: "An offline-first office suite: documents, spreadsheets, and presentations in one app. Start with a blank file, a template, or open something you already have." })}</p>
+          </div>
+          <div style={{ display: "flex", gap: "8px", "flex-wrap": "wrap", "align-items": "center" }}>
+            <button type="button" class="home-open-btn" onClick={() => { markOnboarded(); setShowWelcome(false); props.onNewDoc("doc"); }}>
+              {t("home.tiles.blankDoc")}
+            </button>
+            <button type="button" class="home-open-btn" onClick={() => { markOnboarded(); setShowWelcome(false); props.onNewDoc("sheet"); }}>
+              {t("home.tiles.blankSheet")}
+            </button>
+            <button type="button" class="home-open-btn" onClick={() => { markOnboarded(); setShowWelcome(false); props.onNewDoc("slide"); }}>
+              {t("home.tiles.blankDeck")}
+            </button>
+            <button type="button" class="home-open-btn" onClick={() => { markOnboarded(); setShowWelcome(false); props.onNewDoc("doc", "resume"); }}>
+              {t("home.welcome.sample", { defaultValue: "Try a sample" })}
+            </button>
+            <button type="button" class="g-icon-btn" aria-label={t("home.welcome.dismiss", { defaultValue: "Dismiss welcome card" })} title={t("home.welcome.dismiss", { defaultValue: "Dismiss" })} onClick={() => { markOnboarded(); setShowWelcome(false); }}>
+              ✕
+            </button>
+          </div>
+        </div>
+      </Show>
       <div class="home-topbar">
         <div class="home-brand">
           <div class="home-brand-badge">
@@ -246,6 +315,11 @@ export function HomeScreen(props: HomeScreenProps) {
                         }}
                         data-entry={entry.id}
                         onFocus={() => setSelectedId(entry.id)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setSelectedId(entry.id);
+                          setRowMenu({ x: e.clientX, y: e.clientY, entry });
+                        }}
                       >
                         <div class="home-file-name">
                           {modeIcon(entry.mode)}
@@ -319,6 +393,11 @@ export function HomeScreen(props: HomeScreenProps) {
           </section>
         </aside>
       </div>
+      <Show when={rowMenu()}>
+        {(menu) => (
+          <ContextMenu x={menu().x} y={menu().y} items={rowMenuItems(menu().entry)} onClose={() => setRowMenu(null)} />
+        )}
+      </Show>
     </div>
   );
 }

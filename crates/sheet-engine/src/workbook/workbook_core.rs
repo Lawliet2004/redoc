@@ -116,27 +116,33 @@ impl WorkbookModel {
         let Some(plan) = self.recalc_plans.get(sheet_idx).and_then(Option::as_ref) else {
             return HashSet::new();
         };
-        let Some(order) = plan.order.clone() else {
+        // Cycle isolation: only loop members (and cells downstream of a cycle)
+        // become #CYCLE!; every other formula still recalculates.
+        if !plan.poisoned.is_empty() {
             if let Some(sheet) = self.sheets.get_mut(sheet_idx) {
-                sheet.spills.clear();
-            }
-            let formula_coords: Vec<_> = plan.formulas.keys().copied().collect();
-            for coord in &formula_coords {
-                self.cell_value_cache[sheet_idx]
-                    .insert(*coord, FormulaValue::Error(FormulaError::Cycle));
-            }
-            if let Some(sheet) = self.sheets.get_mut(sheet_idx) {
-                for coord in formula_coords {
+                for coord in &plan.poisoned {
+                    self.cell_value_cache[sheet_idx]
+                        .insert(*coord, FormulaValue::Error(FormulaError::Cycle));
                     if let Some(cell) = sheet.cells.get_mut(&format!("{}:{}", coord.0, coord.1)) {
                         cell.display_value = FormulaError::Cycle.to_str().to_string();
                     }
                 }
             }
+        }
+        if plan.poisoned.len() == plan.formulas.len() {
+            // Entire formula set is cycle-trapped; nothing to evaluate.
             if let Some(valid) = self.formula_values_valid.get_mut(sheet_idx) {
                 *valid = true;
             }
             return HashSet::new();
-        };
+        }
+        // A missing order with an unpoisoned formula set means no dependency
+        // edges at all: evaluate every formula (plan build guarantees Some
+        // in that case, but stay defensive rather than silently skipping).
+        let order = plan
+            .order
+            .clone()
+            .unwrap_or_else(|| plan.formulas.keys().copied().collect());
         let affected = dirty_cell.map(|start| {
             let mut affected = HashSet::from([start]);
             let mut pending = vec![start];
@@ -150,31 +156,54 @@ impl WorkbookModel {
                 }
             }
             // A literal edit can either block or unblock a dynamic-array
-            // destination without appearing in the formula dependency graph.
-            // Re-evaluate the bounded dynamic-function subset so collision
-            // state remains correct without abandoning incremental recalc for
-            // ordinary formulas.
+            // destination without appearing in the formula dependency graph,
+            // so dynamic formulas themselves always re-evaluate. Ordinary
+            // formulas stay scoped: only those consuming a dynamic origin or
+            // one of its (current or previous) spill cells re-evaluate.
             if let Some(sheet) = self.sheets.get(sheet_idx) {
-                let dynamic_formula_present = sheet.cells.values().any(|cell| {
-                    cell.formula
-                        .as_deref()
-                        .is_some_and(is_dynamic_array_formula)
-                });
-                for (key, cell) in &sheet.cells {
-                    let Ok(coord) = parse_key(key) else {
-                        continue;
-                    };
-                    if dynamic_formula_present
-                        || cell
-                            .formula
+                let dynamic_seeds: Vec<(u32, u32)> = sheet
+                    .cells
+                    .iter()
+                    .filter_map(|(key, cell)| {
+                        cell.formula
                             .as_deref()
                             .is_some_and(is_dynamic_array_formula)
-                    {
-                        affected.insert(coord);
+                            .then(|| parse_key(key).ok())
+                            .flatten()
+                    })
+                    .collect();
+                if !dynamic_seeds.is_empty() {
+                    for seed in &dynamic_seeds {
+                        affected.insert(*seed);
                     }
-                }
-                if dynamic_formula_present {
-                    affected.extend(plan.formulas.keys().copied());
+                    let mut pending: Vec<(u32, u32)> = dynamic_seeds;
+                    for spill in &sheet.spills {
+                        let count = (spill.rows as usize)
+                            .saturating_mul(spill.cols as usize)
+                            .min(spill.values.len())
+                            .min(MAX_ARRAY_SPILL_CELLS);
+                        for index in 0..count {
+                            if let Some(coord) = spill_coordinate(
+                                spill.origin_row,
+                                spill.origin_col,
+                                index,
+                                spill.cols,
+                            ) {
+                                if affected.insert(coord) {
+                                    pending.push(coord);
+                                }
+                            }
+                        }
+                    }
+                    while let Some(cell) = pending.pop() {
+                        if let Some(dependents) = plan.dependents.get(&cell) {
+                            for dependent in dependents {
+                                if affected.insert(*dependent) {
+                                    pending.push(*dependent);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             affected
@@ -419,15 +448,16 @@ impl WorkbookModel {
             dependency_graph.update_cell_deps(coord, extract_local_dependencies(ast));
         }
 
-        let order = match dependency_graph.get_recalc_order(&all_cells) {
-            Ok(ord) => {
-                if ord.is_empty() {
-                    Some(formula_coords)
-                } else {
-                    Some(ord)
-                }
-            }
-            Err(_) => None,
+        let (order, poisoned) = dependency_graph.get_recalc_order_with_cycles(&all_cells);
+        let order = if order.is_empty() && poisoned.is_empty() {
+            // No dependencies at all: evaluate in formula-insertion order.
+            Some(formula_coords)
+        } else if order.is_empty() && !poisoned.is_empty() {
+            // Everything reachable is cycle-trapped.
+            None
+        } else {
+            // Partial order is fine: poisoned cells were excluded already.
+            Some(order)
         };
         let dependents = dependency_graph.dependents;
 
@@ -435,6 +465,7 @@ impl WorkbookModel {
             formulas,
             order,
             dependents,
+            poisoned,
         });
     }
 
@@ -579,7 +610,9 @@ fn cell_to_formula_value(cell: &SheetCell) -> FormulaValue {
 
 fn format_formula_value(value: &FormulaValue) -> String {
     match value {
-        FormulaValue::Number(n) => n.to_string(),
+        // Excel renders at most 15 significant digits; without this cap
+        // =0.1+0.2 displays as 0.30000000000000004.
+        FormulaValue::Number(n) => format_15_sig_digits(*n),
         FormulaValue::String(s) => s.clone(),
         FormulaValue::Boolean(b) => b.to_string().to_uppercase(),
         FormulaValue::Error(e) => e.to_str().to_string(),
@@ -588,6 +621,40 @@ fn format_formula_value(value: &FormulaValue) -> String {
             vals.first().map(format_formula_value).unwrap_or_default()
         }
     }
+}
+
+/// Format a float the way Excel does: at most 15 significant digits.
+/// `=0.1+0.2` must display "0.3", not "0.30000000000000004".
+pub(crate) fn format_15_sig_digits(n: f64) -> String {
+    if !n.is_finite() {
+        return n.to_string();
+    }
+    if n == 0.0 {
+        return "0".to_string();
+    }
+    let short = n.to_string();
+    // Significant digits = digits excluding sign, dot, and exponent marker.
+    let sig = short.chars().filter(|c| c.is_ascii_digit()).count();
+    if sig <= 15 {
+        return short;
+    }
+    // Trim to 15 significant digits, then re-render in plain notation.
+    let trimmed = format!("{:.*e}", 14, n); // "3.000000000000000e-1"
+    if let Ok(rounded) = trimmed.parse::<f64>() {
+        let plain = rounded.to_string();
+        let plain_sig = plain.chars().filter(|c| c.is_ascii_digit()).count();
+        if plain_sig <= 15 {
+            return plain;
+        }
+        // to_string still shows dust (e.g. 1e-5 boundary): strip mantissa zeros.
+        if let Some((mantissa, exponent)) = trimmed.split_once('e') {
+            let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+            if let Ok(value) = format!("{mantissa}e{exponent}").parse::<f64>() {
+                return value.to_string();
+            }
+        }
+    }
+    short
 }
 
 fn is_dynamic_array_formula(formula: &str) -> bool {
@@ -897,6 +964,33 @@ mod tests {
     }
 
     #[test]
+    fn literal_edits_stay_scoped_with_dynamic_arrays_present() {
+        // A spill consumer still follows spill updates...
+        let mut workbook = WorkbookModel::new_default();
+        workbook.set_cell_value(0, 1, 1, "1".to_string());
+        workbook.set_cell_value(0, 1, 2, "2".to_string());
+        workbook.set_cell_value(0, 2, 1, "3".to_string());
+        workbook.set_cell_value(0, 2, 2, "4".to_string());
+        workbook.set_cell_value(0, 1, 4, "=TRANSPOSE(A1:B2)".to_string());
+        workbook.set_cell_value(0, 4, 1, "=E2+1".to_string());
+        assert_eq!(workbook.sheets[0].cells["4:1"].display_value, "5");
+
+        // ...and so does a blocker edit that frees or shifts a spill.
+        workbook.set_cell_value(0, 2, 2, "9".to_string());
+        assert_eq!(workbook.sheets[0].cells["4:1"].display_value, "10");
+
+        // An ordinary formula unrelated to the spill keeps its value through
+        // edits that do not touch it, proving the affected set stayed scoped
+        // instead of expanding to every formula.
+        workbook.set_cell_value(0, 6, 6, "=G7".to_string());
+        workbook.set_cell_value(0, 7, 7, "42".to_string());
+        assert_eq!(workbook.sheets[0].cells["6:6"].display_value, "42");
+        workbook.set_cell_value(0, 8, 8, "unrelated".to_string());
+        assert_eq!(workbook.sheets[0].cells["6:6"].display_value, "42");
+        assert_eq!(workbook.sheets[0].cells["4:1"].display_value, "10");
+    }
+
+    #[test]
     fn cross_sheet_formulas_follow_spill_neighbor_changes() {
         let mut workbook = WorkbookModel::new_default();
         workbook.sheets.push(SheetData::new("sheet-2", "Summary"));
@@ -964,6 +1058,50 @@ mod tests {
         workbook.set_cell_value(0, 1, 2, "=A1".to_string());
         assert_eq!(workbook.sheets[0].cells["1:1"].display_value, "#CYCLE!");
         assert_eq!(workbook.sheets[0].cells["1:2"].display_value, "#CYCLE!");
+    }
+
+    #[test]
+    fn formula_display_caps_at_15_significant_digits() {
+        // Excel parity: =0.1+0.2 renders "0.3", not "0.30000000000000004".
+        let mut workbook = WorkbookModel::new_default();
+        workbook.set_cell_value(0, 1, 1, "0.1".to_string());
+        workbook.set_cell_value(0, 1, 2, "0.2".to_string());
+        workbook.set_cell_value(0, 1, 3, "=A1+B1".to_string());
+        assert_eq!(workbook.sheets[0].cells["1:3"].display_value, "0.3");
+
+        // Clean values pass through unchanged.
+        assert_eq!(format_15_sig_digits(42.0), "42");
+        assert_eq!(format_15_sig_digits(1234.5), "1234.5");
+        assert_eq!(format_15_sig_digits(0.1), "0.1");
+        // 17-digit dust gets trimmed to 15.
+        assert_eq!(format_15_sig_digits(0.1 + 0.2), "0.3");
+        assert_eq!(format_15_sig_digits(1.0 / 3.0), "0.333333333333333");
+        // Large integers stay exact.
+        assert_eq!(format_15_sig_digits(1e14), "100000000000000");
+    }
+
+    #[test]
+    fn cycle_isolated_to_loop_members_not_whole_sheet() {
+        // A1<->B1 form a cycle; C1 sums D1+D2 (unaffected); D1/D2 literals.
+        let mut workbook = WorkbookModel::new_default();
+        workbook.set_cell_value(0, 1, 4, "10".to_string());
+        workbook.set_cell_value(0, 2, 4, "5".to_string());
+        workbook.set_cell_value(0, 1, 3, "=SUM(D1:D2)".to_string());
+        // Baseline without any cycle: SUM over literals works.
+        assert_eq!(workbook.sheets[0].cells["1:3"].display_value, "15");
+
+        workbook.set_cell_value(0, 1, 1, "=B1".to_string());
+        workbook.set_cell_value(0, 1, 2, "=A1".to_string());
+        workbook.recalculate(0);
+        assert_eq!(workbook.sheets[0].cells["1:1"].display_value, "#CYCLE!");
+        assert_eq!(workbook.sheets[0].cells["1:2"].display_value, "#CYCLE!");
+        assert_eq!(workbook.sheets[0].cells["1:3"].display_value, "15");
+
+        // Fixing the cycle restores both cells.
+        workbook.set_cell_value(0, 1, 1, "7".to_string());
+        workbook.recalculate(0);
+        assert_eq!(workbook.sheets[0].cells["1:1"].display_value, "7");
+        assert_eq!(workbook.sheets[0].cells["1:2"].display_value, "7");
     }
 
     #[test]
@@ -1116,6 +1254,30 @@ mod tests {
         let legacy_style: CellStyle = serde_json::from_str(legacy).expect("legacy style loads");
         assert_eq!(legacy_style.bold, Some(true));
         assert_eq!(legacy_style.font_family, None);
+        assert_eq!(legacy_style.format_code, None);
+    }
+
+    #[test]
+    fn custom_format_code_survives_serialization() {
+        use crate::cell::CellStyle;
+        let mut workbook = WorkbookModel::new_default();
+        workbook.set_cell_value(0, 1, 1, "1234.5".to_string());
+        if let Some(cell) = workbook.sheets[0].cells.get_mut("1:1") {
+            cell.style = Some(CellStyle {
+                format: Some("custom".to_string()),
+                format_code: Some("$#,##0.00".to_string()),
+                ..Default::default()
+            });
+        }
+        let json = serde_json::to_string(&workbook).expect("serialize workbook");
+        let restored: WorkbookModel = serde_json::from_str(&json).expect("deserialize workbook");
+        let style = restored.sheets[0]
+            .cells
+            .get("1:1")
+            .and_then(|cell| cell.style.as_ref())
+            .expect("style survives round-trip");
+        assert_eq!(style.format.as_deref(), Some("custom"));
+        assert_eq!(style.format_code.as_deref(), Some("$#,##0.00"));
     }
 
     #[test]

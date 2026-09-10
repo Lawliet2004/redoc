@@ -88,7 +88,7 @@ fn default_gradient_angle() -> u16 {
 }
 
 /// Merged table range anchored at (row, col).
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TableMerge {
     pub r: usize,

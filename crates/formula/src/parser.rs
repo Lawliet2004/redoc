@@ -210,6 +210,11 @@ fn parse_cell_or_ident(
     None
 }
 
+/// Excel-compatible worksheet bounds. Out-of-range A1 refs are rejected
+/// so evaluation never materializes a 2^32-cell rectangle.
+pub const MAX_EXCEL_ROW: u32 = 1_048_576;
+pub const MAX_EXCEL_COL: u32 = 16_384;
+
 /// Parse `A1`, `Sheet!A1`, or `Sheet!A1:B2` into sheet + range bounds.
 pub fn parse_a1_range(s: &str) -> Option<(Option<String>, u32, u32, u32, u32)> {
     let trimmed = s.trim();
@@ -261,9 +266,17 @@ pub fn parse_a1_reference(s: &str) -> Option<(u32, u32)> {
 
     let mut col: u32 = 0;
     for c in col_str.chars() {
-        col = col * 26 + ((c as u32) - ('A' as u32) + 1);
+        col = col
+            .checked_mul(26)?
+            .checked_add((c as u32) - (b'A' as u32) + 1)?;
+        if col > MAX_EXCEL_COL {
+            return None;
+        }
     }
     let row: u32 = row_str.parse().ok()?;
+    if row == 0 || row > MAX_EXCEL_ROW || col == 0 {
+        return None;
+    }
 
     Some((row, col))
 }
@@ -406,6 +419,11 @@ mod tests {
         assert_eq!(parse_a1_reference("A$1"), Some((1, 1)));
         assert_eq!(parse_a1_reference("A1"), Some((1, 1)));
         assert_eq!(parse_a1_reference("$B$10"), Some((10, 2)));
+        assert_eq!(parse_a1_reference("XFD1048576"), Some((1_048_576, 16_384)));
+        assert_eq!(parse_a1_reference("A0"), None);
+        assert_eq!(parse_a1_reference("A1048577"), None);
+        assert_eq!(parse_a1_reference("XFE1"), None);
+        assert_eq!(parse_a1_reference("AAAAAAAAAA1"), None);
     }
 
     #[test]

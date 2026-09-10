@@ -1,6 +1,44 @@
 use super::model::NamedRange;
-use redoc_formula::{tokenize, Expr, Token};
+use redoc_formula::{tokenize, Expr, Token, MAX_DYNAMIC_ARRAY_CELLS};
 use std::collections::HashSet;
+
+fn normalize_range_bounds(
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> (u32, u32, u32, u32) {
+    (
+        start_row.min(end_row),
+        start_col.min(end_col),
+        start_row.max(end_row),
+        start_col.max(end_col),
+    )
+}
+
+fn insert_range_cells(
+    deps: &mut HashSet<(u32, u32)>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) {
+    let (start_row, start_col, end_row, end_col) =
+        normalize_range_bounds(start_row, start_col, end_row, end_col);
+    let rows = u64::from(end_row.saturating_sub(start_row).saturating_add(1));
+    let cols = u64::from(end_col.saturating_sub(start_col).saturating_add(1));
+    let Some(count) = rows.checked_mul(cols) else {
+        return;
+    };
+    if count == 0 || count > MAX_DYNAMIC_ARRAY_CELLS as u64 {
+        return;
+    }
+    for row in start_row..=end_row {
+        for col in start_col..=end_col {
+            deps.insert((row, col));
+        }
+    }
+}
 
 pub fn expand_named_ranges(formula: &str, named_ranges: &[NamedRange]) -> String {
     let has_eq = formula.starts_with('=');
@@ -128,13 +166,7 @@ pub fn extract_local_dependencies(expr: &Expr) -> HashSet<(u32, u32)> {
                 start_col,
                 end_row,
                 end_col,
-            } => {
-                for row in *start_row..=*end_row {
-                    for col in *start_col..=*end_col {
-                        deps.insert((row, col));
-                    }
-                }
-            }
+            } => insert_range_cells(deps, *start_row, *start_col, *end_row, *end_col),
             Expr::Binary { left, right, .. } => {
                 collect(left, deps);
                 collect(right, deps);
@@ -194,10 +226,10 @@ pub fn extract_external_dependencies(
                     .and_then(|name| resolve_sheet_index(name, sheet_names))
                     .unwrap_or(local_sheet_idx);
                 if target_sheet != local_sheet_idx {
-                    for row in *start_row..=*end_row {
-                        for col in *start_col..=*end_col {
-                            deps.insert((target_sheet, row, col));
-                        }
+                    let mut local = HashSet::new();
+                    insert_range_cells(&mut local, *start_row, *start_col, *end_row, *end_col);
+                    for (row, col) in local {
+                        deps.insert((target_sheet, row, col));
                     }
                 }
             }

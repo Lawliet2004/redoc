@@ -16,7 +16,7 @@ Run this checklist against a fresh profile and an existing profile before releas
 - [ ] **F1** opens the keyboard-shortcuts dialog; **F4** repeats the last formatting command.
 - [ ] Drag-and-drop a `.redoc` file onto the window opens it in the correct mode.
 - [ ] **Save As** writes a new file and updates the window title.
-- [ ] Switching modes with unsaved edits prompts before discarding.
+- [ ] Switching modes, Home, New, and Open keep other document tabs; unsaved work is only discarded after confirming Close on that tab or Quit.
 - [ ] Recovery dialog appears after crash/autosave; **Discard all** clears snapshots without corrupting open work.
 
 ## Document
@@ -130,11 +130,13 @@ These have unit or integration coverage in the repo today:
 - [x] Doc HTML paste sanitizer (`packages/doc-editor/src/pasteSanitizer.test.ts`).
 - [x] Bounded document compare summary (`packages/doc-editor/src/compare.test.ts`).
 - [x] DOCX section-column round-trip (`round_trips_docx_section_columns`).
-- [x] DOCX per-section page properties round-trip (`exports_per_section_page_properties`).
-- [x] DOCX PAGE/NUMPAGES field-code round-trip (`round_trips_native_page_fields_in_document_body`).
+- [x] DOCX PAGE/NUMPAGES field-code round-trip (`round_trips_native_page_fields_in_document_body`, `imports_simple_page_field_with_cached_result`).
 - [x] DOCX paragraph spacing export (`exports_bounded_paragraph_spacing`).
 - [x] DOCX paragraph layout round-trip (`round_trips_paragraph_layout_attributes`).
 - [x] Unsupported DOCX simple fields warn and do not leak cached text (`skips_unsupported_simple_field_with_warning`).
+- [x] DOCX bookmark + internal-hyperlink round-trip (`round_trips_bookmarks_and_internal_hyperlinks`).
+- [x] DOCX table header rows, column widths, and rectangular merges round-trip (`round_trips_table_header_rows`, `exports_table_column_widths_and_rectangular_merges`).
+- [x] DOCX ordered-list start values and comment-thread replies export (`exports_ordered_list_start_values`, `exports_comment_thread_replies`).
 - [x] Bounded Calc array functions (`test_array_shape_functions`, `test_bounded_dynamic_array_functions`), dynamic spill materialization, collision recovery, and local/cross-sheet neighbor references (`materializes_bounded_dynamic_array_spills`, `materializes_sequence_spills_with_expected_values`, `materializes_randarray_spills_with_bounded_shape`, `materializes_stacked_dynamic_arrays_with_padding`, `materializes_selected_reference_array_spills`, `materializes_sortby_spills_in_key_order`, `materializes_flattened_array_spills_with_column_scan`, `reports_spill_collision_and_rechecks_after_blocker_is_cleared`, `formulas_can_read_materialized_spill_neighbors`, `cross_sheet_formulas_follow_spill_neighbor_changes`), slicer-filtered pivot refresh (`pivotTables.test.ts`, `sheetModel.test.ts`), compatibility helpers (`test_text_and_boolean_compatibility_helpers`, `test_bounded_statistical_compatibility_helpers`), and generated 137-name formula catalog.
 - [x] PPTX supported slide-layout round-trip (`round_trips_supported_slide_layouts`).
 - [x] Empty native PPTX title/body placeholders become editable text placeholders (`imports_empty_native_placeholders_as_editable_text`).

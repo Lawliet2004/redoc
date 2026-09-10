@@ -1,4 +1,4 @@
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { shortcutRegistry } from "./ShortcutRegistry";
 import { IconSearch } from "@redoc/icons";
 import { t } from "@redoc/ui";
@@ -9,37 +9,96 @@ interface CommandPaletteProps {
   activeMode?: "home" | "doc" | "sheet" | "slide";
 }
 
+const RECENT_COMMANDS_KEY = "redoc-palette-recents";
+const MAX_RECENTS = 5;
+
+function loadRecentCommands(): string[] {
+  try {
+    const raw = window.localStorage.getItem(RECENT_COMMANDS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.slice(0, MAX_RECENTS) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentCommand(id: string) {
+  const next = [id, ...loadRecentCommands().filter((r) => r !== id)].slice(0, MAX_RECENTS);
+  try {
+    window.localStorage.setItem(RECENT_COMMANDS_KEY, JSON.stringify(next));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+function scoreMatch(target: string, q: string): number {
+  let qIdx = 0;
+  let score = 0;
+  let streak = 0;
+  const words = target.split(/\s+/);
+  for (let i = 0; i < target.length; i++) {
+    if (target[i] === q[qIdx]) {
+      streak++;
+      score += 1 + (streak > 1 ? streak : 0);
+      qIdx++;
+      if (qIdx === q.length) break;
+    } else {
+      streak = 0;
+    }
+  }
+  if (qIdx < q.length) return 0;
+  for (const word of words) {
+    if (word.startsWith(q)) score += 10;
+  }
+  if (target.startsWith(q)) score += 15;
+  return score;
+}
+
 export function CommandPalette(props: CommandPaletteProps) {
   const [query, setQuery] = createSignal("");
   const [selectedIndex, setSelectedIndex] = createSignal(0);
+  let previouslyFocused: Element | null = null;
+
+  onMount(() => {
+    previouslyFocused = document.activeElement;
+    onCleanup(() => {
+      if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
+    });
+  });
 
   const filteredCommands = () => {
     const q = query().toLowerCase().trim();
     const mode = props.activeMode || "home";
+    const recents = loadRecentCommands();
     let all = shortcutRegistry.getAll().filter(c => {
       if (!c.mode || c.mode === "global") return true;
       if (mode === "home") return false;
       return c.mode === mode;
     });
-    
-    if (!q) return all;
-    
-    return all.map((c) => {
-      const target = (c.title + " " + c.id).toLowerCase();
-      let qIdx = 0;
-      let score = 0;
-      for (let i = 0; i < target.length; i++) {
-        if (target[i] === q[qIdx]) {
-          score++;
-          qIdx++;
-          if (qIdx === q.length) break;
-        }
-      }
-      return { item: c, score, target };
-    })
-      .filter((x) => x.score === q.length)
-      .sort((a, b) => a.target.length - b.target.length)
+
+    if (!q) {
+      const recentSet = new Set(recents);
+      return [...all].sort((a, b) => {
+        const ra = recentSet.has(a.id) ? recents.indexOf(a.id) : 99;
+        const rb = recentSet.has(b.id) ? recents.indexOf(b.id) : 99;
+        return ra - rb;
+      });
+    }
+
+    return all
+      .map((c) => {
+        const target = (c.title + " " + c.id).toLowerCase();
+        return { item: c, score: scoreMatch(target, q), recentBoost: loadRecentCommands().indexOf(c.id) >= 0 ? 5 : 0 };
+      })
+      .filter((x) => x.score > 0)
+      .sort((a, b) => (b.score + b.recentBoost) - (a.score + a.recentBoost))
       .map((x) => x.item);
+  };
+
+  const runCommand = (item: { id: string; action: () => void }) => {
+    saveRecentCommand(item.id);
+    item.action();
+    props.onClose();
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
@@ -53,10 +112,7 @@ export function CommandPalette(props: CommandPaletteProps) {
     } else if (e.key === "Enter") {
       e.preventDefault();
       const item = list[selectedIndex()];
-      if (item) {
-        item.action();
-        props.onClose();
-      }
+      if (item) runCommand(item);
     } else if (e.key === "Escape") {
       props.onClose();
     }
@@ -79,7 +135,7 @@ export function CommandPalette(props: CommandPaletteProps) {
           "align-items": "flex-start",
           "justify-content": "center",
           "padding-top": "120px",
-          "z-index": 1500,
+          "z-index": "var(--z-modal)",
           "backdrop-filter": "blur(3px)",
         }}
         onClick={(e) => {
@@ -115,6 +171,7 @@ export function CommandPalette(props: CommandPaletteProps) {
               role="combobox"
               aria-expanded="true"
               aria-controls="cmd-palette-listbox"
+              aria-activedescendant={filteredCommands()[selectedIndex()] ? `cmd-palette-option-${selectedIndex()}` : undefined}
               aria-label={t("palette.searchLabel")}
               placeholder={t("palette.placeholder")}
               value={query()}
@@ -142,13 +199,11 @@ export function CommandPalette(props: CommandPaletteProps) {
                 const selected = () => index() === selectedIndex();
                 return (
                   <div
+                    id={`cmd-palette-option-${index()}`}
                     role="option"
                     aria-selected={selected()}
                     tabindex="-1"
-                    onClick={() => {
-                      item.action();
-                      props.onClose();
-                    }}
+                    onClick={() => runCommand(item)}
                     style={{
                       display: "flex",
                       "align-items": "center",

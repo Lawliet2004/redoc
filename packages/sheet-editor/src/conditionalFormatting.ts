@@ -2,7 +2,17 @@ import type { ConditionalFormattingRule, GridCell, GridCellStyle } from "./sheet
 
 function numericValue(cell: GridCell): number | null {
   const value = Number(cell.raw);
-  return Number.isFinite(value) && cell.raw.trim() !== "" ? value : null;
+  if (Number.isFinite(value) && cell.raw.trim() !== "") return value;
+  if (cell.display && cell.display.trim() !== "") {
+    const displayNum = Number(cell.display);
+    if (Number.isFinite(displayNum)) return displayNum;
+    const cleaned = cell.display.replace(/[^0-9.-]/g, "");
+    const cleanedNum = Number(cleaned);
+    if (Number.isFinite(cleanedNum) && cleaned.trim() !== "") {
+      return cell.display.includes("%") ? cleanedNum / 100 : cleanedNum;
+    }
+  }
+  return null;
 }
 
 function scalePercent(value: number, rule: ConditionalFormattingRule): number {
@@ -24,7 +34,7 @@ export function conditionalRuleMatches(
 ): boolean {
   const { range } = rule;
   if (row < range.startRow || row > range.endRow || col < range.startCol || col > range.endCol) return false;
-  const raw = cell.raw;
+  const raw = cell.raw.startsWith("=") ? (cell.display || cell.raw) : cell.raw;
   const number = numericValue(cell);
   switch (rule.type) {
     case "greaterThan":

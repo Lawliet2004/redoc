@@ -117,6 +117,14 @@ async autosaveDocument(docId: string, mode: string, title: string, bodyJson: str
     else return { status: "error", error: e  as any };
 }
 },
+async discardDocSnapshot(docId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("discard_doc_snapshot", { docId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async exportDocument(mode: string, format: string, bodyJson: string, title: string) : Promise<Result<number[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("export_document", { mode, format, bodyJson, title }) };
@@ -408,7 +416,11 @@ style: string; color?: string | null }
 export type CellBorders = { top?: BorderEdge | null; right?: BorderEdge | null; bottom?: BorderEdge | null; left?: BorderEdge | null }
 export type CellCommentModel = { id: string; row: number; col: number; author: string; text: string; resolved?: boolean; createdAt?: string }
 export type CellRange = { startRow: number; endRow: number; startCol: number; endCol: number }
-export type CellStyle = { bold: boolean | null; italic: boolean | null; underline: boolean | null; fontColor: string | null; bgColor: string | null; align: string | null; format: string | null; wrap?: boolean | null; vAlign?: string | null; validation?: ListValidation | null; hyperlink?: string | null; 
+export type CellStyle = { bold: boolean | null; italic: boolean | null; underline: boolean | null; fontColor: string | null; bgColor: string | null; align: string | null; format: string | null; 
+/**
+ * Excel-style format code applied when format == "custom".
+ */
+formatCode?: string | null; wrap?: boolean | null; vAlign?: string | null; validation?: ListValidation | null; hyperlink?: string | null; 
 /**
  * Optional bounded inline image associated with this cell in Redoc.
  * PNG/JPEG values can round-trip through native XLSX drawings.
@@ -456,7 +468,7 @@ export type ListValidation = { type: string; options: string[]; formula?: string
 export type MergeDecision = { winner: string; currentRevision: number; candidateRevision: number; currentHash: string; candidateHash: string; changed: boolean }
 export type MergeRange = { startRow: number; endRow: number; startCol: number; endCol: number }
 export type NamedRange = { name: string; rangeStr: string; sheet: string | null }
-export type OpenedDocument = { meta: RedocMeta; body: any }
+export type OpenedDocument = { meta: RedocMeta; body: any; warnings: string[] }
 export type PivotTableModel = { id: string; sourceRange: CellRange; rowField: number; 
 /**
  * When set, the pivot crosses rows × this column field (multi-field).
@@ -490,7 +502,19 @@ export type SearchMatch = { text: string; index: number; lineNumber: number }
  */
 export type ShapeGradient = { from: string; to: string; angle?: number }
 export type SheetCell = { rawValue: string; displayValue: string; formula: string | null; style: CellStyle | null }
-export type SheetData = { id: string; name: string; cells: { [key in string]: SheetCell }; colWidths: { [key in number]: number }; rowHeights: { [key in number]: number }; freezeRows: number; freezeCols: number; charts?: ChartModel[]; filterQuery?: string | null; merges?: MergeRange[]; autoFilter?: AutoFilterState | null; conditionalFormatting?: ConditionalFormattingRule[]; pivotTables?: PivotTableModel[]; tables?: TableModel[]; scenarios?: ScenarioModel[]; slicers?: SlicerModel[]; 
+export type SheetData = { id: string; name: string; 
+/**
+ * Sheet tab color (#RRGGBB) for XLSX round-trip and UI recolor.
+ */
+tabColor?: string | null; cells: { [key in string]: SheetCell }; colWidths: { [key in number]: number }; rowHeights: { [key in number]: number }; freezeRows: number; freezeCols: number; 
+/**
+ * Hidden column indices (1-based); skipped by rendering and scroll math.
+ */
+hiddenCols?: number[]; 
+/**
+ * Hidden row indices (1-based); skipped by rendering and scroll math.
+ */
+hiddenRows?: number[]; charts?: ChartModel[]; filterQuery?: string | null; merges?: MergeRange[]; autoFilter?: AutoFilterState | null; conditionalFormatting?: ConditionalFormattingRule[]; pivotTables?: PivotTableModel[]; tables?: TableModel[]; scenarios?: ScenarioModel[]; slicers?: SlicerModel[]; 
 /**
  * Bounded materialized results for dynamic-array formulas. The origin
  * remains the only editable formula cell; values are render metadata.

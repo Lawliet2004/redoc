@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { snapElementPosition, computeBounds, hitTest, alignElements, assignGroupId, clearGroupIds } from "./geometry";
+import { snapElementPosition, computeBounds, hitTest, alignElements, assignGroupId, clearGroupIds, visibleThumbRange } from "./geometry";
 
 describe("snapElementPosition", () => {
   it("snaps an element center to the slide center", () => {
@@ -24,6 +24,44 @@ describe("snapElementPosition", () => {
 
     expect(result.x).toBe(220);
     expect(result.guides).toContainEqual({ axis: "x", position: 300 });
+  });
+
+  it("honors a non-960x540 canvas for clamping and center guides", () => {
+    const clamped = snapElementPosition(
+      { id: "selected", x: 1250, y: 400, width: 100, height: 60 },
+      1250,
+      400,
+      [],
+      1280,
+      720,
+    );
+    expect(clamped.x).toBe(1180);
+
+    const snapped = snapElementPosition(
+      { id: "selected", x: 615, y: 325, width: 100, height: 60 },
+      641,
+      360,
+      [],
+      1280,
+      720,
+    );
+    expect(snapped.guides).toContainEqual({ axis: "x", position: 640 });
+    expect(snapped.guides).toContainEqual({ axis: "y", position: 360 });
+  });
+});
+
+describe("visibleThumbRange", () => {
+  it("returns a window around the scroll viewport plus the active row", () => {
+    expect(visibleThumbRange(0, 200, 100, 67, 4, 0)).toEqual({ first: 0, last: 7 });
+    expect(visibleThumbRange(670, 200, 100, 67, 4, 50)).toEqual({ first: 6, last: 50 });
+  });
+
+  it("clamps to the available slide count", () => {
+    expect(visibleThumbRange(0, 1000, 3, 67, 4, 0)).toEqual({ first: 0, last: 2 });
+  });
+
+  it("returns an empty window for zero slides", () => {
+    expect(visibleThumbRange(0, 200, 0, 67, 4, 0)).toEqual({ first: 0, last: -1 });
   });
 });
 

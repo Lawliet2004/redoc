@@ -41,9 +41,9 @@ export function createSheetHistoryHandlers(opts: SheetHistoryOptions) {
 
 export interface BuildWorkbookContext {
   initialContent?: any;
-  sheets: Accessor<Array<{ id: string; name: string }>>;
-  sheetDataCache: Accessor<Record<number, any>>;
-  setSheetDataCache: Setter<Record<number, any>>;
+  sheets: Accessor<Array<{ id: string; name: string; color?: string }>>;
+  sheetDataCache: Accessor<Record<string, any>>;
+  setSheetDataCache: Setter<Record<string, any>>;
   activeSheetIndex: Accessor<number>;
   freezeRows: Accessor<number>;
   freezeCols: Accessor<number>;
@@ -51,6 +51,8 @@ export interface BuildWorkbookContext {
   rowHeight: Accessor<number>;
   columnWidths: Accessor<Record<number, number>>;
   rowHeights: Accessor<Record<number, number>>;
+  hiddenCols: Accessor<number[]>;
+  hiddenRows: Accessor<number[]>;
   selectionAnchor: Accessor<{ row: number; col: number }>;
   activeCell: Accessor<{ row: number; col: number }>;
   chartType: Accessor<"bar" | "line" | "pie" | "area" | "scatter" | "doughnut" | null>;
@@ -76,14 +78,17 @@ export function buildWorkbookFromCells(ctx: BuildWorkbookContext, cellMap: Recor
   const currentMeta = ctx.sheets();
   if (existing.sheets) {
     existing.sheets = currentMeta.map((s, idx) => {
-      const cached = ctx.sheetDataCache()[idx];
+      const cached = ctx.sheetDataCache()[s.id];
       const found = cached || existing.sheets?.find((es: any) => es.id === s.id) || existing.sheets?.[idx];
       return {
         id: s.id,
         name: s.name,
+        tabColor: s.color || found?.tabColor || undefined,
         cells: found?.cells || {},
         colWidths: found?.colWidths || {},
         rowHeights: found?.rowHeights || {},
+        hiddenCols: idx === ctx.activeSheetIndex() ? ctx.hiddenCols() : found?.hiddenCols || [],
+        hiddenRows: idx === ctx.activeSheetIndex() ? ctx.hiddenRows() : found?.hiddenRows || [],
         freezeRows: found?.freezeRows || 0,
         freezeCols: found?.freezeCols || 0,
         charts: found?.charts || [],
@@ -153,9 +158,11 @@ export function buildWorkbookFromCells(ctx: BuildWorkbookContext, cellMap: Recor
   );
   for (const pivot of sheet.pivotTables) {
     const rowCount = pivot.outputRowCount || 0;
+    const colCount = Math.max(2, Number(pivot.outputColCount) || 2);
     for (let row = pivot.outputStartRow; row < pivot.outputStartRow + rowCount; row += 1) {
-      delete materializedCells[`${row}:${pivot.outputStartCol}`];
-      delete materializedCells[`${row}:${pivot.outputStartCol + 1}`];
+      for (let col = 0; col < colCount; col += 1) {
+        delete materializedCells[`${row}:${pivot.outputStartCol + col}`];
+      }
     }
     const result = buildPivotTable(
       materializedCells,
@@ -180,6 +187,7 @@ export function buildWorkbookFromCells(ctx: BuildWorkbookContext, cellMap: Recor
           bgColor: value.style.bgColor,
           align: value.style.align,
           format: value.style.format,
+          formatCode: value.style.formatCode,
           decimals: value.style.decimals,
           hyperlink: value.style.hyperlink,
           validation: value.style.validation,
@@ -194,9 +202,9 @@ export function buildWorkbookFromCells(ctx: BuildWorkbookContext, cellMap: Recor
   }]));
   existing.activeSheetIndex = ctx.activeSheetIndex();
   existing.namedRanges = ctx.namedRanges();
-  const cache: Record<number, any> = { ...ctx.sheetDataCache() };
-  existing.sheets?.forEach((s: any, idx: number) => {
-    cache[idx] = s;
+  const cache: Record<string, any> = { ...ctx.sheetDataCache() };
+  existing.sheets?.forEach((s: any) => {
+    if (s?.id) cache[s.id] = s;
   });
   ctx.setSheetDataCache(cache);
   return existing;

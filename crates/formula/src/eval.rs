@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::functions::eval_func;
+use crate::functions::{eval_func, MAX_DYNAMIC_ARRAY_CELLS};
 use crate::parser::parse_a1_range;
 use std::collections::{HashMap, HashSet};
 
@@ -26,6 +26,60 @@ fn finite_number(value: f64) -> FormulaValue {
     }
 }
 
+fn range_cell_count(start_row: u32, start_col: u32, end_row: u32, end_col: u32) -> Option<usize> {
+    let rows = u64::from(end_row.saturating_sub(start_row).saturating_add(1));
+    let cols = u64::from(end_col.saturating_sub(start_col).saturating_add(1));
+    usize::try_from(rows.checked_mul(cols)?).ok()
+}
+
+fn materialize_range<P: CellProvider>(
+    provider: &P,
+    sheet: Option<&str>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> FormulaValue {
+    let (start_row, start_col, end_row, end_col) =
+        normalize_range_bounds(start_row, start_col, end_row, end_col);
+    let Some(cell_count) = range_cell_count(start_row, start_col, end_row, end_col) else {
+        return FormulaValue::Error(FormulaError::Value);
+    };
+    if cell_count == 0 || cell_count > MAX_DYNAMIC_ARRAY_CELLS {
+        return FormulaValue::Error(FormulaError::Value);
+    }
+    let height = end_row - start_row + 1;
+    let width = end_col - start_col + 1;
+    let mut data = Vec::with_capacity(cell_count);
+    for r in start_row..=end_row {
+        for c in start_col..=end_col {
+            data.push(provider.get_cell_value(sheet, r, c));
+        }
+    }
+    FormulaValue::Array(data, height, width)
+}
+
+fn as_i32_offset(value: f64) -> Option<i32> {
+    if !value.is_finite() {
+        return None;
+    }
+    let truncated = value.trunc();
+    if truncated > f64::from(i32::MAX) || truncated < f64::from(i32::MIN) {
+        return None;
+    }
+    Some(truncated as i32)
+}
+
+fn as_positive_dimension(value: f64) -> Option<u32> {
+    if !value.is_finite() || value < 1.0 {
+        return None;
+    }
+    if value > MAX_DYNAMIC_ARRAY_CELLS as f64 {
+        return None;
+    }
+    Some(value as u32)
+}
+
 pub trait CellProvider {
     fn get_cell_value(&self, sheet: Option<&str>, row: u32, col: u32) -> FormulaValue;
 }
@@ -47,6 +101,13 @@ pub fn extract_dependencies(expr: &Expr) -> HashSet<(u32, u32)> {
             } => {
                 let (start_row, start_col, end_row, end_col) =
                     normalize_range_bounds(*start_row, *start_col, *end_row, *end_col);
+                let Some(cell_count) = range_cell_count(start_row, start_col, end_row, end_col)
+                else {
+                    return;
+                };
+                if cell_count > MAX_DYNAMIC_ARRAY_CELLS {
+                    return;
+                }
                 for r in start_row..=end_row {
                     for c in start_col..=end_col {
                         deps.insert((r, c));
@@ -88,17 +149,14 @@ fn eval_expr_with_env<P: CellProvider>(
             start_col,
             end_row,
             end_col,
-        } => {
-            let (start_row, start_col, end_row, end_col) =
-                normalize_range_bounds(*start_row, *start_col, *end_row, *end_col);
-            let mut data = Vec::new();
-            for r in start_row..=end_row {
-                for c in start_col..=end_col {
-                    data.push(provider.get_cell_value(sheet.as_deref(), r, c));
-                }
-            }
-            FormulaValue::Array(data, end_row - start_row + 1, end_col - start_col + 1)
-        }
+        } => materialize_range(
+            provider,
+            sheet.as_deref(),
+            *start_row,
+            *start_col,
+            *end_row,
+            *end_col,
+        ),
         Expr::Name(name) => env
             .get(&name.to_ascii_uppercase())
             .cloned()
@@ -118,6 +176,7 @@ fn eval_expr_with_env<P: CellProvider>(
                 }
                 eval_indirect(&evaled_args, provider)
             }
+            "ROWS" | "COLUMNS" => eval_rows_or_columns(name, args, provider, env),
             _ => {
                 let mut evaled_args = Vec::new();
                 for arg in args {
@@ -216,6 +275,40 @@ fn eval_binary_op(left: &FormulaValue, op: &BinaryOp, right: &FormulaValue) -> F
     }
 }
 
+fn eval_rows_or_columns<P: CellProvider>(
+    name: &str,
+    args: &[Expr],
+    provider: &P,
+    env: &HashMap<String, FormulaValue>,
+) -> FormulaValue {
+    let Some(arg) = args.first() else {
+        return FormulaValue::Error(FormulaError::Value);
+    };
+    let dim = match arg {
+        Expr::CellRef { .. } => 1,
+        Expr::RangeRef {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            ..
+        } => {
+            let (start_row, start_col, end_row, end_col) =
+                normalize_range_bounds(*start_row, *start_col, *end_row, *end_col);
+            if name == "ROWS" {
+                end_row.saturating_sub(start_row).saturating_add(1)
+            } else {
+                end_col.saturating_sub(start_col).saturating_add(1)
+            }
+        }
+        other => {
+            let evaled = eval_expr_with_env(other, provider, env);
+            return eval_func(name, std::slice::from_ref(&evaled));
+        }
+    };
+    FormulaValue::Number(f64::from(dim))
+}
+
 fn eval_offset<P: CellProvider>(
     args: &[Expr],
     provider: &P,
@@ -238,22 +331,33 @@ fn eval_offset<P: CellProvider>(
     };
 
     let row_offset = match eval_expr_with_env(&args[1], provider, env) {
-        FormulaValue::Number(n) => n as i32,
+        FormulaValue::Number(n) => match as_i32_offset(n) {
+            Some(offset) => offset,
+            None => return FormulaValue::Error(FormulaError::Ref),
+        },
         FormulaValue::Error(e) => return FormulaValue::Error(e),
         _ => return FormulaValue::Error(FormulaError::Value),
     };
     let col_offset = match eval_expr_with_env(&args[2], provider, env) {
-        FormulaValue::Number(n) => n as i32,
+        FormulaValue::Number(n) => match as_i32_offset(n) {
+            Some(offset) => offset,
+            None => return FormulaValue::Error(FormulaError::Ref),
+        },
         FormulaValue::Error(e) => return FormulaValue::Error(e),
         _ => return FormulaValue::Error(FormulaError::Value),
     };
 
+    let (start_row, start_col, end_row, end_col) =
+        normalize_range_bounds(start_row, start_col, end_row, end_col);
     let base_height = end_row.saturating_sub(start_row) + 1;
     let base_width = end_col.saturating_sub(start_col) + 1;
 
     let height = if let Some(arg) = args.get(3) {
         match eval_expr_with_env(arg, provider, env) {
-            FormulaValue::Number(n) if n >= 1.0 => n as u32,
+            FormulaValue::Number(n) => match as_positive_dimension(n) {
+                Some(height) => height,
+                None => return FormulaValue::Error(FormulaError::Value),
+            },
             FormulaValue::Error(e) => return FormulaValue::Error(e),
             _ => return FormulaValue::Error(FormulaError::Value),
         }
@@ -263,7 +367,10 @@ fn eval_offset<P: CellProvider>(
 
     let width = if let Some(arg) = args.get(4) {
         match eval_expr_with_env(arg, provider, env) {
-            FormulaValue::Number(n) if n >= 1.0 => n as u32,
+            FormulaValue::Number(n) => match as_positive_dimension(n) {
+                Some(width) => width,
+                None => return FormulaValue::Error(FormulaError::Value),
+            },
             FormulaValue::Error(e) => return FormulaValue::Error(e),
             _ => return FormulaValue::Error(FormulaError::Value),
         }
@@ -272,12 +379,18 @@ fn eval_offset<P: CellProvider>(
     };
 
     let new_start_row = if row_offset >= 0 {
-        start_row + row_offset as u32
+        match start_row.checked_add(row_offset as u32) {
+            Some(row) => row,
+            None => return FormulaValue::Error(FormulaError::Ref),
+        }
     } else {
         start_row.saturating_sub((-row_offset) as u32)
     };
     let new_start_col = if col_offset >= 0 {
-        start_col + col_offset as u32
+        match start_col.checked_add(col_offset as u32) {
+            Some(col) => col,
+            None => return FormulaValue::Error(FormulaError::Ref),
+        }
     } else {
         start_col.saturating_sub((-col_offset) as u32)
     };
@@ -286,21 +399,28 @@ fn eval_offset<P: CellProvider>(
         return FormulaValue::Error(FormulaError::Ref);
     }
 
-    let new_end_row = new_start_row + height - 1;
-    let new_end_col = new_start_col + width - 1;
+    let Some(new_end_row) = new_start_row.checked_add(height.saturating_sub(1)) else {
+        return FormulaValue::Error(FormulaError::Ref);
+    };
+    let Some(new_end_col) = new_start_col.checked_add(width.saturating_sub(1)) else {
+        return FormulaValue::Error(FormulaError::Ref);
+    };
 
-    let mut data = Vec::new();
-    for r in new_start_row..=new_end_row {
-        for c in new_start_col..=new_end_col {
-            data.push(provider.get_cell_value(sheet.as_deref(), r, c));
-        }
-    }
-
+    let materialized = materialize_range(
+        provider,
+        sheet.as_deref(),
+        new_start_row,
+        new_start_col,
+        new_end_row,
+        new_end_col,
+    );
     if height == 1 && width == 1 {
-        return data.first().cloned().unwrap_or(FormulaValue::Empty);
+        return match materialized {
+            FormulaValue::Array(data, _, _) => data.first().cloned().unwrap_or(FormulaValue::Empty),
+            other => other,
+        };
     }
-
-    FormulaValue::Array(data, height, width)
+    materialized
 }
 
 fn eval_indirect<P: CellProvider>(args: &[FormulaValue], provider: &P) -> FormulaValue {
@@ -313,25 +433,24 @@ fn eval_indirect<P: CellProvider>(args: &[FormulaValue], provider: &P) -> Formul
         _ => return FormulaValue::Error(FormulaError::Value),
     };
 
-    let parsed = parse_a1_range(&ref_text);
-    if parsed.is_none() {
+    let Some((sheet, start_row, start_col, end_row, end_col)) = parse_a1_range(&ref_text) else {
         return FormulaValue::Error(FormulaError::Ref);
-    }
-    let (sheet, start_row, start_col, end_row, end_col) = parsed.unwrap();
+    };
 
+    let (start_row, start_col, end_row, end_col) =
+        normalize_range_bounds(start_row, start_col, end_row, end_col);
     if start_row == end_row && start_col == end_col {
         return provider.get_cell_value(sheet.as_deref(), start_row, start_col);
     }
 
-    let height = end_row - start_row + 1;
-    let width = end_col - start_col + 1;
-    let mut data = Vec::new();
-    for r in start_row..=end_row {
-        for c in start_col..=end_col {
-            data.push(provider.get_cell_value(sheet.as_deref(), r, c));
-        }
-    }
-    FormulaValue::Array(data, height, width)
+    materialize_range(
+        provider,
+        sheet.as_deref(),
+        start_row,
+        start_col,
+        end_row,
+        end_col,
+    )
 }
 
 #[cfg(test)]
@@ -452,5 +571,48 @@ mod tests {
         };
         let expr = parse_formula("=LET(x,1/0,IFERROR(x,42))").expect("LET parses");
         assert_eq!(eval_expr(&expr, &provider), FormulaValue::Number(42.0));
+    }
+
+    #[test]
+    fn indirect_normalizes_inverted_ranges() {
+        let provider = MapProvider {
+            values: HashMap::from([
+                ((1, 1), FormulaValue::Number(1.0)),
+                ((1, 2), FormulaValue::Number(2.0)),
+                ((2, 1), FormulaValue::Number(3.0)),
+                ((2, 2), FormulaValue::Number(4.0)),
+            ]),
+        };
+        let inverted = parse_formula("=SUM(INDIRECT(\"B2:A1\"))").expect("indirect parses");
+        let normal = parse_formula("=SUM(INDIRECT(\"A1:B2\"))").expect("indirect parses");
+        assert_eq!(
+            eval_expr(&inverted, &provider),
+            eval_expr(&normal, &provider)
+        );
+        assert_eq!(eval_expr(&inverted, &provider), FormulaValue::Number(10.0));
+    }
+
+    #[test]
+    fn oversized_range_and_offset_return_value_error() {
+        let provider = MapProvider {
+            values: HashMap::new(),
+        };
+        let huge = parse_formula("=SUM(A1:XFD1048576)").expect("huge range parses");
+        assert_eq!(
+            eval_expr(&huge, &provider),
+            FormulaValue::Error(FormulaError::Value)
+        );
+        assert!(extract_dependencies(&huge).is_empty());
+        let rows = parse_formula("=ROWS(A1:XFD1048576)").expect("rows parses");
+        assert_eq!(
+            eval_expr(&rows, &provider),
+            FormulaValue::Number(1_048_576.0)
+        );
+
+        let offset = parse_formula("=OFFSET(A1,0,0,100001,1)").expect("offset parses");
+        assert_eq!(
+            eval_expr(&offset, &provider),
+            FormulaValue::Error(FormulaError::Value)
+        );
     }
 }

@@ -231,6 +231,37 @@ fn native_shape_preset(shape_type: &str) -> Option<&'static str> {
 
 const MAX_HYPERLINK_CHARS: usize = 2_048;
 
+/// Parse a slide-internal jump target (`slide:<id>`). The id must match one
+/// of the deck's slide ids to produce a relationship.
+fn internal_slide_hyperlink_id(target: &str) -> Option<String> {
+    let id = target.trim().strip_prefix("slide:")?;
+    let id = id.trim();
+    if id.is_empty() || id.chars().count() > 120 || id.chars().any(char::is_control) {
+        return None;
+    }
+    if !id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.'))
+    {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+/// Resolve an element's internal `slide:<id>` hyperlink to the 1-based
+/// slide part number it should jump to, when the id exists in the deck.
+fn internal_slide_jump_target(
+    element: &redoc_slide_engine::SlideElement,
+    deck: &DeckModel,
+) -> Option<usize> {
+    let target = element.hyperlink.as_deref()?;
+    let id = internal_slide_hyperlink_id(target)?;
+    deck.slides
+        .iter()
+        .position(|slide| slide.id == id)
+        .map(|position| position + 1)
+}
+
 fn safe_external_hyperlink_target(target: &str) -> Option<String> {
     let target = target.trim();
     if target.is_empty()
@@ -274,11 +305,16 @@ fn safe_external_hyperlink_target(target: &str) -> Option<String> {
     None
 }
 
-fn hyperlink_xml(hyperlink_rel: Option<&str>) -> String {
+fn hyperlink_xml(hyperlink_rel: Option<&str>, jump_action: bool) -> String {
     hyperlink_rel
         .map(|relationship| {
+            let action = if jump_action {
+                r#" action="ppaction://hlinksldjump""#
+            } else {
+                ""
+            };
             format!(
-                r#"<a:hlinkClick xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:id="{}"/>"#,
+                r#"<a:hlinkClick xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:id="{}"{action}/>"#,
                 xml_escape(relationship)
             )
         })
@@ -378,9 +414,10 @@ fn shape_xml(
     image_rel: Option<&str>,
     chart_rel: Option<&str>,
     hyperlink_rel: Option<&str>,
+    hyperlink_jump: bool,
 ) -> String {
     let xfrm = xfrm_xml(element);
-    let hyperlink = hyperlink_xml(hyperlink_rel);
+    let hyperlink = hyperlink_xml(hyperlink_rel, hyperlink_jump);
     match &element.kind {
         ElementKind::Text {
             text,
@@ -539,7 +576,12 @@ fn shape_xml(
             }
         },
         ElementKind::Table {
-            rows, cols, data, ..
+            rows,
+            cols,
+            data,
+            merges,
+            header_row,
+            table_style,
         } => {
             let rows = (*rows).max(1);
             let cols = (*cols).max(1);
@@ -563,17 +605,49 @@ fn shape_xml(
             let grid = (0..cols)
                 .map(|_| format!(r#"<a:gridCol w="{col_width}"/>"#))
                 .collect::<String>();
+            let merge_at = |r: usize, c: usize| {
+                merges.iter().find(|merge| {
+                    r >= merge.r
+                        && r < merge.r + merge.rowspan
+                        && c >= merge.c
+                        && c < merge.c + merge.colspan
+                })
+            };
             let rows_xml = (0..rows)
                 .map(|row_index| {
                     let cells_xml = (0..cols)
                         .map(|col_index| {
+                            // Covered continuation cells carry hMerge/vMerge
+                            // markers so the anchor's spans form one region.
+                            let merge = merge_at(row_index, col_index);
+                            if let Some(merge) = merge {
+                                if merge.r != row_index || merge.c != col_index {
+                                    let span = if row_index > merge.r {
+                                        r#" vMerge="1""#
+                                    } else {
+                                        r#" hMerge="1""#
+                                    };
+                                    return format!(
+                                        r#"<a:tc{span}><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc>"#
+                                    );
+                                }
+                            }
                             let value = data
                                 .get(row_index)
                                 .and_then(|row| row.get(col_index))
                                 .map(String::as_str)
                                 .unwrap_or_default();
+                            let mut span_attrs = String::new();
+                            if let Some(merge) = merge {
+                                if merge.colspan > 1 {
+                                    let _ = write!(span_attrs, r#" gridSpan="{}""#, merge.colspan);
+                                }
+                                if merge.rowspan > 1 {
+                                    let _ = write!(span_attrs, r#" rowSpan="{}""#, merge.rowspan);
+                                }
+                            }
                             format!(
-                                r#"<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="1000"/><a:t>{}</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>"#,
+                                r#"<a:tc{span_attrs}><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="1000"/><a:t>{}</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>"#,
                                 xml_escape(value)
                             )
                         })
@@ -581,8 +655,16 @@ fn shape_xml(
                     format!(r#"<a:tr h="{row_height}">{cells_xml}</a:tr>"#)
                 })
                 .collect::<String>();
+            let first_row_attr = if *header_row { r#" firstRow="1""# } else { "" };
+            let band_row_attr = if table_style.as_deref() == Some("banded")
+                || table_style.as_deref() == Some("accent-header")
+            {
+                r#" bandRow="1""#
+            } else {
+                ""
+            };
             format!(
-                r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{id}" name="Table {id}">{hyperlink}</p:cNvPr><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>{xfrm}<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>{{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}}</a:tableStyleId></a:tblPr><a:tblGrid>{grid}</a:tblGrid>{rows_xml}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+                r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{id}" name="Table {id}">{hyperlink}</p:cNvPr><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>{xfrm}<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr{first_row_attr}{band_row_attr}><a:tableStyleId>{{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}}</a:tableStyleId></a:tblPr><a:tblGrid>{grid}</a:tblGrid>{rows_xml}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
             )
         }
         ElementKind::Chart {
@@ -780,7 +862,7 @@ fn animation_timing_xml(slide: &redoc_slide_engine::Slide) -> String {
     )
 }
 
-fn slide_xml(slide: &redoc_slide_engine::Slide) -> String {
+fn slide_xml(slide: &redoc_slide_engine::Slide, deck: &DeckModel) -> String {
     let mut shapes = String::new();
     let mut image_index = 0usize;
     let image_count = slide
@@ -809,19 +891,28 @@ fn slide_xml(slide: &redoc_slide_engine::Slide) -> String {
         } else {
             None
         };
-        let hyperlink_relationship = safe_external_hyperlink_target(
-            element.hyperlink.as_deref().unwrap_or_default(),
-        )
-        .map(|_| {
+        let internal_jump = internal_slide_jump_target(element, deck);
+        let hyperlink_relationship = if internal_jump.is_some() {
             hyperlink_index += 1;
-            format!("rId{}", image_count + chart_count + hyperlink_index + 1)
-        });
+            Some(format!(
+                "rId{}",
+                image_count + chart_count + hyperlink_index + 1
+            ))
+        } else {
+            safe_external_hyperlink_target(element.hyperlink.as_deref().unwrap_or_default()).map(
+                |_| {
+                    hyperlink_index += 1;
+                    format!("rId{}", image_count + chart_count + hyperlink_index + 1)
+                },
+            )
+        };
         shapes.push_str(&shape_xml(
             (index + 2) as u32,
             element,
             relationship.as_deref(),
             chart_relationship.as_deref(),
             hyperlink_relationship.as_deref(),
+            internal_jump.is_some(),
         ));
     }
     let transition = transition_xml(&slide.transition);
@@ -890,7 +981,7 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
         if !slide.comments.is_empty() {
             write!(
                 overrides,
-                r#"<Override PartName="/ppt/comments/comment{index}comment.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.comments+xml"/>"#,
+                r#"<Override PartName="/ppt/comments/comment{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.comments+xml"/>"#,
                 index = index + 1
             )
             .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
@@ -977,10 +1068,15 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
         format!(r#"<p:cmAuthorLst>{entries}</p:cmAuthorLst>"#)
     };
     presentation_rels.push_str("</Relationships>");
+    // Slide size must follow the deck canvas: EMU = px * 9525 (96 dpi). A hardcoded
+    // 960x540 would silently corrupt every non-16:9 deck on re-export.
+    let sld_sz_cx = (deck.canvas_width.max(1.0) * 9525.0).round() as i64;
+    let sld_sz_cy = (deck.canvas_height.max(1.0) * 9525.0).round() as i64;
     add(
         "ppt/presentation.xml",
         format!(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:notesMasterIdLst><p:notesMasterId r:id="rId{notes_master_rid}"/></p:notesMasterIdLst><p:sldIdLst>{slide_ids}</p:sldIdLst>{cm_author_lst}<p:sldSz cx="9144000" cy="5143500"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>"#
+            r#"{header}<p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:notesMasterIdLst><p:notesMasterId r:id="rId{notes_master_rid}"/></p:notesMasterIdLst><p:sldIdLst>{slide_ids}</p:sldIdLst>{cm_author_lst}<p:sldSz cx="{sld_sz_cx}" cy="{sld_sz_cy}"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>"#,
+            header = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">"#
         ),
     )?;
     add("ppt/_rels/presentation.xml.rels", presentation_rels)?;
@@ -1042,7 +1138,7 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
         let slide_number = index + 1;
         add(
             &format!("ppt/slides/slide{slide_number}.xml"),
-            slide_xml(slide),
+            slide_xml(slide, deck),
         )?;
         let layout_index = layout_indices
             .get(canonical_layout_name(&slide.layout))
@@ -1090,7 +1186,14 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
             }
         }
         for element in &slide.elements {
-            if let Some(target) = element
+            if let Some(jump_slide) = internal_slide_jump_target(element, deck) {
+                write!(
+                    relationships,
+                    r#"<Relationship Id="rId{next_rel}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slide{jump_slide}.xml"/>"#
+                )
+                .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
+                next_rel += 1;
+            } else if let Some(target) = element
                 .hyperlink
                 .as_deref()
                 .and_then(safe_external_hyperlink_target)
@@ -1117,7 +1220,7 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
         if has_comments {
             write!(
                 relationships,
-                r#"<Relationship Id="rId{next_rel}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment{slide_number}comment.xml"/>"#
+                r#"<Relationship Id="rId{next_rel}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment{slide_number}.xml"/>"#
             )
             .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
         }
@@ -1148,7 +1251,7 @@ pub fn export_deck_to_pptx(deck: &DeckModel) -> Result<Vec<u8>, ExportError> {
                 .map_err(|e| ExportError::Io(std::io::Error::other(e.to_string())))?;
             }
             add(
-                &format!("ppt/comments/comment{slide_number}comment.xml"),
+                &format!("ppt/comments/comment{slide_number}.xml"),
                 format!(
                     r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:cmLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">{comment_entries}</p:cmLst>"#
                 ),
@@ -1806,6 +1909,38 @@ mod tests {
     }
 
     #[test]
+    fn sld_size_follows_deck_canvas_not_hardcoded_960x540() {
+        // A 1280x720 deck must export its own EMU size, not the hardcoded
+        // 9144000x5143500 (960x540) which would mis-place every element.
+        let mut deck = DeckModel::new_default();
+        deck.canvas_width = 1280.0;
+        deck.canvas_height = 720.0;
+        let bytes = export_deck_to_pptx(&deck).expect("export pptx");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read pptx zip");
+        let mut presentation_xml = String::new();
+        archive
+            .by_name("ppt/presentation.xml")
+            .expect("presentation.xml")
+            .read_to_string(&mut presentation_xml)
+            .expect("read presentation xml");
+        // 1280px * 9525 EMU/px = 12192000; 720px * 9525 = 6858000.
+        assert!(presentation_xml.contains(r#"<p:sldSz cx="12192000" cy="6858000"/>"#));
+        assert!(!presentation_xml.contains(r#"<p:sldSz cx="9144000""#));
+
+        // Default deck keeps the historical 960x540 size.
+        let default_bytes = export_deck_to_pptx(&DeckModel::new_default()).expect("export default");
+        let mut default_archive =
+            zip::ZipArchive::new(std::io::Cursor::new(default_bytes)).expect("read default zip");
+        let mut default_xml = String::new();
+        default_archive
+            .by_name("ppt/presentation.xml")
+            .expect("presentation.xml")
+            .read_to_string(&mut default_xml)
+            .expect("read presentation xml");
+        assert!(default_xml.contains(r#"<p:sldSz cx="9144000" cy="5143500"/>"#));
+    }
+
+    #[test]
     fn handles_missing_or_url_images_gracefully() {
         let mut deck = DeckModel::new_default();
         deck.slides[0].elements.clear();
@@ -1869,12 +2004,12 @@ mod tests {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read pptx zip");
         let names = archive.file_names().map(str::to_string).collect::<Vec<_>>();
         assert!(
-            names.contains(&"ppt/comments/comment1comment.xml".to_string()),
+            names.contains(&"ppt/comments/comment1.xml".to_string()),
             "comment part must exist: {names:?}"
         );
         let mut comment_xml = String::new();
         archive
-            .by_name("ppt/comments/comment1comment.xml")
+            .by_name("ppt/comments/comment1.xml")
             .expect("comment part")
             .read_to_string(&mut comment_xml)
             .expect("read comment xml");

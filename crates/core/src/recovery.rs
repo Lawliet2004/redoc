@@ -35,6 +35,9 @@ impl RecoveryManager {
         let mut f = std::fs::File::create(self.sentinel_path())?;
         use std::io::Write;
         writeln!(f, "PID: {}", std::process::id())?;
+        // Hard power loss can drop an unflushed sentinel, silently disabling
+        // crash recovery for the exact crash class it exists to catch.
+        f.sync_all()?;
         Ok(())
     }
 

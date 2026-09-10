@@ -41,4 +41,9 @@ describe("page setup normalization", () => {
     expect(formatPrintHeaderFooter("x".repeat(MAX_PAGE_SETUP_TEXT + 10), 2)).toHaveLength(MAX_PAGE_SETUP_TEXT);
     expect(formatPrintHeaderFooter(42, 2)).toBe("");
   });
+
+  it("passes through CSS counter expressions for print media", () => {
+    expect(formatPrintHeaderFooter("Page {page} of {pages}", 4, "counter(page)")).toBe("Page counter(page) of 4");
+    expect(formatPrintHeaderFooter("{page} / {total}", 10, "counter(page)")).toBe("counter(page) / 10");
+  });
 });

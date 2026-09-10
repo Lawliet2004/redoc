@@ -178,3 +178,41 @@ export function insertedRangesFromTransaction(tr: any): Array<{ from: number; to
   });
   return ranges;
 }
+
+/**
+ * Text deleted by a transaction, derived from its replace-step maps.
+ * Each entry is {from, to, text} in OLD document coordinates (before the
+ * transaction), ready for restore-and-mark inside appendTransaction.
+ */
+export function deletedRangesFromTransaction(
+  tr: any,
+  oldDoc: { nodesBetween: (from: number, to: number, fn: (node: any, pos: number) => void) => void },
+): Array<{ from: number; to: number }> {
+  const ranges: Array<{ from: number; to: number }> = [];
+  tr.steps.forEach((step: any) => {
+    if (!step?.getMap) return;
+    const sliceSize = step.slice ? (step.slice.size || 0) : 1;
+    if (sliceSize !== 0) return;
+    step.getMap().forEach((fromA: number, fromB: number, _toA: number, _toB: number) => {
+      // A step that replaced [fromA, fromB) with nothing deleted that span
+      // of the old document.
+      if (fromB > fromA) {
+        ranges.push({ from: fromA, to: fromB });
+      }
+    });
+  });
+  return ranges.filter((range) => {
+    // Only ranges that contained text in the old doc count; block-level
+    // deletions (whole nodes) are left to the user to mark deliberately.
+    let hasText = false;
+    try {
+      oldDoc.nodesBetween(range.from, range.to, (node: any) => {
+        if (node.isText) hasText = true;
+        return true;
+      });
+    } catch {
+      return false;
+    }
+    return hasText;
+  });
+}

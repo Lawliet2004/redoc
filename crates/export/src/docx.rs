@@ -3,10 +3,11 @@ use crate::pdf::ExportError;
 use docx_rs::*;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
-use serde_json::{json, Value};
-use std::collections::HashMap;
+use serde_json::{json, Map, Value};
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug)]
 pub struct DocxImportResult {
@@ -20,6 +21,27 @@ const MAX_DOCX_XML_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DOCX_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_DOCX_TOTAL_MEDIA_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DOCX_FOOTNOTE_TEXT_CHARS: usize = 2_000;
+
+static BOOKMARK_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
+
+/// True when the table's first row contains only `table_header` cells — the
+/// editor's header-row convention (prosemirror-tables toggleHeaderRow).
+fn first_row_is_header(table: &Value) -> bool {
+    let Some(first_row) = table
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|rows| rows.first())
+    else {
+        return false;
+    };
+    let Some(cells) = first_row.get("content").and_then(Value::as_array) else {
+        return false;
+    };
+    !cells.is_empty()
+        && cells
+            .iter()
+            .all(|cell| cell.get("type").and_then(Value::as_str) == Some("table_header"))
+}
 
 fn read_docx_xml(
     archive: &mut zip::ZipArchive<std::fs::File>,
@@ -120,6 +142,44 @@ fn add_list_numbering(docx: Docx) -> Docx {
         .add_abstract_numbering(ordered)
         .add_numbering(Numbering::new(1, 1))
         .add_numbering(Numbering::new(2, 2))
+}
+
+/// Numbering id 3..N: one concrete numbering per distinct ordered-list start
+/// value, overriding level 0 to begin at `start`. Ids 1/2 stay bullet/ordered
+/// at start=1.
+/// Collect ordered-list start values (attrs.order) and assign a concrete
+/// numbering id per distinct start. start=1 keeps the shared numbering 2.
+/// Returns (start -> num_id map, next free id).
+fn collect_ordered_list_starts(node: &Value, starts: &mut BTreeMap<u32, u32>, next_id: &mut u32) {
+    if node.get("type").and_then(Value::as_str) == Some("ordered_list") {
+        let start = node
+            .get("attrs")
+            .and_then(|attrs| attrs.get("order"))
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .clamp(1, 999) as u32;
+        if start > 1 && !starts.contains_key(&start) {
+            starts.insert(start, *next_id);
+            *next_id += 1;
+        }
+    }
+    if let Some(children) = node.get("content").and_then(Value::as_array) {
+        for child in children {
+            collect_ordered_list_starts(child, starts, next_id);
+        }
+    }
+}
+
+fn add_list_start_numbering(docx: Docx, starts: &BTreeMap<u32, u32>) -> Docx {
+    let mut docx = docx;
+    for (start, num_id) in starts {
+        let mut numbering = Numbering::new(*num_id as usize, 2);
+        if *start > 1 {
+            numbering = numbering.add_override(LevelOverride::new(0).start(*start as usize));
+        }
+        docx = docx.add_numbering(numbering);
+    }
+    docx
 }
 
 #[derive(Clone, Copy)]
@@ -296,6 +356,52 @@ struct RunImportState {
     link_href: Option<String>,
 }
 
+const MAX_DOC_HYPERLINK_CHARS: usize = 2_048;
+
+fn safe_doc_hyperlink(target: &str) -> Option<String> {
+    let target = target.trim();
+    if target.is_empty()
+        || target.chars().count() > MAX_DOC_HYPERLINK_CHARS
+        || target.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let lower = target.to_ascii_lowercase();
+    if let Some(name) = lower
+        .strip_prefix("internal:")
+        .map(|_| target["internal:".len()..].trim())
+        .or_else(|| target.strip_prefix('#').map(str::trim))
+    {
+        return if name.is_empty() {
+            None
+        } else {
+            Some(format!("internal:{name}"))
+        };
+    }
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        let authority = target
+            .split_once("://")
+            .and_then(|(_, rest)| rest.split(['/', '?', '#']).next())
+            .unwrap_or_default()
+            .trim();
+        if !authority.is_empty() && !authority.chars().any(char::is_whitespace) {
+            return Some(target.to_string());
+        }
+        return None;
+    }
+    if lower.starts_with("mailto:") {
+        let address = target["mailto:".len()..].split('?').next()?.trim();
+        if address.contains('@') && !address.starts_with('@') && !address.ends_with('@') {
+            return Some(target.to_string());
+        }
+        return None;
+    }
+    if lower.starts_with("tel:") {
+        return Some(target.to_string());
+    }
+    None
+}
+
 #[derive(Clone)]
 struct TrackedChangeContext {
     kind: &'static str,
@@ -361,7 +467,10 @@ impl RunImportState {
         if let Some(color) = &self.highlight {
             marks.push(json!({ "type": "highlight", "attrs": { "color": color } }));
         }
-        if let Some(href) = hyperlink.or(self.link_href.as_deref()) {
+        if let Some(href) = hyperlink
+            .or(self.link_href.as_deref())
+            .and_then(safe_doc_hyperlink)
+        {
             marks.push(json!({ "type": "link", "attrs": { "href": href, "title": null } }));
         }
         if let Some(change) = tracked_change {
@@ -387,14 +496,18 @@ struct OpenList {
     list_type: String,
     num_id: u32,
     items: Vec<Value>,
+    order: Option<u64>,
 }
 
 fn flush_open_list(open_list: &mut Option<OpenList>, paragraphs: &mut Vec<Value>) {
     if let Some(list) = open_list.take() {
-        paragraphs.push(json!({
-            "type": list.list_type,
-            "content": list.items
-        }));
+        let order = (list.list_type == "ordered_list" && list.order.is_some_and(|o| o > 1))
+            .then(|| json!({ "order": list.order }));
+        let node = match order {
+            Some(attrs) => json!({ "type": list.list_type, "attrs": attrs, "content": list.items }),
+            None => json!({ "type": list.list_type, "content": list.items }),
+        };
+        paragraphs.push(node);
     }
 }
 
@@ -406,6 +519,41 @@ fn list_type_for_num_id(num_id: u32, formats: &HashMap<u32, String>) -> String {
         None if num_id == 1 => "bullet_list".to_string(),
         None if num_id == 2 => "ordered_list".to_string(),
         _ => "ordered_list".to_string(),
+    }
+}
+
+/// Close a w:fldChar field region: supported PAGE / NUMPAGES instructions
+/// become field nodes; anything else is skipped with a warning. The cached
+/// result (between separate and end) never leaks into the body.
+#[allow(clippy::too_many_arguments)]
+fn flush_field_node(
+    content: &mut Vec<Value>,
+    paragraph_text_units: &mut usize,
+    active: bool,
+    seen_instruction: bool,
+    instruction: &str,
+    warnings: &mut Vec<String>,
+) {
+    if !active || !seen_instruction {
+        return;
+    }
+    let upper = instruction.to_ascii_uppercase();
+    let kind = if upper.contains("NUMPAGES") {
+        Some("numPages")
+    } else if upper.split_whitespace().any(|token| token == "PAGE") {
+        Some("page")
+    } else {
+        None
+    };
+    match kind {
+        Some(kind) => {
+            content.push(json!({
+                "type": "field",
+                "attrs": { "kind": kind, "result": null }
+            }));
+            *paragraph_text_units = paragraph_text_units.saturating_add(1);
+        }
+        None => record_unsupported_docx_construct(warnings, b"w:fldSimple"),
     }
 }
 
@@ -978,6 +1126,31 @@ fn tracked_change_metadata(child: &Value, kind: &str) -> Option<(String, String)
     })
 }
 
+fn next_bookmark_id() -> usize {
+    BOOKMARK_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+fn bookmark_names(child: &Value) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(marks) = child.get("marks").and_then(Value::as_array) {
+        for mark in marks {
+            if mark.get("type").and_then(Value::as_str) == Some("bookmark") {
+                if let Some(name) = mark
+                    .get("attrs")
+                    .and_then(|attrs| attrs.get("name"))
+                    .and_then(Value::as_str)
+                {
+                    let name = name.trim();
+                    if !name.is_empty() && !names.iter().any(|existing| existing == name) {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
 fn add_runs_to_paragraph(
     p: Paragraph,
     child: &serde_json::Value,
@@ -990,7 +1163,18 @@ fn add_runs_to_paragraph(
             .and_then(Value::as_str)
         {
             if let Some(bytes) = decode_data_uri(src) {
-                return p.add_run(Run::new().add_image(Pic::new_with_dimensions(bytes, 320, 240)));
+                let attr_px = |key: &str, fallback: u32| -> u32 {
+                    child
+                        .get("attrs")
+                        .and_then(|attrs| attrs.get(key))
+                        .and_then(Value::as_f64)
+                        .map(|v| v.clamp(1.0, 10_000.0) as u32)
+                        .unwrap_or(fallback)
+                };
+                let width = attr_px("width", 320).max(1);
+                let height = attr_px("height", 240).max(1);
+                return p
+                    .add_run(Run::new().add_image(Pic::new_with_dimensions(bytes, width, height)));
             }
         }
         return p;
@@ -1013,11 +1197,34 @@ fn add_runs_to_paragraph(
         return p.add_run(run);
     }
 
+    // Inline document field: native PAGE / NUMPAGES field code, matching the
+    // header/footer token pattern so Word renders and recalculates them.
+    if child.get("type").and_then(Value::as_str) == Some("field") {
+        let kind = child
+            .get("attrs")
+            .and_then(|attrs| attrs.get("kind"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        return match kind.as_str() {
+            "numpages" => p.add_num_pages(NumPages::new()),
+            _ => p.add_page_num(PageNum::new()),
+        };
+    }
+
     let Some(text) = child.get("text").and_then(|t| t.as_str()) else {
         return p;
     };
 
+    let bookmarks = bookmark_names(child);
     let mut p = p;
+    let bookmark_ids: Vec<(usize, String)> = bookmarks
+        .iter()
+        .map(|name| (next_bookmark_id(), name.clone()))
+        .collect();
+    for (id, name) in &bookmark_ids {
+        p = p.add_bookmark_start(*id, name.clone());
+    }
     let lines: Vec<&str> = text.split('\n').collect();
     for (idx, line) in lines.iter().enumerate() {
         let dummy_node = json!({
@@ -1030,8 +1237,22 @@ fn add_runs_to_paragraph(
             run = run.add_break(BreakType::TextWrapping);
         }
         if let Some(url) = link_url {
-            let hyperlink = Hyperlink::new(url, HyperlinkType::External).add_run(run);
-            p = p.add_hyperlink(hyperlink);
+            let hyperlink = if let Some(anchor) = url
+                .strip_prefix("internal:")
+                .map(str::trim)
+                .filter(|anchor| !anchor.is_empty())
+            {
+                Hyperlink::new(anchor, HyperlinkType::Anchor)
+            } else if let Some(anchor) = url
+                .strip_prefix('#')
+                .map(str::trim)
+                .filter(|anchor| !anchor.is_empty())
+            {
+                Hyperlink::new(anchor, HyperlinkType::Anchor)
+            } else {
+                Hyperlink::new(url, HyperlinkType::External)
+            };
+            p = p.add_hyperlink(hyperlink.add_run(run));
         } else if let Some((author, date)) = tracked_change_metadata(child, "trackInsert") {
             p = p.add_insert(Insert::new(run).author(author).date(date));
         } else if let Some((author, date)) = tracked_change_metadata(child, "trackDelete") {
@@ -1039,6 +1260,9 @@ fn add_runs_to_paragraph(
         } else {
             p = p.add_run(run);
         }
+    }
+    for (id, _) in bookmark_ids.iter().rev() {
+        p = p.add_bookmark_end(*id);
     }
     p
 }
@@ -1177,35 +1401,66 @@ fn export_comment_anchors(doc_json: &Value) -> Vec<ExportCommentAnchor> {
     let Some(comments) = doc_json.get("comments").and_then(Value::as_array) else {
         return Vec::new();
     };
-    comments
-        .iter()
-        .enumerate()
-        .filter_map(|(index, value)| {
-            let from = value.get("from").and_then(Value::as_u64)? as usize;
-            let to = value.get("to").and_then(Value::as_u64)? as usize;
-            if from >= to {
-                return None;
+    let mut anchors = Vec::new();
+    // Threaded replies export as separate w:comment entries referencing the
+    // top-level comment through paraId-linked w15:commentEx parent ids.
+    // Reply ids start above the top-level id range to stay unique.
+    let mut next_id = comments.len();
+    for (index, value) in comments.iter().enumerate() {
+        let Some(from) = value.get("from").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(to) = value.get("to").and_then(Value::as_u64) else {
+            continue;
+        };
+        if from >= to {
+            continue;
+        }
+        let author = value
+            .get("author")
+            .and_then(Value::as_str)
+            .unwrap_or("Unknown");
+        let text = value.get("text").and_then(Value::as_str).unwrap_or("");
+        let date = value
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .unwrap_or("1970-01-01T00:00:00Z");
+        let id = index.saturating_add(1);
+        anchors.push(ExportCommentAnchor {
+            id,
+            from: from as usize,
+            to: to as usize,
+            comment: Comment::new(id)
+                .author(author)
+                .date(date)
+                .add_paragraph(Paragraph::new().add_run(Run::new().add_text(text))),
+        });
+        if let Some(replies) = value.get("replies").and_then(Value::as_array) {
+            for reply in replies {
+                let reply_author = reply
+                    .get("author")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Unknown");
+                let reply_text = reply.get("text").and_then(Value::as_str).unwrap_or("");
+                let reply_date = reply
+                    .get("createdAt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("1970-01-01T00:00:00Z");
+                next_id = next_id.saturating_add(1);
+                anchors.push(ExportCommentAnchor {
+                    id: next_id,
+                    from: from as usize,
+                    to: to as usize,
+                    comment: Comment::new(next_id)
+                        .author(reply_author)
+                        .date(reply_date)
+                        .parent_comment_id(id)
+                        .add_paragraph(Paragraph::new().add_run(Run::new().add_text(reply_text))),
+                });
             }
-            let author = value
-                .get("author")
-                .and_then(Value::as_str)
-                .unwrap_or("Unknown");
-            let text = value.get("text").and_then(Value::as_str).unwrap_or("");
-            let date = value
-                .get("createdAt")
-                .and_then(Value::as_str)
-                .unwrap_or("1970-01-01T00:00:00Z");
-            Some(ExportCommentAnchor {
-                id: index.saturating_add(1),
-                from,
-                to,
-                comment: Comment::new(index.saturating_add(1))
-                    .author(author)
-                    .date(date)
-                    .add_paragraph(Paragraph::new().add_run(Run::new().add_text(text))),
-            })
-        })
-        .collect()
+        }
+    }
+    anchors
 }
 
 fn add_runs_to_paragraph_with_comments(
@@ -1273,7 +1528,13 @@ pub fn export_doc_to_docx(
     doc_json: &serde_json::Value,
     _title: &str,
 ) -> Result<Vec<u8>, ExportError> {
-    let mut docx = add_list_numbering(Docx::new());
+    let mut ordered_starts: BTreeMap<u32, u32> = BTreeMap::new();
+    {
+        let mut next_id = 3u32;
+        collect_ordered_list_starts(doc_json, &mut ordered_starts, &mut next_id);
+    }
+    let mut docx = add_list_start_numbering(add_list_numbering(Docx::new()), &ordered_starts);
+    let mut header_row_tables: Vec<bool> = Vec::new();
     let comment_anchors = export_comment_anchors(doc_json);
     let mut comment_assigned = std::collections::HashSet::new();
     let mut paragraph_layouts = Vec::new();
@@ -1292,28 +1553,42 @@ pub fn export_doc_to_docx(
         list_info: Option<(u32, u32)>,
         paragraph_layouts: &[ParagraphCommentLayout],
         paragraph_index: &mut usize,
+        ordered_starts: &BTreeMap<u32, u32>,
+        header_row_tables: &mut Vec<bool>,
     ) {
         let node_type = node.get("type").and_then(|t| t.as_str());
 
         if node_type == Some("table") {
-            let mut rows = Vec::new();
+            // Word requires rectangular grids: track each cell's covered
+            // grid width (colspan) and vertical span (rowspan) so covered
+            // vMerge=Continue cells can be emitted for merged regions.
+            struct PendingCell {
+                cell: TableCell,
+                colspan: usize,
+                rowspan: u32,
+            }
+            let mut rows: Vec<Vec<PendingCell>> = Vec::new();
+            let mut grid: Vec<usize> = Vec::new();
             if let Some(row_nodes) = node.get("content").and_then(|c| c.as_array()) {
                 for row in row_nodes {
-                    let mut cells = Vec::new();
+                    let mut cells: Vec<PendingCell> = Vec::new();
                     if let Some(cell_nodes) = row.get("content").and_then(|c| c.as_array()) {
+                        let mut grid_cursor = 0usize;
                         for cell in cell_nodes {
                             let mut tc = TableCell::new();
+                            let mut colspan = 1usize;
+                            let mut rowspan = 1u32;
                             if let Some(attrs) = cell.get("attrs") {
-                                if let Some(colspan) = attrs.get("colspan").and_then(|v| v.as_u64())
-                                {
-                                    if colspan > 1 {
-                                        tc = tc.grid_span(colspan as usize);
+                                if let Some(span) = attrs.get("colspan").and_then(|v| v.as_u64()) {
+                                    if span > 1 {
+                                        tc = tc.grid_span(span as usize);
+                                        colspan = span as usize;
                                     }
                                 }
-                                if let Some(rowspan) = attrs.get("rowspan").and_then(|v| v.as_u64())
-                                {
-                                    if rowspan > 1 {
+                                if let Some(span) = attrs.get("rowspan").and_then(|v| v.as_u64()) {
+                                    if span > 1 {
                                         tc = tc.vertical_merge(VMergeType::Restart);
+                                        rowspan = span as u32;
                                     }
                                 }
                                 if let Some(vmerge) = attrs
@@ -1327,7 +1602,27 @@ pub fn export_doc_to_docx(
                                         _ => {}
                                     }
                                 }
+                                // columnResizing colwidth: per-covered-column
+                                // pixel widths at 96dpi -> twips.
+                                if let Some(widths) =
+                                    attrs.get("colwidth").and_then(|v| v.as_array())
+                                {
+                                    for (offset, width) in widths.iter().enumerate() {
+                                        if let Some(px) = width.as_f64() {
+                                            let twips =
+                                                (px * 15.0).round().clamp(1.0, 31_680.0) as usize;
+                                            let index = grid_cursor + offset;
+                                            if index < grid.len() {
+                                                grid[index] = twips;
+                                            } else {
+                                                grid.resize(index + 1, 0);
+                                                grid[index] = twips;
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                            grid_cursor += colspan;
 
                             let mut added_p = false;
                             if let Some(p_nodes) = cell.get("content").and_then(|c| c.as_array()) {
@@ -1372,15 +1667,87 @@ pub fn export_doc_to_docx(
                             if !added_p {
                                 tc = tc.add_paragraph(Paragraph::new());
                             }
-                            cells.push(tc);
+                            cells.push(PendingCell {
+                                cell: tc,
+                                colspan,
+                                rowspan,
+                            });
                         }
                     }
-                    rows.push(TableRow::new(cells));
+                    rows.push(cells);
                 }
             }
-            *docx = docx
-                .clone()
-                .add_table(Table::new(rows).set_borders(TableBorders::new()));
+            let grid_width = grid.len();
+            // Emit vMerge=Continue covered cells so every row covers the full
+            // grid width. Covered cells are inserted in column order by
+            // tracking each row's covered columns.
+            for row_index in 0..rows.len() {
+                // Pass 1 (read-only): this row's vertical-merge spans with the
+                // grid columns they start at.
+                let mut cursor = 0usize;
+                let mut merge_spans: Vec<(usize, usize, u32)> = Vec::new();
+                for cell in &rows[row_index] {
+                    if cell.rowspan > 1 {
+                        merge_spans.push((cursor, cell.colspan, cell.rowspan));
+                    }
+                    cursor += cell.colspan;
+                }
+                // Pass 2 (mutate): insert covered cells into later rows at
+                // their column positions (cells arrive left-to-right).
+                for (start_col, colspan, rowspan) in merge_spans {
+                    for depth in 1..rowspan {
+                        let target = row_index + depth as usize;
+                        if target >= rows.len() {
+                            continue;
+                        }
+                        let covered = PendingCell {
+                            cell: TableCell::new()
+                                .vertical_merge(VMergeType::Continue)
+                                .add_paragraph(Paragraph::new()),
+                            colspan,
+                            rowspan: 1,
+                        };
+                        let row = &mut rows[target];
+                        let mut insert_at = 0usize;
+                        let mut col = 0usize;
+                        for cell in row.iter() {
+                            if col >= start_col {
+                                break;
+                            }
+                            col += cell.colspan;
+                            insert_at += 1;
+                        }
+                        row.insert(insert_at, covered);
+                    }
+                }
+                // Pad short rows so the grid stays rectangular in Word.
+                let width: usize = rows[row_index].iter().map(|c| c.colspan).sum();
+                if width < grid_width {
+                    let mut row = std::mem::take(&mut rows[row_index]);
+                    for _ in width..grid_width {
+                        row.push(PendingCell {
+                            cell: TableCell::new()
+                                .vertical_merge(VMergeType::Continue)
+                                .add_paragraph(Paragraph::new()),
+                            colspan: 1,
+                            rowspan: 1,
+                        });
+                    }
+                    rows[row_index] = row;
+                }
+            }
+            let is_header_table = rows.first().is_some_and(|_| first_row_is_header(node));
+            let mut table = Table::new(
+                rows.into_iter()
+                    .map(|cells| TableRow::new(cells.into_iter().map(|c| c.cell).collect()))
+                    .collect(),
+            )
+            .set_borders(TableBorders::new());
+            if !grid.is_empty() {
+                table = table.set_grid(grid);
+            }
+            *docx = docx.clone().add_table(table);
+            header_row_tables.push(is_header_table);
             return;
         }
 
@@ -1388,6 +1755,38 @@ pub fn export_doc_to_docx(
             *docx = docx
                 .clone()
                 .add_paragraph(Paragraph::new().add_run(Run::new().add_break(BreakType::Page)));
+            return;
+        }
+
+        if node_type == Some("section_break") {
+            // Emit a real w:sectPr section break carrying the embedded page
+            // setup instead of silently dropping the node. docx-rs renders an
+            // empty Section as a paragraph whose pPr holds the sectPr.
+            let mut section = Section::new();
+            let setup_object = node
+                .get("attrs")
+                .and_then(|attrs| attrs.get("pageSetup"))
+                .and_then(Value::as_object)
+                .cloned()
+                .map(serde_json::Value::Object);
+            if let Some(setup) = setup_object {
+                let wrapper = serde_json::json!({ "pageSetup": setup });
+                if let Some(parsed) = parse_export_page_setup(&wrapper) {
+                    section = section
+                        .page_size(PageSize::new().width(parsed.width).height(parsed.height))
+                        .page_orient(parsed.orientation)
+                        .page_margin(PageMargin {
+                            top: parsed.top,
+                            left: parsed.left,
+                            bottom: parsed.bottom,
+                            right: parsed.right,
+                            header: 720,
+                            footer: 720,
+                            gutter: 0,
+                        });
+                }
+            }
+            *docx = docx.clone().add_section(section);
             return;
         }
 
@@ -1435,6 +1834,8 @@ pub fn export_doc_to_docx(
                         Some((1, level)),
                         paragraph_layouts,
                         paragraph_index,
+                        ordered_starts,
+                        header_row_tables,
                     );
                 }
             }
@@ -1443,14 +1844,26 @@ pub fn export_doc_to_docx(
 
         if node_type == Some("ordered_list") {
             let level = list_info.map(|(_, lvl)| lvl + 1).unwrap_or(0);
+            // Ordered lists starting past 1 use their own numbering instance
+            // (level-0 start override) so "10." renders as 10.
+            let num_id = node
+                .get("attrs")
+                .and_then(|attrs| attrs.get("order"))
+                .and_then(Value::as_u64)
+                .filter(|order| *order > 1)
+                .and_then(|order| ordered_starts.get(&(order.clamp(1, 999) as u32)))
+                .copied()
+                .unwrap_or(2);
             if let Some(content) = node.get("content").and_then(|c| c.as_array()) {
                 for child in content {
                     build_nodes(
                         child,
                         docx,
-                        Some((2, level)),
+                        Some((num_id, level)),
                         paragraph_layouts,
                         paragraph_index,
+                        ordered_starts,
+                        header_row_tables,
                     );
                 }
             }
@@ -1460,10 +1873,40 @@ pub fn export_doc_to_docx(
         if node_type == Some("list_item") {
             if let Some(content) = node.get("content").and_then(|c| c.as_array()) {
                 for child in content {
-                    build_nodes(child, docx, list_info, paragraph_layouts, paragraph_index);
+                    build_nodes(
+                        child,
+                        docx,
+                        list_info,
+                        paragraph_layouts,
+                        paragraph_index,
+                        ordered_starts,
+                        header_row_tables,
+                    );
                 }
             }
             return;
+        }
+
+        if node_type == Some("blockquote") {
+            if let Some(content) = node.get("content").and_then(|c| c.as_array()) {
+                let has_blocks = content
+                    .iter()
+                    .any(|child| child.get("type").and_then(Value::as_str) == Some("paragraph"));
+                if has_blocks {
+                    for child in content {
+                        build_nodes(
+                            child,
+                            docx,
+                            list_info,
+                            paragraph_layouts,
+                            paragraph_index,
+                            ordered_starts,
+                            header_row_tables,
+                        );
+                    }
+                    return;
+                }
+            }
         }
 
         if let Some("paragraph" | "heading" | "blockquote") = node_type {
@@ -1521,13 +1964,33 @@ pub fn export_doc_to_docx(
                 if let Some(indent) = attrs.get("indent").and_then(|value| value.as_f64()) {
                     p = p.indent(Some((indent * 720.0) as i32), None, None, None);
                 }
-                if let Some(line_height) = attrs.get("lineHeight").and_then(|value| value.as_f64())
-                {
-                    p = p.line_spacing(
-                        LineSpacing::new()
-                            .line((line_height * 240.0) as i32)
-                            .line_rule(LineSpacingType::Auto),
-                    );
+                // One combined w:spacing element: line spacing + paragraph
+                // spacing before/after (pt -> twips), all bounded.
+                let line_height = attrs.get("lineHeight").and_then(|value| value.as_f64());
+                let spacing_before = attrs
+                    .get("spacingBefore")
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or(0.0);
+                let spacing_after = attrs
+                    .get("spacingAfter")
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or(0.0);
+                if line_height.is_some() || spacing_before > 0.0 || spacing_after > 0.0 {
+                    let mut spacing = LineSpacing::new();
+                    if let Some(line_height) = line_height {
+                        spacing = spacing
+                            .line((line_height.clamp(0.5, 10.0) * 240.0) as i32)
+                            .line_rule(LineSpacingType::Auto);
+                    }
+                    if spacing_before > 0.0 {
+                        spacing = spacing
+                            .before((spacing_before.clamp(0.0, 3168.0) * 20.0).round() as u32);
+                    }
+                    if spacing_after > 0.0 {
+                        spacing =
+                            spacing.after((spacing_after.clamp(0.0, 3168.0) * 20.0).round() as u32);
+                    }
+                    p = p.line_spacing(spacing);
                 }
             }
 
@@ -1556,7 +2019,15 @@ pub fn export_doc_to_docx(
 
         if let Some(content) = node.get("content").and_then(|c| c.as_array()) {
             for child in content {
-                build_nodes(child, docx, list_info, paragraph_layouts, paragraph_index);
+                build_nodes(
+                    child,
+                    docx,
+                    list_info,
+                    paragraph_layouts,
+                    paragraph_index,
+                    ordered_starts,
+                    header_row_tables,
+                );
             }
         }
     }
@@ -1567,6 +2038,8 @@ pub fn export_doc_to_docx(
         None,
         &paragraph_layouts,
         &mut paragraph_index,
+        &ordered_starts,
+        &mut header_row_tables,
     );
 
     docx = apply_export_page_setup(docx, doc_json);
@@ -1575,15 +2048,23 @@ pub fn export_doc_to_docx(
     docx.build()
         .pack(std::io::Cursor::new(&mut buf))
         .map_err(|e| ExportError::Docx(format!("{:?}", e)))?;
-    inject_table_header_row_flags(&mut buf)?;
+    let header_tables = header_row_tables.iter().filter(|flag| **flag).count();
+    inject_table_header_row_flags(&mut buf, header_tables)?;
     inject_footnotes(&mut buf, doc_json)?;
     Ok(buf)
 }
 
-/// docx-rs 0.4 cannot emit `w:tblHeader`. Header rows are identifiable by the
-/// header-cell shading fill (`D9E2F3`); inject `<w:tblHeader/>` into their
-/// `<w:trPr>` by rewriting the packed `word/document.xml` entry.
-fn inject_table_header_row_flags(buf: &mut Vec<u8>) -> Result<(), ExportError> {
+/// docx-rs 0.4 cannot emit `w:tblHeader`. Tables whose first row is made of
+/// `table_header` cells were counted during export (`header_tables`, in
+/// document order); inject `<w:tblHeader/>` into the first `<w:tr>`'s
+/// `<w:trPr>` of each such table by rewriting the packed `word/document.xml`.
+fn inject_table_header_row_flags(
+    buf: &mut Vec<u8>,
+    header_tables: usize,
+) -> Result<(), ExportError> {
+    if header_tables == 0 {
+        return Ok(());
+    }
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&*buf))
         .map_err(|e| ExportError::Docx(e.to_string()))?;
     let mut document = String::new();
@@ -1592,39 +2073,71 @@ fn inject_table_header_row_flags(buf: &mut Vec<u8>) -> Result<(), ExportError> {
         .map_err(|e| ExportError::Docx(e.to_string()))?
         .read_to_string(&mut document)
         .map_err(|e| ExportError::Docx(e.to_string()))?;
-    if !document.contains("D9E2F3") {
-        return Ok(());
-    }
     let mut rebuilt = String::with_capacity(document.len());
     let mut rest = document.as_str();
-    while let Some(open) = rest.find("<w:tr>") {
-        rebuilt.push_str(&rest[..open + "<w:tr>".len()]);
-        rest = &rest[open + "<w:tr>".len()..];
-        let row_end = rest.find("</w:tr>").unwrap_or(rest.len());
-        let row_xml = &rest[..row_end];
-        let is_header = row_xml.contains("D9E2F3");
-        if is_header {
-            if let Some(pr) = row_xml.find("<w:trPr>") {
-                let after = &row_xml[pr + "<w:trPr>".len()..];
-                rebuilt.push_str(&row_xml[..pr + "<w:trPr>".len()]);
-                rebuilt.push_str("<w:tblHeader/>");
-                rebuilt.push_str(after);
-            } else if let Some(pr) = row_xml.find("<w:trPr />") {
-                rebuilt.push_str(&row_xml[..pr]);
-                rebuilt.push_str("<w:trPr><w:tblHeader/></w:trPr>");
-                rebuilt.push_str(&row_xml[pr + "<w:trPr />".len()..]);
-            } else {
-                rebuilt.push_str(row_xml);
+    let mut remaining_headers = header_tables;
+    while let Some(open) = rest.find("<w:tbl>") {
+        // Scan to this table's true close tag, accounting for nested tables.
+        // Only exact "<w:tbl>" opens and "</w:tbl>" closes count; tblPr /
+        // tblGrid / tblHeader elements share the prefix but not the tag.
+        let mut depth = 0usize;
+        let mut cursor = open;
+        let mut table_end = None;
+        loop {
+            let next_open = rest[cursor..].find("<w:tbl>").map(|at| cursor + at);
+            let next_close = rest[cursor..].find("</w:tbl>").map(|at| cursor + at);
+            match (next_open, next_close) {
+                (Some(o), Some(c)) if o < c => {
+                    depth += 1;
+                    cursor = o + "<w:tbl>".len();
+                }
+                (_, Some(c)) => {
+                    cursor = c + "</w:tbl>".len();
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        table_end = Some(c);
+                        break;
+                    }
+                }
+                _ => break,
             }
-        } else {
-            rebuilt.push_str(row_xml);
         }
-        rebuilt.push_str("</w:tr>");
-        if row_end + "</w:tr>".len() <= rest.len() {
-            rest = &rest[row_end + "</w:tr>".len()..];
-        } else {
-            rest = "";
+        let Some(table_end) = table_end else {
+            break;
+        };
+        let table_xml = &rest[..table_end + "</w:tbl>".len()];
+        rest = &rest[table_end + "</w:tbl>".len()..];
+        if remaining_headers > 0 {
+            let first_row_end = table_xml.find("</w:tr>");
+            let is_candidate = table_xml
+                .find("<w:tr>")
+                .is_some_and(|row_open| first_row_end.is_some_and(|end| row_open < end));
+            if is_candidate {
+                if let Some(row_open) = table_xml.find("<w:tr>") {
+                    let row_end = first_row_end.unwrap_or(0);
+                    let row_xml = &table_xml[row_open..row_end];
+                    let mut patched = String::with_capacity(row_xml.len() + 32);
+                    if let Some(pr) = row_xml.find("<w:trPr>") {
+                        patched.push_str(&row_xml[..pr + "<w:trPr>".len()]);
+                        patched.push_str("<w:tblHeader/>");
+                        patched.push_str(&row_xml[pr + "<w:trPr>".len()..]);
+                    } else if let Some(pr) = row_xml.find("<w:trPr />") {
+                        patched.push_str(&row_xml[..pr]);
+                        patched.push_str("<w:trPr><w:tblHeader/></w:trPr>");
+                        patched.push_str(&row_xml[pr + "<w:trPr />".len()..]);
+                    } else {
+                        patched.push_str("<w:tr><w:trPr><w:tblHeader/></w:trPr>");
+                        patched.push_str(&row_xml["<w:tr>".len()..]);
+                    }
+                    rebuilt.push_str(&table_xml[..row_open]);
+                    rebuilt.push_str(&patched);
+                    rebuilt.push_str(&table_xml[row_end..]);
+                    remaining_headers -= 1;
+                    continue;
+                }
+            }
         }
+        rebuilt.push_str(table_xml);
     }
     rebuilt.push_str(rest);
 
@@ -1985,6 +2498,7 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
     )?;
 
     let mut num_formats: HashMap<u32, String> = HashMap::new();
+    let mut num_starts: HashMap<u32, u64> = HashMap::new();
     if let Ok(mut numbering) = archive.by_name("word/numbering.xml") {
         let mut numbering_xml = String::new();
         numbering.read_to_string(&mut numbering_xml)?;
@@ -2015,20 +2529,50 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                     }
                 }
             }
+            // lvlOverride startOverride overrides the level-0 start value.
+            if let Some(num_id) = num_id {
+                if let Some(ovr) = part.find("<w:lvlOverride") {
+                    let slice = &part[ovr..];
+                    if let Some(start_pos) = slice.find("<w:startOverride") {
+                        let tail = &slice[start_pos..];
+                        if let Some(val_start) = tail.find("w:val=\"") {
+                            let rest = &tail[val_start + 7..];
+                            if let Some(end) = rest.find('"') {
+                                if let Ok(start) = rest[..end].parse::<u64>() {
+                                    num_starts.insert(num_id, start.clamp(1, 999));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
     let mut reader = Reader::from_str(&document);
     reader.config_mut().trim_text(true);
     let mut paragraphs = Vec::new();
-    let mut table_rows: Option<Vec<Value>> = None;
+    // Table state is a stack so nested tables (w:tbl inside w:tc) import
+    // structurally instead of being flattened into the paragraph stream.
+    let mut table_stack: Vec<Vec<Value>> = Vec::new();
     let mut row_cells: Option<Vec<Value>> = None;
     let mut cell_content: Option<Vec<Value>> = None;
+    // Cell contents of enclosing tables while a nested table is being parsed.
+    let mut cell_content_stack: Vec<Vec<Value>> = Vec::new();
+    // Partial rows of enclosing tables while a nested table is being parsed.
+    let mut row_cells_stack: Vec<Vec<Value>> = Vec::new();
     let mut current_content: Vec<Value> = Vec::new();
     let mut current_text = String::new();
     let mut run_state = RunImportState::new();
     let mut paragraph_style: Option<String> = None;
     let mut paragraph_num_id: Option<u32> = None;
+    // Paragraph layout attributes (w:jc / w:ind / w:spacing) collected while
+    // the paragraph is open and merged into the node at </w:p>.
+    let mut paragraph_align: Option<String> = None;
+    let mut paragraph_indent: Option<f64> = None;
+    let mut paragraph_line_height: Option<f64> = None;
+    let mut paragraph_spacing_before: Option<f64> = None;
+    let mut paragraph_spacing_after: Option<f64> = None;
     let mut in_text = false;
     let mut pending_image: Option<Value> = None;
     let mut active_hyperlink: Option<String> = None;
@@ -2039,31 +2583,76 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
     let mut pending_page_break = false;
     let mut comment_ranges: HashMap<usize, (usize, usize)> = HashMap::new();
     let mut open_list: Option<OpenList> = None;
+    let mut open_bookmarks: Vec<(usize, String)> = Vec::new();
+    let mut closed_bookmarks: HashMap<usize, String> = HashMap::new();
+    let mut in_field_instruction = false;
+    let mut field_instruction_text = String::new();
+    let mut field_active = false;
+    let mut field_seen_instruction = false;
+    let mut field_in_result = false;
+    // Table import state: current cell's grid span / vertical merge and the
+    // row's tblHeader flag.
+    let mut cell_grid_span: usize = 1;
+    let mut cell_vmerge_restart = false;
+    let mut cell_vmerge_continue = false;
+    let mut row_is_header = false;
+    // tblGrid parsing: column widths (twips) per open table (stack, so
+    // nested tables keep independent grids).
+    let mut in_table_grid = false;
+    let mut table_grid_widths_stack: Vec<Vec<usize>> = Vec::new();
     let mut buffer = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(event)) => match event.name().as_ref() {
-                b"w:tbl" => table_rows = Some(Vec::new()),
-                b"w:tr" => row_cells = Some(Vec::new()),
-                b"w:tc" => cell_content = Some(Vec::new()),
+                b"w:tbl" => {
+                    table_stack.push(Vec::new());
+                    table_grid_widths_stack.push(Vec::new());
+                }
+                b"w:tblGrid" => in_table_grid = true,
+                b"w:tr" => {
+                    if let Some(existing) = row_cells.take() {
+                        row_cells_stack.push(existing);
+                    }
+                    row_cells = Some(Vec::new());
+                }
+                b"w:tc" => {
+                    // Preserve the enclosing cell's content while a nested
+                    // table is open inside it.
+                    if let Some(existing) = cell_content.take() {
+                        cell_content_stack.push(existing);
+                    }
+                    cell_content = Some(Vec::new());
+                }
                 b"w:p" => {
                     paragraph_start = document_position;
                     paragraph_text_units = 0;
                     current_content = Vec::new();
                     paragraph_style = None;
                     paragraph_num_id = None;
+                    paragraph_align = None;
+                    paragraph_indent = None;
+                    paragraph_line_height = None;
+                    paragraph_spacing_before = None;
+                    paragraph_spacing_after = None;
                 }
                 b"w:commentRangeStart" => {
                     if let Some(id) = docx_attr(&event, b"id").and_then(|value| value.parse().ok())
                     {
-                        eprintln!(
-                            "comment range start {id} pos {paragraph_start} {paragraph_text_units}"
-                        );
                         let position = paragraph_start
                             .saturating_add(1)
                             .saturating_add(paragraph_text_units);
                         comment_ranges.insert(id, (position, position));
+                    }
+                }
+                b"w:bookmarkStart" => {
+                    if let (Some(id), Some(name)) = (
+                        docx_attr(&event, b"id").and_then(|value| value.parse::<usize>().ok()),
+                        docx_attr(&event, b"name"),
+                    ) {
+                        if !name.trim().is_empty() {
+                            open_bookmarks.push((id, name));
+                        }
                     }
                 }
                 b"w:ins" | b"w:del" => {
@@ -2098,11 +2687,29 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                 }
                 b"w:hyperlink" => {
                     for attribute in event.attributes().flatten() {
-                        if attribute.key.as_ref() == b"r:id" {
-                            let id = String::from_utf8_lossy(&attribute.value).to_string();
-                            active_hyperlink = hyperlink_data.get(&id).cloned();
+                        match attribute.key.as_ref() {
+                            b"r:id" => {
+                                let id = String::from_utf8_lossy(&attribute.value).to_string();
+                                active_hyperlink = hyperlink_data.get(&id).cloned();
+                            }
+                            // Internal anchors link back to bookmarks.
+                            b"w:anchor" => {
+                                let anchor = String::from_utf8_lossy(&attribute.value).to_string();
+                                if !anchor.trim().is_empty() {
+                                    active_hyperlink = Some(format!("internal:{anchor}"));
+                                }
+                            }
+                            _ => {}
                         }
                     }
+                }
+                b"w:instrText" => {
+                    // Body PAGE / NUMPAGES field instructions become native
+                    // field nodes; the cached result between separate and end
+                    // is dropped because the editor recomputes it.
+                    current_text.clear();
+                    in_field_instruction = true;
+                    field_instruction_text.clear();
                 }
                 b"w:pStyle" => {
                     for attribute in event.attributes().flatten() {
@@ -2176,12 +2783,17 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                 }
                 _ => record_unsupported_docx_construct(&mut warnings, event.name().as_ref()),
             },
-            Ok(Event::Text(event)) if in_text => {
-                current_text.push_str(
-                    &event
-                        .unescape()
-                        .map_err(|error| ExportError::Docx(error.to_string()))?,
-                );
+            Ok(Event::Text(event)) if in_text || in_field_instruction => {
+                let value = event
+                    .unescape()
+                    .map_err(|error| ExportError::Docx(error.to_string()))?;
+                if in_field_instruction {
+                    field_instruction_text.push_str(&value);
+                    field_seen_instruction = true;
+                    in_field_instruction = false;
+                } else {
+                    current_text.push_str(&value);
+                }
             }
             Ok(Event::Empty(event)) => match event.name().as_ref() {
                 b"w:commentRangeStart" => {
@@ -2205,6 +2817,106 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                     }
                 }
                 b"w:commentReference" => {}
+                b"w:bookmarkStart" => {
+                    if let (Some(id), Some(name)) = (
+                        docx_attr(&event, b"id").and_then(|value| value.parse::<usize>().ok()),
+                        docx_attr(&event, b"name"),
+                    ) {
+                        if !name.trim().is_empty() {
+                            open_bookmarks.push((id, name));
+                        }
+                    }
+                }
+                b"w:tblHeader" => {
+                    row_is_header = true;
+                }
+                b"w:gridCol" if in_table_grid => {
+                    // Column width in twips -> px at 96dpi (export inverse:
+                    // px * 15). Keeps user-resized columns on round-trip.
+                    if let Some(twips) =
+                        docx_attr(&event, b"w").and_then(|value| value.parse::<usize>().ok())
+                    {
+                        if let Some(widths) = table_grid_widths_stack.last_mut() {
+                            widths.push((twips / 15).clamp(1, 2112));
+                        }
+                    }
+                }
+                b"w:gridSpan" => {
+                    cell_grid_span = docx_attr(&event, b"val")
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(1)
+                        .clamp(1, 100);
+                }
+                b"w:vMerge" => {
+                    // vMerge with no val, or val="continue", is a covered
+                    // cell of a vertical merge; val="restart" starts one.
+                    let value = docx_attr(&event, b"val").unwrap_or_default();
+                    if value.eq_ignore_ascii_case("restart") {
+                        cell_vmerge_restart = true;
+                    } else {
+                        cell_vmerge_continue = true;
+                    }
+                }
+                b"w:jc" => {
+                    paragraph_align = docx_attr(&event, b"val").map(|value| match value.as_str() {
+                        "center" => "center".to_string(),
+                        "right" => "right".to_string(),
+                        "both" | "justify" => "justify".to_string(),
+                        _ => "left".to_string(),
+                    });
+                }
+                b"w:ind" => {
+                    if let Some(left) = docx_attr(&event, b"left")
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .filter(|value| *value > 0.0)
+                    {
+                        paragraph_indent = Some((left / 720.0 * 1000.0).round() / 1000.0);
+                    }
+                }
+                b"w:spacing" => {
+                    if let Some(line) = docx_attr(&event, b"line")
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .filter(|value| *value >= 0.0)
+                    {
+                        paragraph_line_height = Some((line / 240.0 * 1000.0).round() / 1000.0);
+                    }
+                    if let Some(before) = docx_attr(&event, b"before")
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .filter(|value| *value >= 0.0)
+                    {
+                        paragraph_spacing_before = Some((before / 20.0 * 10.0).round() / 10.0);
+                    }
+                    if let Some(after) = docx_attr(&event, b"after")
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .filter(|value| *value >= 0.0)
+                    {
+                        paragraph_spacing_after = Some((after / 20.0 * 10.0).round() / 10.0);
+                    }
+                }
+                b"w:fldChar" => match docx_attr(&event, b"fldCharType").as_deref() {
+                    Some("begin") => {
+                        field_active = true;
+                        field_seen_instruction = false;
+                    }
+                    Some("separate") => {
+                        field_in_result = true;
+                    }
+                    Some("end") => {
+                        flush_field_node(
+                            &mut current_content,
+                            &mut paragraph_text_units,
+                            field_active,
+                            field_seen_instruction,
+                            &field_instruction_text,
+                            &mut warnings,
+                        );
+                        field_active = false;
+                        field_seen_instruction = false;
+                        field_in_result = false;
+                        field_instruction_text.clear();
+                    }
+                    _ => {}
+                },
                 b"w:footnoteReference" => {
                     // Map the Word footnote id back to a footnote_ref node.
                     if let Some(note) = docx_attr(&event, b"id")
@@ -2308,12 +3020,24 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
             },
             Ok(Event::End(event)) => match event.name().as_ref() {
                 b"w:t" | b"w:delText" => in_text = false,
+                b"w:instrText" => in_field_instruction = false,
                 b"w:r" => {
                     paragraph_text_units =
                         paragraph_text_units.saturating_add(utf16_len(&current_text));
-                    if !current_text.is_empty() {
-                        let marks = run_state
+                    // Cached field results are dropped; the editor recomputes.
+                    if !field_in_result && !current_text.is_empty() {
+                        let mut marks = run_state
                             .to_marks(active_hyperlink.as_deref(), active_tracked_change.as_ref());
+                        // Open bookmark names become bookmark marks over the
+                        // remaining runs until their bookmarkEnd closes.
+                        for (id, name) in &open_bookmarks {
+                            if !closed_bookmarks.contains_key(id) {
+                                marks.push(json!({
+                                    "type": "bookmark",
+                                    "attrs": { "id": null, "name": name }
+                                }));
+                            }
+                        }
                         let mut run = json!({ "type": "text", "text": current_text });
                         if !marks.is_empty() {
                             run["marks"] = Value::Array(marks);
@@ -2322,6 +3046,14 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                     }
                     current_text.clear();
                     run_state.clear();
+                }
+                b"w:bookmarkEnd" => {
+                    // End events carry no attributes in quick-xml; close the
+                    // oldest open bookmark (Word emits ends in start order).
+                    if let Some((id, _)) = open_bookmarks.first().cloned() {
+                        open_bookmarks.remove(0);
+                        closed_bookmarks.insert(id, String::new());
+                    }
                 }
                 b"w:hyperlink" => {
                     active_hyperlink = None;
@@ -2350,6 +3082,25 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                             .filter(|style| !style.is_empty() && *style != "Normal");
                         json!({ "type": "paragraph", "attrs": { "styleName": style_name }, "content": current_content })
                     };
+                    // Paragraph layout attributes imported from w:jc/w:ind/
+                    // w:spacing so alignment and spacing round-trip.
+                    if let Some(attrs) = node.get_mut("attrs").and_then(Value::as_object_mut) {
+                        if let Some(align) = paragraph_align.take() {
+                            attrs.insert("align".to_string(), json!(align));
+                        }
+                        if let Some(indent) = paragraph_indent.take() {
+                            attrs.insert("indent".to_string(), json!(indent));
+                        }
+                        if let Some(line_height) = paragraph_line_height.take() {
+                            attrs.insert("lineHeight".to_string(), json!(line_height));
+                        }
+                        if let Some(before) = paragraph_spacing_before.take() {
+                            attrs.insert("spacingBefore".to_string(), json!(before));
+                        }
+                        if let Some(after) = paragraph_spacing_after.take() {
+                            attrs.insert("spacingAfter".to_string(), json!(after));
+                        }
+                    }
                     if let Some(image) = pending_image.take() {
                         if let Some(content) = node.get_mut("content").and_then(Value::as_array_mut)
                         {
@@ -2362,9 +3113,50 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                         .is_some_and(|content| !content.is_empty());
                     if node_has_content || !pending_page_break {
                         if let Some(content) = cell_content.as_mut() {
-                            content.push(node);
+                            // Numbered/bulleted paragraphs inside table cells
+                            // keep their list grouping instead of degrading to
+                            // plain paragraphs.
+                            if let Some(num_id) = paragraph_num_id {
+                                let list_type = list_type_for_num_id(num_id, &num_formats);
+                                let list_order = num_starts.get(&num_id).copied();
+                                let last_index = content.len();
+                                let last_is_same_list = content
+                                    .get(last_index.saturating_sub(1))
+                                    .and_then(Value::as_object)
+                                    .filter(|previous| {
+                                        previous.get("type").and_then(Value::as_str)
+                                            == Some(list_type.as_str())
+                                    })
+                                    .is_some();
+                                if last_is_same_list {
+                                    if let Some(items) = content
+                                        .get_mut(last_index - 1)
+                                        .and_then(Value::as_object_mut)
+                                        .and_then(|previous| previous.get_mut("content"))
+                                        .and_then(Value::as_array_mut)
+                                    {
+                                        items.push(
+                                            json!({ "type": "list_item", "content": [node] }),
+                                        );
+                                    }
+                                } else {
+                                    let mut list_attrs = Map::new();
+                                    if let Some(order) = list_order {
+                                        list_attrs.insert("start".to_string(), json!(order));
+                                    }
+                                    let list = json!({
+                                        "type": list_type,
+                                        "attrs": Value::Object(list_attrs),
+                                        "content": [{ "type": "list_item", "content": [node] }],
+                                    });
+                                    content.push(list);
+                                }
+                            } else {
+                                content.push(node);
+                            }
                         } else if let Some(num_id) = paragraph_num_id {
                             let list_type = list_type_for_num_id(num_id, &num_formats);
+                            let list_order = num_starts.get(&num_id).copied();
                             let list_item = json!({ "type": "list_item", "content": [node] });
                             if let Some(open) = &mut open_list {
                                 if open.num_id == num_id && open.list_type == list_type {
@@ -2375,6 +3167,7 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                                         list_type,
                                         num_id,
                                         items: vec![list_item],
+                                        order: list_order,
                                     });
                                 }
                             } else {
@@ -2382,6 +3175,7 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                                     list_type,
                                     num_id,
                                     items: vec![list_item],
+                                    order: list_order,
                                 });
                             }
                         } else {
@@ -2400,28 +3194,113 @@ pub fn import_docx_to_doc_with_report(path: &Path) -> Result<DocxImportResult, E
                     }
                 }
                 b"w:tc" => {
-                    let cell = json!({
+                    let mut attrs = Map::new();
+                    if cell_grid_span > 1 {
+                        attrs.insert("colspan".to_string(), json!(cell_grid_span));
+                    }
+                    if cell_vmerge_restart {
+                        attrs.insert("vmerge".to_string(), json!("restart"));
+                    } else if cell_vmerge_continue {
+                        attrs.insert("vmerge".to_string(), json!("continue"));
+                    }
+                    let mut cell = json!({
                         "type": "table_cell",
                         "content": cell_content.take().unwrap_or_default()
                     });
+                    if !attrs.is_empty() {
+                        cell["attrs"] = Value::Object(attrs);
+                    }
                     if let Some(cells) = row_cells.as_mut() {
                         cells.push(cell);
                     }
+                    // Restore the enclosing cell's content after a nested
+                    // table finished inside it.
+                    cell_content = cell_content_stack.pop();
+                    cell_grid_span = 1;
+                    cell_vmerge_restart = false;
+                    cell_vmerge_continue = false;
                 }
+                b"w:tblGrid" => in_table_grid = false,
                 b"w:tr" => {
-                    let row = json!({
-                        "type": "table_row",
-                        "content": row_cells.take().unwrap_or_default()
-                    });
-                    if let Some(rows) = table_rows.as_mut() {
+                    let mut cells = row_cells.take().unwrap_or_default();
+                    if row_is_header {
+                        for cell in cells.iter_mut() {
+                            if cell.get("type").and_then(Value::as_str) == Some("table_cell") {
+                                cell["type"] = json!("table_header");
+                                if let Some(attrs) = cell.get("attrs").and_then(Value::as_object) {
+                                    let mut header_attrs = attrs.clone();
+                                    let _ = header_attrs.remove("vmerge");
+                                    if header_attrs.is_empty() {
+                                        if let Some(obj) = cell.as_object_mut() {
+                                            obj.remove("attrs");
+                                        }
+                                    } else {
+                                        cell["attrs"] = Value::Object(header_attrs);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let row = json!({ "type": "table_row", "content": cells });
+                    if let Some(rows) = table_stack.last_mut() {
                         rows.push(row);
                     }
+                    // Restore the enclosing row's partial cells after a
+                    // nested table row finished.
+                    row_cells = row_cells_stack.pop();
+                    row_is_header = false;
                 }
                 b"w:tbl" => {
-                    paragraphs.push(json!({
-                        "type": "table",
-                        "content": table_rows.take().unwrap_or_default()
-                    }));
+                    let rows = table_stack.pop().ok_or_else(|| {
+                        ExportError::Docx(
+                            "Unexpected end of table: missing table rows stack".to_string(),
+                        )
+                    })?;
+                    let grid_widths = table_grid_widths_stack.pop().unwrap_or_default();
+                    // Attach tblGrid widths (px) to first-row cells so column
+                    // sizing survives the DOCX round-trip.
+                    let mut rows = rows;
+                    if !grid_widths.is_empty() {
+                        if let Some(first_row) = rows.first_mut() {
+                            let mut cursor = 0usize;
+                            if let Some(cells) =
+                                first_row.get_mut("content").and_then(Value::as_array_mut)
+                            {
+                                for cell in cells.iter_mut() {
+                                    let span = cell
+                                        .get("attrs")
+                                        .and_then(|attrs| attrs.get("colspan"))
+                                        .and_then(Value::as_u64)
+                                        .unwrap_or(1)
+                                        as usize;
+                                    let covered: Vec<usize> = (cursor
+                                        ..(cursor + span).min(grid_widths.len()))
+                                        .map(|i| grid_widths[i])
+                                        .collect();
+                                    if !covered.is_empty() {
+                                        if let Some(obj) = cell.as_object_mut() {
+                                            let attrs =
+                                                obj.entry("attrs").or_insert_with(|| json!({}));
+                                            if let Some(map) = attrs.as_object_mut() {
+                                                map.insert("colwidth".to_string(), json!(covered));
+                                            }
+                                        }
+                                    }
+                                    cursor += span;
+                                    if cursor >= grid_widths.len() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let table = json!({ "type": "table", "content": rows });
+                    if let Some(content) = cell_content.as_mut() {
+                        // Nested table: keep it inside its cell.
+                        content.push(table);
+                    } else {
+                        paragraphs.push(table);
+                    }
                 }
                 _ => {}
             },
@@ -2683,6 +3562,50 @@ mod tests {
         );
         assert_eq!(imported["pageSetup"]["footer"], "Confidential {pages}");
         std::fs::remove_file(path).expect("cleanup docx");
+    }
+
+    #[test]
+    fn section_break_exports_native_sectpr_not_dropped() {
+        // Regression: section_break nodes used to be silently omitted from
+        // DOCX (and whitelisted as safe), losing real user data.
+        let source = json!({
+            "type": "doc",
+            "content": [
+                { "type": "paragraph", "content": [{ "type": "text", "text": "First section" }] },
+                { "type": "section_break", "attrs": { "pageSetup": {
+                    "paperSize": "a4",
+                    "orientation": "landscape",
+                    "columns": 1,
+                    "margins": { "top": 0.75, "bottom": 0.75, "left": 1.0, "right": 1.0 }
+                } } },
+                { "type": "paragraph", "content": [{ "type": "text", "text": "Second section" }] }
+            ]
+        });
+        let bytes = export_doc_to_docx(&source, "Sections").expect("export docx");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read zip");
+        let mut document_xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .expect("document xml")
+            .read_to_string(&mut document_xml)
+            .expect("read xml");
+        // A sectPr mid-document (not just the trailing body sectPr): the
+        // break must appear BEFORE the "Second section" text.
+        let break_pos = document_xml
+            .find("w:sectPr")
+            .expect("section break sectPr emitted");
+        let second_pos = document_xml
+            .find("Second section")
+            .expect("second section text");
+        assert!(
+            break_pos < second_pos,
+            "sectPr must precede following content"
+        );
+        assert!(document_xml.contains("w:orient=\"landscape\""));
+        assert!(document_xml.contains("w:w=\"16838\""));
+        // Both sections' text is preserved.
+        assert!(document_xml.contains("First section"));
+        assert!(document_xml.contains("Second section"));
     }
 
     #[test]
@@ -2963,6 +3886,75 @@ mod tests {
     }
 
     #[test]
+    fn imports_nested_tables_structurally() {
+        let path =
+            std::env::temp_dir().join(format!("redoc-docx-nested-{}.docx", std::process::id()));
+        let file = std::fs::File::create(&path).expect("create fixture");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive
+            .start_file("word/document.xml", options)
+            .expect("document entry");
+        std::io::Write::write_all(
+            &mut archive,
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Outer cell</w:t></w:r></w:p>
+<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Inner cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+</w:tc></w:tr></w:tbl>
+</w:body></w:document>"#,
+        )
+        .expect("document xml");
+        archive.finish().expect("finish fixture");
+
+        let imported = import_docx_to_doc(&path).expect("import nested table");
+        let outer = &imported["content"][0];
+        assert_eq!(outer["type"], "table");
+        let inner = &outer["content"][0]["content"][0]["content"][1];
+        // The inner table must land INSIDE the outer cell, not flattened into
+        // the top-level paragraph stream.
+        assert_eq!(inner["type"], "table");
+        assert_eq!(
+            inner["content"][0]["content"][0]["content"][0]["content"][0]["text"],
+            "Inner cell"
+        );
+        assert_eq!(
+            outer["content"][0]["content"][0]["content"][0]["content"][0]["text"],
+            "Outer cell"
+        );
+        std::fs::remove_file(path).expect("cleanup docx");
+    }
+
+    #[test]
+    fn imports_tblgrid_column_widths() {
+        let path =
+            std::env::temp_dir().join(format!("redoc-docx-tblgrid-{}.docx", std::process::id()));
+        let file = std::fs::File::create(&path).expect("create fixture");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive
+            .start_file("word/document.xml", options)
+            .expect("document entry");
+        std::io::Write::write_all(
+            &mut archive,
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+<w:tbl><w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="3600"/></w:tblGrid>
+<w:tr><w:tc><w:p/></w:tc><w:tc><w:p/></w:tc></w:tr></w:tbl>
+</w:body></w:document>"#,
+        )
+        .expect("document xml");
+        archive.finish().expect("finish fixture");
+
+        let imported = import_docx_to_doc(&path).expect("import tblgrid");
+        let cells = &imported["content"][0]["content"][0]["content"];
+        assert_eq!(
+            cells[0]["attrs"]["colwidth"],
+            json!([160]), // 2400 twips / 15
+        );
+        assert_eq!(cells[1]["attrs"]["colwidth"], json!([240])); // 3600 / 15
+        std::fs::remove_file(path).expect("cleanup docx");
+    }
+
+    #[test]
     fn imports_embedded_images_as_data_uris() {
         let path =
             std::env::temp_dir().join(format!("redoc-docx-image-{}.docx", std::process::id()));
@@ -3016,8 +4008,12 @@ mod tests {
         let bytes = export_doc_to_docx(&source, "Image").expect("export image");
         let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read docx");
         let names = archive.file_names().map(str::to_string).collect::<Vec<_>>();
+        // docx-rs mints image rIds from a process-global counter, so the
+        // exact index varies with test order; only the media part matters.
         assert!(
-            names.contains(&"word/media/rIdImage1.png".to_string()),
+            names
+                .iter()
+                .any(|name| name.starts_with("word/media/rIdImage")),
             "media entries: {names:?}"
         );
     }
@@ -3096,6 +4092,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_javascript_and_data_hyperlinks() {
+        assert!(super::safe_doc_hyperlink("javascript:alert(1)").is_none());
+        assert!(super::safe_doc_hyperlink("data:text/html,hi").is_none());
+        assert!(super::safe_doc_hyperlink("vbscript:msgbox(1)").is_none());
+        assert_eq!(
+            super::safe_doc_hyperlink("https://example.com").as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            super::safe_doc_hyperlink("#Heading 1").as_deref(),
+            Some("internal:Heading 1")
+        );
+    }
+
+    #[test]
     fn imports_hyperlinks_as_link_marks_without_warning() {
         let source = json!({
             "type": "doc",
@@ -3157,5 +4168,505 @@ mod tests {
             .expect("read document");
         assert!(document.contains("gridSpan"));
         assert!(document.contains("vMerge"));
+    }
+
+    #[test]
+    fn round_trips_bookmarks_and_internal_hyperlinks() {
+        let source = json!({
+            "type": "doc",
+            "content": [
+                { "type": "paragraph", "content": [
+                    { "type": "text", "text": "Jump to ", "marks": [] },
+                    { "type": "text", "text": "target", "marks": [
+                        { "type": "link", "attrs": { "href": "internal:Target" } }
+                    ] }
+                ] },
+                { "type": "paragraph", "content": [
+                    { "type": "text", "text": "Here", "marks": [
+                        { "type": "bookmark", "attrs": { "name": "Target" } }
+                    ] }
+                ] }
+            ]
+        });
+        let bytes = export_doc_to_docx(&source, "Bookmarks").expect("export bookmarks");
+        {
+            let mut archive =
+                zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("read docx zip");
+            let mut document = String::new();
+            archive
+                .by_name("word/document.xml")
+                .expect("document part")
+                .read_to_string(&mut document)
+                .expect("read document");
+            assert!(
+                document.contains("<w:bookmarkStart"),
+                "bookmarkStart must be present, got: {document}"
+            );
+            assert!(document.contains("w:name=\"Target\""));
+            assert!(document.contains("<w:bookmarkEnd"));
+            assert!(
+                document.contains("w:anchor=\"Target\""),
+                "internal link must export as a w:anchor hyperlink, got: {document}"
+            );
+        }
+        let path = std::env::temp_dir().join(format!(
+            "redoc-docx-bookmarks-{}-{}.docx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, bytes).expect("write docx");
+        let result = import_docx_to_doc_with_report(&path).expect("import bookmarks");
+        std::fs::remove_file(path).expect("cleanup docx");
+
+        let link_run = result.document["content"][0]["content"][1].clone();
+        let link_mark = link_run["marks"]
+            .as_array()
+            .and_then(|marks| marks.iter().find(|mark| mark["type"] == "link"))
+            .expect("internal link should import as a link mark");
+        assert_eq!(link_mark["attrs"]["href"], "internal:Target");
+        let target_run = result.document["content"][1]["content"][0].clone();
+        assert!(
+            target_run["marks"]
+                .as_array()
+                .is_some_and(|marks| marks.iter().any(|mark| mark["type"] == "bookmark")),
+            "bookmark should import as a bookmark mark"
+        );
+    }
+
+    #[test]
+    fn round_trips_native_page_fields_in_document_body() {
+        let source = json!({
+            "type": "doc",
+            "content": [{
+                "type": "paragraph",
+                "content": [
+                    { "type": "text", "text": "Page " },
+                    { "type": "field", "attrs": { "kind": "page", "result": "3" } },
+                    { "type": "text", "text": " of " },
+                    { "type": "field", "attrs": { "kind": "numPages", "result": "9" } }
+                ]
+            }]
+        });
+        let bytes = export_doc_to_docx(&source, "Fields").expect("export fields");
+        {
+            let mut archive =
+                zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("read docx zip");
+            let mut document = String::new();
+            archive
+                .by_name("word/document.xml")
+                .expect("document part")
+                .read_to_string(&mut document)
+                .expect("read document");
+            assert!(
+                document.contains("PAGE"),
+                "body field must export native PAGE instruction"
+            );
+            assert!(document.contains("NUMPAGES"));
+            assert!(document.contains("fldChar"));
+        }
+        let path = std::env::temp_dir().join(format!(
+            "redoc-docx-body-fields-{}-{}.docx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, bytes).expect("write docx");
+        let imported = import_docx_to_doc(&path).expect("import fields");
+        std::fs::remove_file(path).expect("cleanup docx");
+        let runs = imported["content"][0]["content"].as_array().unwrap();
+        let fields: Vec<&Value> = runs.iter().filter(|node| node["type"] == "field").collect();
+        assert_eq!(fields.len(), 2, "both fields must round-trip: {runs:?}");
+        assert_eq!(fields[0]["attrs"]["kind"], "page");
+        assert_eq!(fields[1]["attrs"]["kind"], "numPages");
+        // Cached results are dropped; the editor recomputes them.
+        assert!(fields[0]["attrs"]["result"].is_null());
+    }
+
+    #[test]
+    fn imports_simple_page_field_with_cached_result() {
+        let path = std::env::temp_dir().join(format!(
+            "redoc-docx-page-field-{}-{}.docx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        archive
+            .start_file("word/document.xml", options)
+            .expect("start document");
+        std::io::Write::write_all(
+            &mut archive,
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Page </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#,
+        )
+        .expect("write document");
+        let bytes = archive.finish().expect("finish docx").into_inner();
+        std::fs::write(&path, bytes).expect("write docx");
+        let result = import_docx_to_doc_with_report(&path).expect("import page field");
+        std::fs::remove_file(path).expect("cleanup docx");
+        let runs = result.document["content"][0]["content"].as_array().unwrap();
+        let field = runs
+            .iter()
+            .find(|node| node["type"] == "field")
+            .expect("PAGE field should import as a field node");
+        assert_eq!(field["attrs"]["kind"], "page");
+        // The cached "7" result text must not leak into the body.
+        assert!(
+            !runs.iter().any(|node| node["text"] == "7"),
+            "cached field result must not leak: {runs:?}"
+        );
+    }
+
+    #[test]
+    fn skips_unsupported_simple_field_with_warning() {
+        let path = std::env::temp_dir().join(format!(
+            "redoc-docx-unsupported-field-{}-{}.docx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        archive
+            .start_file("word/document.xml", options)
+            .expect("start document");
+        std::io::Write::write_all(
+            &mut archive,
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Doc </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TIME \@ "HH:mm"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>14:32</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#,
+        )
+        .expect("write document");
+        let bytes = archive.finish().expect("finish docx").into_inner();
+        std::fs::write(&path, bytes).expect("write docx");
+        let result = import_docx_to_doc_with_report(&path).expect("import time field");
+        std::fs::remove_file(path).expect("cleanup docx");
+        let runs = result.document["content"][0]["content"].as_array().unwrap();
+        assert!(
+            !runs.iter().any(|node| node["type"] == "field"),
+            "TIME fields are not supported and must not become field nodes: {runs:?}"
+        );
+        assert!(
+            !runs.iter().any(|node| node["text"] == "14:32"),
+            "cached unsupported-field result must not leak: {runs:?}"
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Word fields were skipped")),
+            "unsupported fields should warn: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn exports_bounded_paragraph_spacing() {
+        let source = json!({
+            "type": "doc",
+            "content": [
+                { "type": "paragraph", "attrs": { "spacingBefore": 12, "spacingAfter": 6 }, "content": [{ "type": "text", "text": "Spaced" }] },
+                { "type": "paragraph", "attrs": { "spacingBefore": 90_000.0, "spacingAfter": -5.0 }, "content": [{ "type": "text", "text": "Clamped" }] }
+            ]
+        });
+        let bytes = export_doc_to_docx(&source, "Spacing").expect("export spacing");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read docx");
+        let mut document = String::new();
+        archive
+            .by_name("word/document.xml")
+            .expect("document part")
+            .read_to_string(&mut document)
+            .expect("read document");
+        assert!(
+            document.contains("w:before=\"240\""),
+            "12pt spacingBefore -> 240 twips, got: {document}"
+        );
+        assert!(document.contains("w:after=\"120\""));
+        // Negative values clamp to 0; oversized values clamp to the Word max.
+        assert!(
+            !document.contains("w:before=\"-"),
+            "spacing must never be negative"
+        );
+        assert!(document.contains("w:before=\"63360\""));
+    }
+
+    #[test]
+    fn round_trips_paragraph_layout_attributes() {
+        let source = json!({
+            "type": "doc",
+            "content": [{
+                "type": "paragraph",
+                "attrs": {
+                    "align": "center",
+                    "indent": 1.5,
+                    "lineHeight": 2.0,
+                    "spacingBefore": 6,
+                    "spacingAfter": 10
+                },
+                "content": [{ "type": "text", "text": "Layout" }]
+            }]
+        });
+        let path = std::env::temp_dir().join(format!(
+            "redoc-docx-layout-{}-{}.docx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            export_doc_to_docx(&source, "Layout").expect("export layout"),
+        )
+        .expect("write docx");
+        let imported = import_docx_to_doc(&path).expect("import layout");
+        std::fs::remove_file(path).expect("cleanup docx");
+        let attrs = &imported["content"][0]["attrs"];
+        assert_eq!(attrs["align"], "center");
+        assert_eq!(attrs["indent"], 1.5);
+        assert_eq!(attrs["lineHeight"], 2.0);
+        assert_eq!(attrs["spacingBefore"], 6.0);
+        assert_eq!(attrs["spacingAfter"], 10.0);
+    }
+
+    #[test]
+    fn exports_table_column_widths_and_rectangular_merges() {
+        let source = json!({
+            "type": "doc",
+            "content": [{
+                "type": "table",
+                "content": [
+                    { "type": "table_row", "content": [
+                        { "type": "table_cell", "attrs": { "colwidth": [160] }, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "A" }] }] },
+                        { "type": "table_cell", "attrs": { "colspan": 2, "colwidth": [240, 320] }, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "B" }] }] }
+                    ] },
+                    { "type": "table_row", "content": [
+                        { "type": "table_cell", "attrs": { "colspan": 3, "rowspan": 3 }, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Merged" }] }] }
+                    ] },
+                    { "type": "table_row", "content": [] },
+                    { "type": "table_row", "content": [] }
+                ]
+            }]
+        });
+        let bytes = export_doc_to_docx(&source, "Grid").expect("export grid");
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).expect("read docx");
+        let mut document = String::new();
+        archive
+            .by_name("word/document.xml")
+            .expect("document part")
+            .read_to_string(&mut document)
+            .expect("read document");
+        // gridCol widths from colwidth attrs (px * 15 twips at 96dpi).
+        assert!(
+            document.contains("<w:gridCol w:w=\"2400\""),
+            "160px -> 2400 twips gridCol, got: {document}"
+        );
+        assert!(document.contains("<w:gridCol w:w=\"3600\""));
+        assert!(document.contains("<w:gridCol w:w=\"4800\""));
+        // Every row covers the same 3-column grid: the two rows below the
+        // rowspan=3 Restart cell each carry a colspan-3 vMerge=Continue cell.
+        let vmerge_continue = document.matches("w:val=\"continue\"").count();
+        assert!(
+            vmerge_continue >= 2,
+            "covered vMerge=Continue cells must keep rows rectangular, got {vmerge_continue}"
+        );
+        let tr_count = document.matches("<w:tr>").count();
+        assert_eq!(tr_count, 4);
+        // Round-trip: import reconstructs colspan / vmerge attrs.
+        let path = std::env::temp_dir().join(format!(
+            "redoc-docx-grid-{}-{}.docx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, bytes).expect("write docx");
+        let imported = import_docx_to_doc(&path).expect("import grid");
+        std::fs::remove_file(path).expect("cleanup docx");
+        let merged = &imported["content"][0]["content"][1]["content"][0];
+        assert_eq!(merged["attrs"]["colspan"], 3);
+        assert_eq!(merged["attrs"]["vmerge"], "restart");
+    }
+
+    #[test]
+    fn round_trips_table_header_rows() {
+        let source = json!({
+            "type": "doc",
+            "content": [{
+                "type": "table",
+                "content": [
+                    { "type": "table_row", "content": [
+                        { "type": "table_header", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Head" }] }] },
+                        { "type": "table_header", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Cols" }] }] }
+                    ] },
+                    { "type": "table_row", "content": [
+                        { "type": "table_cell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "A1" }] }] },
+                        { "type": "table_cell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "B1" }] }] }
+                    ] }
+                ]
+            }]
+        });
+        let bytes = export_doc_to_docx(&source, "Header").expect("export header table");
+        {
+            let mut archive =
+                zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("read docx zip");
+            let mut document = String::new();
+            archive
+                .by_name("word/document.xml")
+                .expect("document part")
+                .read_to_string(&mut document)
+                .expect("read document");
+            assert!(
+                document.contains("<w:tblHeader/>"),
+                "header row must carry w:tblHeader, got: {document}"
+            );
+        }
+        let path = std::env::temp_dir().join(format!(
+            "redoc-docx-header-{}-{}.docx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, bytes).expect("write docx");
+        let imported = import_docx_to_doc(&path).expect("import header table");
+        std::fs::remove_file(path).expect("cleanup docx");
+        let cells = imported["content"][0]["content"][0]["content"]
+            .as_array()
+            .unwrap();
+        assert!(
+            cells.iter().all(|cell| cell["type"] == "table_header"),
+            "tblHeader rows import back as table_header cells: {cells:?}"
+        );
+    }
+
+    #[test]
+    fn exports_ordered_list_start_values() {
+        let source = json!({
+            "type": "doc",
+            "content": [{
+                "type": "ordered_list",
+                "attrs": { "order": 5 },
+                "content": [
+                    { "type": "list_item", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Fifth" }] }] },
+                    { "type": "list_item", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Sixth" }] }] }
+                ]
+            }]
+        });
+        let path = std::env::temp_dir().join(format!(
+            "redoc-docx-list-start-{}-{}.docx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            export_doc_to_docx(&source, "List start").expect("export list start"),
+        )
+        .expect("write docx");
+        {
+            let file = std::fs::File::open(&path).expect("reopen docx");
+            let mut archive = zip::ZipArchive::new(file).expect("read docx zip");
+            let mut numbering = String::new();
+            archive
+                .by_name("word/numbering.xml")
+                .expect("numbering part")
+                .read_to_string(&mut numbering)
+                .expect("read numbering");
+            assert!(
+                numbering.contains("w:startOverride w:val=\"5\""),
+                "start override must be written, got: {numbering}"
+            );
+        }
+        let imported = import_docx_to_doc(&path).expect("import list start");
+        std::fs::remove_file(path).expect("cleanup docx");
+        assert_eq!(imported["content"][0]["type"], "ordered_list");
+        assert_eq!(
+            imported["content"][0]["attrs"]["order"], 5,
+            "ordered_list start must round-trip"
+        );
+    }
+
+    #[test]
+    fn exports_comment_thread_replies() {
+        let source = json!({
+            "type": "doc",
+            "content": [{
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Hello world" }]
+            }],
+            "comments": [{
+                "id": "comment-1",
+                "author": "Reviewer",
+                "text": "Check this",
+                "from": 1,
+                "to": 6,
+                "resolved": false,
+                "createdAt": "2026-08-31T00:00:00Z",
+                "replies": [{
+                    "id": "reply-1",
+                    "author": "Author",
+                    "text": "Fixed in rev 2",
+                    "createdAt": "2026-08-31T01:00:00Z"
+                }]
+            }]
+        });
+        let bytes = export_doc_to_docx(&source, "Threaded").expect("export thread");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read docx");
+        let mut comments_xml = String::new();
+        archive
+            .by_name("word/comments.xml")
+            .expect("comments xml")
+            .read_to_string(&mut comments_xml)
+            .expect("read comments xml");
+        assert!(comments_xml.contains("Check this"));
+        assert!(comments_xml.contains("Fixed in rev 2"));
+        assert!(comments_xml.contains("Author"));
+    }
+
+    #[test]
+    fn exports_image_dimensions_from_attrs() {
+        let source = json!({
+            "type": "doc",
+            "content": [{
+                "type": "paragraph",
+                "content": [{
+                    "type": "image",
+                    "attrs": {
+                        "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                        "alt": "pixel",
+                        "width": 640,
+                        "height": 480
+                    }
+                }]
+            }]
+        });
+        let bytes = export_doc_to_docx(&source, "Dims").expect("export image dims");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("read docx");
+        let mut document = String::new();
+        archive
+            .by_name("word/document.xml")
+            .expect("document part")
+            .read_to_string(&mut document)
+            .expect("read document");
+        // 640px -> 6096000 EMU, 480px -> 4572000 EMU (9525 EMU per px).
+        assert!(
+            document.contains("cx=\"6096000\"") && document.contains("cy=\"4572000\""),
+            "image extents must honor width/height attrs, got: {document}"
+        );
     }
 }

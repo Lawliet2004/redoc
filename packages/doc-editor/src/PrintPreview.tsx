@@ -1,4 +1,4 @@
-import { createSignal, createEffect, onCleanup, JSX } from "solid-js";
+import { createSignal, createEffect, onCleanup, For, JSX } from "solid-js";
 import type { PageSetupConfig } from "./PageSetupDialog";
 import {
   DEFAULT_PAGE_SETUP,
@@ -20,6 +20,23 @@ export function PrintPreview(props: PrintPreviewProps) {
   const [orientation, setOrientation] = createSignal<PageSetupConfig["orientation"]>(initialSetup.orientation);
   const [marginValues, setMarginValues] = createSignal(initialSetup.margins);
   const pageCount = normalizePreviewPageCount(props.pageCount);
+
+  // Split the serialized body on explicit page-break markers so each preview
+  // page shows only the content that belongs to it; without markers the whole
+  // body flows through the estimated page count's page frames.
+  const pages = () => {
+    const marker = /<div[^>]*data-page-break="true"[^>]*>[\s\S]*?<\/div>|<div[^>]*data-page-break="true"[^>]*><\/div>/g;
+    const parts = props.content.split(marker);
+    if (parts.length <= 1) {
+      const estimated = Math.max(1, pageCount);
+      return Array.from({ length: estimated }, (_unused, index) =>
+        index === 0 ? props.content : "",
+      );
+    }
+    const explicitPages = parts.length;
+    if (explicitPages >= pageCount) return parts;
+    return [...parts, ...Array.from({ length: pageCount - explicitPages }, () => "")];
+  };
 
   const marginPreset = () => {
     const value = marginValues();
@@ -217,23 +234,27 @@ export function PrintPreview(props: PrintPreviewProps) {
       </div>
 
       <div class="print-preview-content">
-        <div 
-          class="print-page"
-          style={{
-            width: getPageDimensions().width,
-            height: getPageDimensions().height,
-          }}
-        >
-          <div 
-            class="print-page-inner"
-            style={{
-              padding: getMargins()
-            }}
-            innerHTML={props.content}
-          />
-          {initialSetup.header && <div class="print-page-header">{formatPrintHeaderFooter(initialSetup.header, pageCount)}</div>}
-          {initialSetup.footer && <div class="print-page-footer">{formatPrintHeaderFooter(initialSetup.footer, pageCount)}</div>}
-        </div>
+        <For each={pages()}>
+          {(_page, index) => (
+            <div
+              class="print-page"
+              style={{
+                width: getPageDimensions().width,
+                height: getPageDimensions().height,
+              }}
+            >
+              <div
+                class="print-page-inner"
+                style={{
+                  padding: getMargins()
+                }}
+                innerHTML={pages()[index()] || "<p>&nbsp;</p>"}
+              />
+              {initialSetup.header && <div class="print-page-header">{formatPrintHeaderFooter(initialSetup.header, pageCount, index() + 1)}</div>}
+              {initialSetup.footer && <div class="print-page-footer">{formatPrintHeaderFooter(initialSetup.footer, pageCount, index() + 1)}</div>}
+            </div>
+          )}
+        </For>
       </div>
     </div>
   );

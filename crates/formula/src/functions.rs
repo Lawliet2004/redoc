@@ -1875,7 +1875,7 @@ fn eval_wrap(args: &[FormulaValue], by_rows: bool) -> FormulaValue {
     FormulaValue::Array(output, rows, cols)
 }
 
-const MAX_DYNAMIC_ARRAY_CELLS: usize = 100_000;
+pub const MAX_DYNAMIC_ARRAY_CELLS: usize = 100_000;
 
 fn sequence_dimension(value: &FormulaValue) -> Result<usize, FormulaError> {
     let FormulaValue::Number(value) = value else {
@@ -2785,13 +2785,19 @@ fn eval_index(args: &[FormulaValue]) -> FormulaValue {
         return FormulaValue::Error(FormulaError::Value);
     }
     if rows == 1 && cols > 1 {
-        let idx = (row_num - 1) as usize;
+        if args.len() >= 3 && row_num != 1 {
+            return FormulaValue::Error(FormulaError::Ref);
+        }
+        let idx = ((if args.len() < 3 { row_num } else { col_num }) - 1) as usize;
         return data
             .get(idx)
             .cloned()
             .unwrap_or(FormulaValue::Error(FormulaError::Ref));
     }
     if cols == 1 && rows > 1 {
+        if args.len() >= 3 && col_num != 1 {
+            return FormulaValue::Error(FormulaError::Ref);
+        }
         let idx = (row_num - 1) as usize;
         return data
             .get(idx)
@@ -4138,6 +4144,26 @@ mod tests {
                 &[matrix, FormulaValue::Number(2.0), FormulaValue::Number(2.0)]
             ),
             FormulaValue::Number(4.0)
+        );
+        let row = arr(
+            &[
+                FormulaValue::Number(10.0),
+                FormulaValue::Number(20.0),
+                FormulaValue::Number(30.0),
+            ],
+            1,
+            3,
+        );
+        assert_eq!(
+            eval_func("INDEX", &[row.clone(), FormulaValue::Number(2.0)]),
+            FormulaValue::Number(20.0)
+        );
+        assert_eq!(
+            eval_func(
+                "INDEX",
+                &[row, FormulaValue::Number(1.0), FormulaValue::Number(2.0)]
+            ),
+            FormulaValue::Number(20.0)
         );
     }
 

@@ -62,4 +62,15 @@ describe("conditional formatting", () => {
     expect(conditionalStyleForCell(cell("-5"), 1, 1, [rule])?.conditionalBarPercent).toBe(0);
     expect(conditionalStyleForCell(cell("30"), 1, 1, [{ ...rule, value: "10", value2: "50" }])?.conditionalBarPercent).toBe(0.5);
   });
+
+  it("evaluates conditional formatting correctly for formula-derived and formatted cells", () => {
+    const formulaCell: GridCell = { raw: "=SUM(A1:A5)", display: "150" };
+    const rule = { range, type: "greaterThan" as const, value: "100", style: { fontColor: "#16a34a" } };
+    expect(conditionalRuleMatches(formulaCell, 2, 2, rule)).toBe(true);
+    expect(conditionalStyleForCell(formulaCell, 2, 2, [rule])?.fontColor).toBe("#16a34a");
+
+    const currencyCell: GridCell = { raw: "=B2*1.2", display: "$1,250.00" };
+    const currencyRule = { range, type: "greaterThan" as const, value: "1000", style: { bold: true } };
+    expect(conditionalRuleMatches(currencyCell, 2, 2, currencyRule)).toBe(true);
+  });
 });

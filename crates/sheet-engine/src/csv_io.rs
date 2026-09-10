@@ -27,7 +27,7 @@ pub fn export_sheet_to_csv(sheet: &SheetData) -> String {
                 .unwrap_or_default();
 
             // Handle CSV quoting
-            if val.contains(',') || val.contains('"') || val.contains('\n') {
+            if val.contains(',') || val.contains('"') || val.contains('\n') || val.contains('\r') {
                 let escaped = val.replace('"', "\"\"");
                 row_vals.push(format!("\"{}\"", escaped));
             } else {
@@ -37,7 +37,7 @@ pub fn export_sheet_to_csv(sheet: &SheetData) -> String {
         lines.push(row_vals.join(","));
     }
 
-    lines.join("\n")
+    format!("\u{feff}{}", lines.join("\n"))
 }
 
 pub fn import_csv_to_sheet(csv_content: &str, sheet_name: &str) -> SheetData {
@@ -154,5 +154,50 @@ mod tests {
         let latin1 = [b'N', b'a', b'm', b'e', b',', 0xC9, b't', b'\n'];
         let sheet = import_csv_bytes_to_sheet(&latin1, "Latin1");
         assert_eq!(sheet.cells["1:2"].raw_value, "Ét");
+    }
+
+    fn sheet_with(cells: &[(&str, &str)]) -> SheetData {
+        let mut sheet = SheetData::new("s", "Test");
+        for (key, value) in cells {
+            sheet.cells.insert(
+                key.to_string(),
+                SheetCell {
+                    raw_value: value.to_string(),
+                    display_value: value.to_string(),
+                    formula: None,
+                    style: None,
+                },
+            );
+        }
+        sheet
+    }
+
+    #[test]
+    fn exports_leading_bom_for_excel() {
+        let sheet = sheet_with(&[("1:1", "Name"), ("1:2", "Qty")]);
+        let csv = export_sheet_to_csv(&sheet);
+        assert!(csv.starts_with('\u{feff}'));
+        assert!(csv["Name,Qty".len()..].starts_with("Name,Qty") || csv.contains("Name,Qty"));
+    }
+
+    #[test]
+    fn exports_quotes_fields_with_carriage_returns() {
+        let sheet = sheet_with(&[("1:1", "two\r\nlines")]);
+        let csv = export_sheet_to_csv(&sheet);
+        assert_eq!(csv, "\u{feff}\"two\r\nlines\"");
+    }
+
+    #[test]
+    fn export_import_round_trips_quoted_fields() {
+        let sheet = sheet_with(&[
+            ("1:1", "a,b"),
+            ("1:2", "say \"hi\""),
+            ("1:3", "multi\nline"),
+        ]);
+        let csv = export_sheet_to_csv(&sheet);
+        let imported = import_csv_to_sheet(&csv, "Test");
+        assert_eq!(imported.cells["1:1"].raw_value, "a,b");
+        assert_eq!(imported.cells["1:2"].raw_value, "say \"hi\"");
+        assert_eq!(imported.cells["1:3"].raw_value, "multi\nline");
     }
 }

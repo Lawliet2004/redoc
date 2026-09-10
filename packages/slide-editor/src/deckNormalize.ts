@@ -3,6 +3,15 @@ import { isShapeType, type ShapeType } from "./shapeUtils";
 export const PLACEHOLDER_TITLE = "Click to add Title";
 export const PLACEHOLDER_BODY = "Click to add Text";
 
+/** Collision-resistant element/slide id; falls back when crypto.randomUUID
+ * is unavailable (older WebViews, insecure contexts). */
+export function generateSlideId(prefix: string): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export type SlideTransition = "none" | "fade" | "slide-left" | "slide-right" | "wipe-left" | "wipe-right" | "zoom" | "dissolve" | "morph";
 export type ElementEntrance = "none" | "fade" | "zoom";
 export type ElementExit = "none" | "fade";
@@ -67,6 +76,8 @@ export interface SlideElement {
   lineWidth?: number;
   shadow?: boolean;
   mediaMime?: string;
+  /** True for scaffolded placeholder text — safe to replace when applying a layout. */
+  placeholder?: boolean;
 }
 
 export interface SlideComment {
@@ -245,6 +256,32 @@ export function resolveSlideChrome(
     date: showDate ? (master?.dateText?.trim() ? master.dateText : new Date().toISOString().slice(0, 10)) : null,
     number: showNumber ? String(index + 1) : null,
   };
+}
+
+/** Master chrome as concrete overlay boxes for editor/presenter rendering. */
+export function slideChromeOverlays(
+  slide: Slide,
+  masters: SlideMaster[],
+  index: number,
+  canvasWidth: number,
+  canvasHeight: number,
+): Array<{ key: string; text: string; x: number; y: number; width: number; fontSize: number; align: "left" | "center" | "right" }> {
+  const chrome = resolveSlideChrome(slide, masters, index);
+  const overlays: Array<{ key: string; text: string; x: number; y: number; width: number; fontSize: number; align: "left" | "center" | "right" }> = [];
+  const footerY = Math.max(20, canvasHeight - 28);
+  if (chrome.header) {
+    overlays.push({ key: "header", text: chrome.header, x: 40, y: 8, width: canvasWidth - 80, fontSize: 12, align: "center" });
+  }
+  if (chrome.footer) {
+    overlays.push({ key: "footer", text: chrome.footer, x: 40, y: footerY, width: canvasWidth / 3 - 60, fontSize: 11, align: "left" });
+  }
+  if (chrome.date) {
+    overlays.push({ key: "date", text: chrome.date, x: canvasWidth / 3, y: footerY, width: canvasWidth / 3, fontSize: 11, align: "center" });
+  }
+  if (chrome.number) {
+    overlays.push({ key: "number", text: chrome.number, x: canvasWidth - 100, y: footerY, width: 60, fontSize: 11, align: "right" });
+  }
+  return overlays;
 }
 
 /** Bounded per-slide comment list for the review sidebar. */
@@ -433,6 +470,30 @@ export function normalizeChartData(value: unknown): number[] {
   return data.length ? data : [3, 5, 2, 8];
 }
 
+export const CHART_TYPES = ["bar", "line", "pie"] as const;
+export type ChartType = (typeof CHART_TYPES)[number];
+
+export function isChartType(value: unknown): value is ChartType {
+  return value === "bar" || value === "line" || value === "pie";
+}
+
+/** Per-category color matching the editor/presenter/PDF hsl(i*47) palette. */
+export function chartSeriesColor(index: number): string {
+  return `hsl(${(index * 47) % 360}, 65%, 55%)`;
+}
+
+/** Bounded deck canvas size; non-finite or non-positive values fall back to 960x540. */
+export function normalizeCanvasSize(
+  width: unknown,
+  height: unknown,
+): { width: number; height: number } {
+  const parse = (value: unknown, fallback: number) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? Math.min(5120, Math.max(320, Math.round(n))) : fallback;
+  };
+  return { width: parse(width, 960), height: parse(height, 540) };
+}
+
 export function normalizeChartLabels(value: unknown): string[] {
   if (!Array.isArray(value)) return ["A", "B", "C", "D"];
   return value.slice(0, 24).map((label) => String(label ?? "").slice(0, 80));
@@ -449,8 +510,8 @@ export function parseInternalSlideId(value: string): string | null {
 export function normalizeDeck(deck: any): Slide[] {
   if (!deck?.slides?.length) return [{
     id: "slide-1", title: "Title Slide", layout: "title", notes: "", transition: "none", elements: [
-      { id: "el-1", type: "text", x: 100, y: 180, width: 760, height: 80, content: PLACEHOLDER_TITLE, fontSize: 40, color: "#1e293b", rotation: 0, align: "center" },
-      { id: "el-2", type: "text", x: 150, y: 280, width: 660, height: 50, content: PLACEHOLDER_BODY, fontSize: 22, color: "#64748b", rotation: 0, align: "center" },
+      { id: "el-1", type: "text", x: 100, y: 180, width: 760, height: 80, content: PLACEHOLDER_TITLE, fontSize: 40, color: "#1e293b", rotation: 0, align: "center", placeholder: true },
+      { id: "el-2", type: "text", x: 150, y: 280, width: 660, height: 50, content: PLACEHOLDER_BODY, fontSize: 22, color: "#64748b", rotation: 0, align: "center", placeholder: true },
     ],
   }];
   const deckFade = Boolean(deck.fadeBetweenSlides);

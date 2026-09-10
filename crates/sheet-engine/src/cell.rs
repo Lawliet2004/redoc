@@ -11,7 +11,10 @@ pub struct CellStyle {
     pub font_color: Option<String>,
     pub bg_color: Option<String>,
     pub align: Option<String>,  // "left" | "center" | "right"
-    pub format: Option<String>, // "general" | "currency" | "percent" | "number"
+    pub format: Option<String>, // "general" | "currency" | "percent" | "number" | "date" | "custom"
+    /// Excel-style format code applied when format == "custom".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_code: Option<String>,
     #[serde(default)]
     pub wrap: Option<bool>,
     #[serde(default)]

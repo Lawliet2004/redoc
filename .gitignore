@@ -8,7 +8,6 @@ build/
 # Rust / Cargo
 /target/
 **/*.rs.bk
-Cargo.lock
 
 # Tauri
 apps/desktop/src-tauri/target/

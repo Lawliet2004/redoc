@@ -23,14 +23,14 @@ function makeSetter<T>(): { value: T; setter: (next: T | ((prev: T) => T)) => vo
 }
 
 /** A fresh per-sheet data cache backed by a mutable record. */
-function createCache(): { value: Record<number, any> } {
-  const cache = makeSetter<Record<number, any>>();
+function createCache(): { value: Record<string, any> } {
+  const cache = makeSetter<Record<string, any>>();
   cache.value = {};
   return cache;
 }
 
 function buildMinimalContext(overrides: Partial<Parameters<typeof buildWorkbookFromCells>[0]> = {}) {
-  const cache = makeSetter<Record<number, any>>();
+  const cache = makeSetter<Record<string, any>>();
   cache.value = {};
 
   return {
@@ -45,6 +45,8 @@ function buildMinimalContext(overrides: Partial<Parameters<typeof buildWorkbookF
     rowHeight: makeAccessor(24),
     columnWidths: makeAccessor({ 3: 140 }),
     rowHeights: makeAccessor({ 4: 32 }),
+    hiddenCols: makeAccessor([]),
+    hiddenRows: makeAccessor([]),
     selectionAnchor: makeAccessor({ row: 1, col: 1 }),
     activeCell: makeAccessor({ row: 2, col: 3 }),
     chartType: makeAccessor<"bar" | "line" | "pie" | "area" | "scatter" | "doughnut" | null>(null),

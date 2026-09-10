@@ -29,13 +29,29 @@ export function normalizePreviewPageCount(value: unknown): number {
   return Math.max(1, Math.min(MAX_PREVIEW_PAGE_COUNT, numeric));
 }
 
-export function formatPrintHeaderFooter(value: unknown, pageCount: unknown, currentPage = 1): string {
+export function formatPrintHeaderFooter(value: unknown, pageCount: unknown, currentPage: number | string = 1): string {
   if (typeof value !== "string") return "";
   const pages = normalizePreviewPageCount(pageCount);
-  const page = Math.max(1, Math.min(pages, normalizePreviewPageCount(currentPage)));
+  // CSS counter strings (e.g., "counter(page)") are passed through as-is for
+  // print media where position:fixed chrome would otherwise repeat identical
+  // page numbers on every page. For preview, concrete numbers are used.
+  let page: string;
+  if (typeof currentPage === "string") {
+    const trimmed = currentPage.trim();
+    if (trimmed === "") {
+      page = "";
+    } else if (trimmed.startsWith("counter(")) {
+      // CSS counter expression — use as-is for print, show placeholder for preview
+      page = trimmed;
+    } else {
+      page = String(Math.max(1, Math.min(pages, normalizePreviewPageCount(trimmed))));
+    }
+  } else {
+    page = String(Math.max(1, Math.min(pages, normalizePreviewPageCount(currentPage))));
+  }
   return value
     .slice(0, MAX_PAGE_SETUP_TEXT)
-    .replace(/{page}/gi, String(page))
+    .replace(/{page}/gi, page)
     .replace(/{pages}/gi, String(pages))
     .replace(/{total}/gi, String(pages));
 }

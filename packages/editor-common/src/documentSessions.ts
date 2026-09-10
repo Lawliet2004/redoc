@@ -8,6 +8,8 @@ export type DocumentSession<T = unknown> = {
   filePath: string | null;
   docId: string | null;
   saveState: "Saved" | "Saving" | "Dirty" | "Error";
+  readOnly?: boolean;
+  readOnlyReason?: string | null;
 };
 
 /** Returns a new list with the session inserted or replaced by id. */

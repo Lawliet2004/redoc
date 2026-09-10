@@ -7,6 +7,9 @@ interface DialogProps {
   onClose: () => void;
 }
 
+// Track number of open dialogs to manage inert state
+let openDialogCount = 0;
+
 export function Dialog(props: ParentProps<DialogProps>) {
   let dialogRef!: HTMLDivElement;
   let previouslyFocused: HTMLElement | null = null;
@@ -38,19 +41,47 @@ export function Dialog(props: ParentProps<DialogProps>) {
     }
   };
 
+  // Manage inert state on main content when dialog opens/closes
+  const setMainContentInert = (inert: boolean) => {
+    // Find main content areas and set inert
+    const mainContent = document.querySelectorAll('main, [role="main"], #canvas-pane, .g-canvas-area');
+    mainContent.forEach((el) => {
+      if (inert) {
+        el.setAttribute('inert', '');
+      } else {
+        el.removeAttribute('inert');
+      }
+    });
+  };
+
   createEffect(() => {
     if (props.open) {
       previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      openDialogCount++;
+      setMainContentInert(true);
       queueMicrotask(() => {
         const first = dialogRef?.querySelector<HTMLElement>(focusableSelector);
         (first || dialogRef)?.focus();
       });
-    } else if (previouslyFocused) {
-      previouslyFocused.focus();
-      previouslyFocused = null;
+    } else {
+      openDialogCount = Math.max(0, openDialogCount - 1);
+      if (openDialogCount === 0) {
+        setMainContentInert(false);
+      }
+      if (previouslyFocused) {
+        previouslyFocused.focus();
+        previouslyFocused = null;
+      }
     }
   });
-  onCleanup(() => previouslyFocused?.focus());
+
+  onCleanup(() => {
+    previouslyFocused?.focus();
+    openDialogCount = Math.max(0, openDialogCount - 1);
+    if (openDialogCount === 0) {
+      setMainContentInert(false);
+    }
+  });
 
   return (
     <Show when={props.open}>

@@ -209,8 +209,10 @@ fn cache_definition_xml(plan: &PivotPlan) -> String {
                 if value.is_none_or(|value| value.is_empty()) || shared.len() >= MAX_SHARED_ITEMS {
                     continue;
                 }
-                if !shared.contains(&value.unwrap()) {
-                    shared.push(value.unwrap());
+                if let Some(v) = value {
+                    if !shared.contains(&v) {
+                        shared.push(v);
+                    }
                 }
             }
             fields_xml.push_str(&format!("<sharedItems count=\"{}\">", shared.len()));

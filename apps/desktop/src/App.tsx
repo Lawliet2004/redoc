@@ -1,5 +1,5 @@
 import { createSignal, onMount, onCleanup, Show, For, lazy, Suspense, createEffect } from "solid-js";
-import { Button, ToastContainer, showToast, Dialog, ConfirmDialog, t } from "@redoc/ui";
+import { Button, ToastContainer, showToast, Dialog, ConfirmDialog, ErrorBoundary, t } from "@redoc/ui";
 import { IconDoc, IconSheet, IconSlide, IconSettings, IconSave } from "@redoc/icons";
 import {
   CommandPalette,
@@ -98,6 +98,8 @@ export function App() {
   const [docTitle, setDocTitle] = createSignal("Untitled document");
   const [currentFilePath, setCurrentFilePath] = createSignal<string | null>(null);
   const [currentDocId, setCurrentDocId] = createSignal<string | null>(null);
+  const [docReadOnly, setDocReadOnly] = createSignal(false);
+  const [docReadOnlyWarning, setDocReadOnlyWarning] = createSignal<string | null>(null);
   const [saveState, setSaveState] = createSignal<"Saved" | "Saving" | "Dirty" | "Error">("Saved");
   const [zoomLevel, setZoomLevel] = createSignal(100);
   const [statusInfo, setStatusInfo] = createSignal("");
@@ -165,7 +167,17 @@ export function App() {
   const [openSessions, setOpenSessions] = createSignal<DocumentSession<any>[]>([]);
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null);
   let sessionCounter = 0;
+  const lastSessionByMode: Record<EditorMode, string | null> = { doc: null, sheet: null, slide: null };
+
+  const rememberCurrentSession = () => {
+    const mode = activeMode();
+    const id = activeSessionId();
+    if (mode !== "home" && id) lastSessionByMode[mode] = id;
+  };
   let autosaveTimer: number | undefined;
+  let autosaveMaxWaitTimer: number | undefined;
+  let firstPendingChangeAt: number | undefined;
+  const AUTOSAVE_MAX_WAIT_MS = 10_000;
 
   const newSessionId = () => {
     sessionCounter += 1;
@@ -180,6 +192,22 @@ export function App() {
     if (autosaveTimer !== undefined) {
       window.clearTimeout(autosaveTimer);
       autosaveTimer = undefined;
+    }
+    if (autosaveMaxWaitTimer !== undefined) {
+      window.clearTimeout(autosaveMaxWaitTimer);
+      autosaveMaxWaitTimer = undefined;
+    }
+    firstPendingChangeAt = undefined;
+  };
+
+  const clearAutosaveTimers = () => {
+    if (autosaveTimer !== undefined) {
+      window.clearTimeout(autosaveTimer);
+      autosaveTimer = undefined;
+    }
+    if (autosaveMaxWaitTimer !== undefined) {
+      window.clearTimeout(autosaveMaxWaitTimer);
+      autosaveMaxWaitTimer = undefined;
     }
   };
 
@@ -237,7 +265,7 @@ export function App() {
   };
 
   const confirmDiscardIfDirty = async (): Promise<boolean> => {
-    if (activeMode() !== "home" && saveState() === "Dirty") {
+    if (activeMode() !== "home" && (saveState() === "Dirty" || saveState() === "Error")) {
       return confirmDialog({
         title: "Unsaved changes",
         message: "You have unsaved changes. Do you want to discard them?",
@@ -261,6 +289,8 @@ export function App() {
       filePath: currentFilePath(),
       docId: currentDocId(),
       saveState: saveState(),
+      readOnly: docReadOnly(),
+      readOnlyReason: docReadOnlyWarning(),
     };
   };
 
@@ -287,12 +317,14 @@ export function App() {
     setCurrentFilePath(session.filePath);
     setCurrentDocId(session.docId);
     setSaveState(session.saveState);
+    setDocReadOnly(session.readOnly === true);
+    setDocReadOnlyWarning(session.readOnlyReason ?? null);
     setModeBuffers((previous) => ({ ...previous, [session.mode]: session }));
   };
 
   const activateSession = async (id: string) => {
     if (id === activeSessionId()) return;
-    if (!(await confirmDiscardIfDirty())) return;
+    rememberCurrentSession();
     syncCurrentSession();
     const target = openSessions().find((session) => session.id === id);
     if (target) loadSession(target);
@@ -301,7 +333,15 @@ export function App() {
   const closeSession = async (id: string) => {
     const target = openSessions().find((session) => session.id === id);
     if (!target) return;
-    if (id === activeSessionId() && !(await confirmDiscardIfDirty())) return;
+    let discardedDirty = false;
+    if (id === activeSessionId()) {
+      const dirty = activeMode() !== "home" && (saveState() === "Dirty" || saveState() === "Error");
+      if (dirty) {
+        const confirmed = await confirmDiscardIfDirty();
+        if (!confirmed) return;
+      }
+      discardedDirty = dirty;
+    }
     if (id !== activeSessionId() && (target.saveState === "Dirty" || target.saveState === "Error")) {
       const ok = await confirmDialog({
         title: "Unsaved changes",
@@ -309,10 +349,21 @@ export function App() {
         confirmLabel: "Close anyway",
       });
       if (!ok) return;
+      discardedDirty = true;
     }
     syncCurrentSession();
     const next = chooseAdjacentSession(openSessions(), id);
+    if (lastSessionByMode[target.mode] === id) lastSessionByMode[target.mode] = null;
     setOpenSessions((previous) => removeDocumentSession(previous, id));
+    // The user explicitly discarded this session's unsaved work; drop its
+    // autosave snapshot so it never resurfaces in the recovery list.
+    if (discardedDirty && target.docId) {
+      try {
+        await commands.discardDocSnapshot(target.docId);
+      } catch {
+        // Snapshot cleanup is best-effort; recovery list already tolerates misses.
+      }
+    }
     if (id !== activeSessionId()) return;
     if (next && next.id !== id) {
       loadSession(next);
@@ -336,7 +387,15 @@ export function App() {
     setModeBuffers((prev) => ({ ...prev, [mode]: snapshot }));
     const id = activeSessionId();
     if (id) {
-      setOpenSessions((prev) => upsertDocumentSession(prev, { id, mode, ...snapshot }));
+      setOpenSessions((prev) =>
+        upsertDocumentSession(prev, {
+          id,
+          mode,
+          ...snapshot,
+          readOnly: docReadOnly(),
+          readOnlyReason: docReadOnlyWarning(),
+        }),
+      );
     }
   };
 
@@ -372,6 +431,8 @@ export function App() {
       setCurrentDocId(buffer.docId);
       setDocContent(buffer.content);
       setSaveState(buffer.saveState);
+      setDocReadOnly(false);
+      setDocReadOnlyWarning(null);
       registerSession(mode, buffer);
     } catch {
       const buffer = emptyModeBuffer(mode);
@@ -388,11 +449,15 @@ export function App() {
   const handleSwitchMode = async (mode: EditorMode) => {
     const current = activeMode();
     if (current === mode) return;
-    if (!(await confirmDiscardIfDirty())) return;
     if (current !== "home") {
+      rememberCurrentSession();
       saveCurrentModeToBuffer();
     }
-    const target = openSessions().find((session) => session.mode === mode);
+    const lastId = lastSessionByMode[mode];
+    const sessions = openSessions();
+    const target =
+      (lastId ? sessions.find((session) => session.id === lastId && session.mode === mode) : undefined) ||
+      sessions.find((session) => session.mode === mode);
     if (target) {
       loadSession(target);
       return;
@@ -408,8 +473,10 @@ export function App() {
   };
 
   const goHome = async () => {
-    if (!(await confirmDiscardIfDirty())) return;
-    saveCurrentModeToBuffer();
+    if (activeMode() !== "home") {
+      rememberCurrentSession();
+      saveCurrentModeToBuffer();
+    }
     setActiveMode("home");
   };
 
@@ -417,8 +484,10 @@ export function App() {
     cancelAutosave();
     try {
       const opened = await commands.openDocument(path);
-      setImportWarnings([]);
+      setImportWarnings(opened.warnings ?? []);
       const mode = opened.meta.mode;
+      const readOnly = opened.meta.readOnly === true;
+      const readOnlyWarning = readOnly ? opened.meta.warning ?? null : null;
       if (mode === "doc" || mode === "sheet" || mode === "slide") {
         const buffer: ModeBuffer = {
           content: opened.body,
@@ -428,7 +497,7 @@ export function App() {
           saveState: "Saved",
         };
         const id = registerSession(mode, buffer);
-        loadSession({ id, mode, ...buffer });
+        loadSession({ id, mode, ...buffer, readOnly, readOnlyReason: readOnlyWarning });
       }
       else {
         setDocTitle(opened.meta.title);
@@ -436,6 +505,8 @@ export function App() {
         setCurrentDocId(opened.meta.id);
         setDocContent(opened.body);
         setSaveState("Saved");
+        setDocReadOnly(readOnly);
+        setDocReadOnlyWarning(readOnlyWarning);
       }
       setRecents(await commands.getRecents());
       showToast(`Opened ${opened.meta.title}`, "success");
@@ -452,21 +523,60 @@ export function App() {
   };
 
   const scheduleAutosave = (content: any) => {
-    cancelAutosave();
+    clearAutosaveTimers();
     const id = currentDocId();
     if (!id) return;
     const mode = activeMode();
     const title = docTitle();
     if (mode === "home") return;
-    autosaveTimer = window.setTimeout(() => {
+    if (firstPendingChangeAt === undefined) {
+      firstPendingChangeAt = Date.now();
+    }
+    const firstChange = firstPendingChangeAt;
+    const flush = () => {
+      clearAutosaveTimers();
+      firstPendingChangeAt = undefined;
       void commands.autosaveDocument(id, mode, title, content);
-    }, Math.max(500, settings().autosaveIntervalMs));
+    };
+    const debounceMs = Math.max(500, settings().autosaveIntervalMs);
+    autosaveTimer = window.setTimeout(flush, debounceMs);
+    const remainingMaxWait = AUTOSAVE_MAX_WAIT_MS - (Date.now() - firstChange);
+    if (remainingMaxWait <= 0) {
+      flush();
+      return;
+    }
+    autosaveMaxWaitTimer = window.setTimeout(() => {
+      if (autosaveTimer !== undefined) {
+        window.clearTimeout(autosaveTimer);
+      }
+      flush();
+    }, remainingMaxWait);
+  };
+
+  const applyEditorContent = (sessionId: string, content: any) => {
+    let background: DocumentSession<any> | undefined;
+    setOpenSessions((previous) => {
+      const target = previous.find((session) => session.id === sessionId);
+      if (!target) return previous;
+      background = { ...target, content, saveState: "Dirty" };
+      return upsertDocumentSession(previous, background);
+    });
+    if (activeSessionId() === sessionId) {
+      setDocContent(content);
+      setSaveState("Dirty");
+      scheduleAutosave(content);
+    } else if (background?.docId) {
+      void commands.autosaveDocument(background.docId, background.mode, background.title, content);
+    }
   };
 
   const openRecoveredDocument = async (snapshotPath: string) => {
     try {
       const opened = await commands.openRecoveredDocument(snapshotPath);
       const mode = opened.meta.mode;
+      const readOnly = opened.meta.readOnly === true;
+      const readOnlyWarning = readOnly ? opened.meta.warning ?? null : null;
+      setImportWarnings(opened.warnings ?? []);
       if (mode === "doc" || mode === "sheet" || mode === "slide") {
         const buffer: ModeBuffer = {
           content: opened.body,
@@ -476,7 +586,7 @@ export function App() {
           saveState: "Dirty",
         };
         const id = registerSession(mode, buffer);
-        loadSession({ id, mode, ...buffer });
+        loadSession({ id, mode, ...buffer, readOnly, readOnlyReason: readOnlyWarning });
       } else {
         setActiveMode(mode as any);
         setDocTitle(opened.meta.title);
@@ -484,6 +594,8 @@ export function App() {
         setCurrentDocId(opened.meta.id);
         setDocContent(opened.body);
         setSaveState("Dirty");
+        setDocReadOnly(readOnly);
+        setDocReadOnlyWarning(readOnlyWarning);
       }
       setRecoveryOpen(false);
       showToast(`Restored ${opened.meta.title}`, "success");
@@ -697,9 +809,9 @@ export function App() {
   });
 
   const handleNewDoc = async (mode: EditorMode, templateId?: string) => {
-    if (!(await confirmDiscardIfDirty())) return;
     cancelAutosave();
     if (activeMode() !== "home") {
+      rememberCurrentSession();
       saveCurrentModeToBuffer();
     }
     const templateTitles: Record<string, string> = {
@@ -719,6 +831,8 @@ export function App() {
     setCurrentFilePath(null);
     setCurrentDocId(null);
     setSaveState("Saved");
+    setDocReadOnly(false);
+    setDocReadOnlyWarning(null);
 
     let content: any = initialBody;
     let docId: string | null = null;
@@ -751,18 +865,37 @@ export function App() {
     });
   };
 
+  const openImportedDocument = async (
+    mode: EditorMode,
+    title: string,
+    content: any,
+    warnings: string[] = [],
+  ) => {
+    let docId: string | null = null;
+    try {
+      const created = await commands.createNewDocument(mode, title);
+      docId = created.meta.id;
+    } catch {
+      // Recovery id is best-effort; the import still opens as an unsaved tab.
+    }
+    const buffer: ModeBuffer = { content, title, filePath: null, docId, saveState: "Dirty" };
+    const id = registerSession(mode, buffer);
+    loadSession({ id, mode, ...buffer });
+    if (warnings.length > 0) setImportWarnings(warnings);
+  };
+
   const openFilePath = async (path: string) => {
-    if (!(await confirmDiscardIfDirty())) return;
+    if (activeMode() !== "home") {
+      rememberCurrentSession();
+      saveCurrentModeToBuffer();
+    }
     cancelAutosave();
     try {
       const fileType = supportedFileType(path);
       if (fileType === "pptx") {
         const imported = await commands.importPptxFile(path);
         const title = path.split(/[\\/]/).pop()?.replace(/\.pptx$/i, "") || "Imported presentation";
-        const buffer: ModeBuffer = { content: imported.deck, title, filePath: null, docId: null, saveState: "Dirty" };
-        const id = registerSession("slide", buffer);
-        loadSession({ id, mode: "slide", ...buffer });
-        setImportWarnings(imported.warnings);
+        await openImportedDocument("slide", title, imported.deck, imported.warnings);
         recordTelemetry("pptx_imported");
         showToast("Imported PPTX file; save as .redoc to continue editing", "success");
         return;
@@ -772,19 +905,14 @@ export function App() {
           const workbook = await requestCsvImport(path);
           if (!workbook) return;
           const title = path.split(/[\\/]/).pop()?.replace(/\.csv$/i, "") || "Imported spreadsheet";
-          const buffer: ModeBuffer = { content: workbook, title, filePath: null, docId: null, saveState: "Dirty" };
-          const id = registerSession("sheet", buffer);
-          loadSession({ id, mode: "sheet", ...buffer });
+          await openImportedDocument("sheet", title, workbook);
           recordTelemetry("csv_imported");
           showToast("Imported CSV file", "success");
           return;
         }
         const imported = await commands.importXlsxFile(path);
         const title = path.split(/[\\/]/).pop()?.replace(/\.xlsx$/i, "") || "Imported spreadsheet";
-        const buffer: ModeBuffer = { content: imported.workbook, title, filePath: null, docId: null, saveState: "Dirty" };
-        const id = registerSession("sheet", buffer);
-        loadSession({ id, mode: "sheet", ...buffer });
-        setImportWarnings(imported.warnings);
+        await openImportedDocument("sheet", title, imported.workbook, imported.warnings);
         recordTelemetry("xlsx_imported");
         showToast("Imported XLSX file", "success");
         return;
@@ -792,10 +920,7 @@ export function App() {
       if (fileType === "docx") {
         const imported = await commands.importDocxFile(path);
         const title = path.split(/[\\/]/).pop()?.replace(/\.docx$/i, "") || "Imported document";
-        const buffer: ModeBuffer = { content: imported.document, title, filePath: null, docId: null, saveState: "Dirty" };
-        const id = registerSession("doc", buffer);
-        loadSession({ id, mode: "doc", ...buffer });
-        setImportWarnings(imported.warnings);
+        await openImportedDocument("doc", title, imported.document, imported.warnings);
         recordTelemetry("docx_imported");
         showToast("Imported DOCX file", "success");
         return;
@@ -817,6 +942,18 @@ export function App() {
   };
 
   const handleSave = async () => {
+    if (docReadOnly()) {
+      const saveAsCopy = await confirmDialog({
+        title: "Document is read-only",
+        message:
+          (docReadOnlyWarning() ?? "This document was opened from a newer Redoc format and is read-only.") +
+          " Saving would rewrite it in the current format and may lose content. Save a copy under a new name instead?",
+        confirmLabel: "Save As a copy",
+        danger: false,
+      });
+      if (saveAsCopy) await handleSaveAs();
+      return;
+    }
     cancelAutosave();
     const path =
       currentFilePath() ||
@@ -852,6 +989,8 @@ export function App() {
       const saved = await commands.saveDocument(path, activeMode() as EditorMode, docTitle(), docContent(), currentDocId());
       setCurrentDocId(saved.id);
       setCurrentFilePath(path);
+      setDocReadOnly(false);
+      setDocReadOnlyWarning(null);
       setRecents(await commands.getRecents());
       setSaveState("Saved");
       syncCurrentSession();
@@ -864,8 +1003,19 @@ export function App() {
 
   const [exportWarnings, setExportWarnings] = createSignal<string[]>([]);
   const [pendingExport, setPendingExport] = createSignal<{ format: string; path: string } | null>(null);
+  const [exportProgress, setExportProgress] = createSignal<{ stage: string; percent: number } | null>(null);
 
   const runExport = async (format: string, path: string) => {
+    setExportProgress(null);
+    let unlistenProgress: (() => void) | undefined;
+    try {
+      const mod = await import("@tauri-apps/api/event");
+      unlistenProgress = await mod.listen<{ stage: string; percent: number }>("export-progress", (event) => {
+        setExportProgress(event.payload);
+      });
+    } catch {
+      // Event API unavailable outside Tauri shell.
+    }
     try {
       await commands.exportDocumentToFile(path, activeMode(), format, docContent() || {}, docTitle());
       const compatibilityWarnings = await commands.inspectExportCompatibility(activeMode(), format, docContent() || {});
@@ -880,6 +1030,9 @@ export function App() {
       );
     } catch (err) {
       showToast(`Export failed: ${err}`, "error");
+    } finally {
+      unlistenProgress?.();
+      setExportProgress(null);
     }
   };
 
@@ -921,12 +1074,7 @@ export function App() {
   };
 
   const confirmCsvImport = (workbook: any) => {
-    const path = csvImportPath();
-    if (!path) return;
-    setDocTitle(path.split(/[\\/]/).pop()?.replace(/\.csv$/i, "") || "Imported CSV");
-    setCurrentFilePath(null);
-    setCurrentDocId(null);
-    setSaveState("Dirty");
+    if (!csvImportPath()) return;
     setCsvImportOpen(false);
     setCsvImportPath(null);
     csvImportResolver?.(workbook);
@@ -977,7 +1125,10 @@ export function App() {
           onNewDoc={handleNewDoc}
           onOpenFile={handleOpenFile}
           onOpenRecent={async (entry) => {
-            if (!(await confirmDiscardIfDirty())) return;
+            if (activeMode() !== "home") {
+              rememberCurrentSession();
+              saveCurrentModeToBuffer();
+            }
             await openRedocAtPath(entry.path);
           }}
           onTogglePin={async (id) => {
@@ -1009,6 +1160,29 @@ export function App() {
         <a href="#canvas-pane" class="g-skip-link g-no-print">
           {t("a11y.skipToCanvas")}
         </a>
+        <Show when={docReadOnly()}>
+          <div
+            role="status"
+            class="g-no-print"
+            style={{
+              display: "flex",
+              "align-items": "center",
+              "justify-content": "center",
+              gap: "8px",
+              padding: "6px 12px",
+              "font-size": "12px",
+              background: "var(--g-yellow-light)",
+              color: "var(--text-primary)",
+              "border-bottom": "1px solid var(--border-color)",
+              "flex-shrink": "0",
+            }}
+          >
+            Read-only: {docReadOnlyWarning() || "This document uses a newer Redoc format than this version supports."}
+            <Button size="sm" variant="secondary" onClick={() => void handleSaveAs()}>
+              Save As a copy
+            </Button>
+          </div>
+        </Show>
         {/* Phase 3 compact titlebar: title + save state + mode switch + share/avatar stubs */}
         <header
           class="g-no-print"
@@ -1251,7 +1425,13 @@ export function App() {
             }
           >
             <Show keyed when={docMounted() && activeMode() === "doc" ? activeSessionId() : null}>
+              {(sessionId) => (
                 <div id="editor-pane-doc" role="tabpanel" aria-labelledby="mode-tab-doc" aria-label={t("canvas.docLabel")} style={{ height: "100%", width: "100%" }}>
+                  <ErrorBoundary
+                    onError={(err) => {
+                      showToast(`Document editor error: ${err.message}`, "error", 5000);
+                    }}
+                  >
                   <DocEditor
                     initialContent={docContent()}
                     compareDocuments={openSessions()
@@ -1264,21 +1444,24 @@ export function App() {
                     onRequestOpen={() => void handleOpenFile()}
                     onRequestSave={() => void handleSave()}
                     onRequestExportPdf={() => void handleExport("pdf")}
-                    onChange={(json) => {
-                      setDocContent(json);
-                      setSaveState("Dirty");
-                      syncCurrentSession();
-                      scheduleAutosave(json);
-                    }}
+                    onChange={(json) => applyEditorContent(sessionId, json)}
                     onWordCountChange={(info) => {
                       setStatusInfo(info);
                       setSelectionSummary(info);
                     }}
                   />
+                  </ErrorBoundary>
                 </div>
+              )}
             </Show>
             <Show keyed when={sheetMounted() && activeMode() === "sheet" ? activeSessionId() : null}>
+              {(sessionId) => (
                 <div id="editor-pane-sheet" role="tabpanel" aria-labelledby="mode-tab-sheet" aria-label={t("canvas.gridLabel")} style={{ height: "100%", width: "100%" }}>
+                  <ErrorBoundary
+                    onError={(err) => {
+                      showToast(`Spreadsheet editor error: ${err.message}`, "error", 5000);
+                    }}
+                  >
                   <SheetEditor
                     initialContent={docContent()}
                     zoomLevel={zoomLevel()}
@@ -1290,21 +1473,24 @@ export function App() {
                     onRequestOpen={() => void handleOpenFile()}
                     onRequestSave={() => void handleSave()}
                     onRequestExportPdf={() => void handleExport("pdf")}
-                    onChange={(data) => {
-                      setDocContent(data);
-                      setSaveState("Dirty");
-                      syncCurrentSession();
-                      scheduleAutosave(data);
-                    }}
+                    onChange={(data) => applyEditorContent(sessionId, data)}
                     onCellInfoChange={(info) => {
                       setStatusInfo(info);
                       setSelectionSummary(info);
                     }}
                   />
+                  </ErrorBoundary>
                 </div>
+              )}
             </Show>
             <Show keyed when={slideMounted() && activeMode() === "slide" ? activeSessionId() : null}>
+              {(sessionId) => (
                 <div id="editor-pane-slide" role="tabpanel" aria-labelledby="mode-tab-slide" aria-label={t("canvas.slideLabel")} style={{ height: "100%", width: "100%" }}>
+                  <ErrorBoundary
+                    onError={(err) => {
+                      showToast(`Presentation editor error: ${err.message}`, "error", 5000);
+                    }}
+                  >
                   <SlideEditor
                     initialContent={docContent()}
                     zoomLevel={zoomLevel()}
@@ -1315,18 +1501,15 @@ export function App() {
                     onRequestSave={() => void handleSave()}
                     onRequestExportPdf={() => void handleExport("pdf")}
                     onRequestExportPptx={() => void handleExport("pptx")}
-                    onChange={(deck) => {
-                      setDocContent(deck);
-                      setSaveState("Dirty");
-                      syncCurrentSession();
-                      scheduleAutosave(deck);
-                    }}
+                    onChange={(deck) => applyEditorContent(sessionId, deck)}
                     onSlideInfoChange={(info) => {
                       setStatusInfo(info);
                       setSelectionSummary(info);
                     }}
                   />
+                  </ErrorBoundary>
                 </div>
+              )}
             </Show>
           </Suspense>
         </main>
@@ -1424,9 +1607,15 @@ export function App() {
         settings={settings()}
         onClose={() => setSettingsOpen(false)}
         onSave={async (next) => {
+          const previous = settings();
           setSettings(next);
-          await commands.updateSettings(next);
-          void maybeCheckForUpdates(next.checkForUpdates !== false);
+          try {
+            await commands.updateSettings(next);
+            void maybeCheckForUpdates(next.checkForUpdates !== false);
+          } catch (error) {
+            setSettings(previous);
+            showToast(`Could not save settings: ${error}`, "error");
+          }
         }}
       />
 
@@ -1455,6 +1644,34 @@ export function App() {
               </Button>
             </Show>
           </div>
+          <Show when={exportProgress() !== null}>
+            <div
+              role="status"
+              aria-live="polite"
+              style={{ display: "flex", "flex-direction": "column", gap: "4px" }}
+            >
+              <span style={{ "font-size": "12px", color: "var(--text-secondary)" }}>
+                Exporting… {exportProgress()?.stage} ({exportProgress()?.percent}%)
+              </span>
+              <div
+                style={{
+                  height: "6px",
+                  "border-radius": "3px",
+                  background: "var(--bg-tertiary)",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    width: `${exportProgress()?.percent ?? 0}%`,
+                    height: "100%",
+                    background: "var(--accent-color)",
+                    transition: "width 120ms ease-out",
+                  }}
+                />
+              </div>
+            </div>
+          </Show>
         </div>
       </Dialog>
 

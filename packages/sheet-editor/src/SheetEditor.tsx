@@ -1,4 +1,4 @@
-import { createEffect, createSignal, onCleanup, onMount, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount, For, Show } from "solid-js";
 import {
   IconPlus, IconBold, IconItalic, IconUnderline, IconTextColor, IconHighlight,
   IconAlignLeft, IconAlignCenter, IconAlignRight, IconAlignTop, IconAlignMiddle, IconAlignBottom,
@@ -24,7 +24,7 @@ import { measureTextWidth, clearTextMeasureCache } from "./textMeasureCache";
 import { commands } from "@redoc/api-client";
 import { parseTsv } from "@redoc/utils";
 import { buildWorkbookFromCells, createSheetHistoryHandlers } from "./sheetModel";
-import type { ConditionalFormattingRule, GridCell, MergeRange, PivotTableConfig, ScenarioConfig, SheetSnapshot, SlicerConfig, CellComment } from "./sheetTypes";
+import type { ConditionalFormattingRule, GridCell, MergeRange, PivotTableConfig, ScenarioConfig, SheetSnapshot, SlicerConfig, CellComment, SheetProtection } from "./sheetTypes";
 import { conditionalStyleForCell } from "./conditionalFormatting";
 import { buildPivotTable, buildMultiFieldPivotTable } from "./pivotTables";
 import { applyScenario as applyScenarioOverrides, captureScenario as captureScenarioRange } from "./scenarios";
@@ -38,6 +38,7 @@ import {
   upsertCellComment,
 } from "./cellComments";
 import { normalizeSheetHyperlink, parseInternalSheetLocation } from "./hyperlinks";
+import { formatWithCode } from "./numberFormatCodes";
 import { setRichClipboard, takeRichClipboard, shiftFormulaReferences, type RichClipboard } from "./richClipboard";
 import { SortDialog } from "./dialogs/SortDialog";
 import { PrintDialog } from "./dialogs/PrintDialog";
@@ -70,7 +71,7 @@ export function SheetEditor(props: SheetEditorProps) {
   const [formulaValue, setFormulaValue] = createSignal("");
   const [editing, setEditing] = createSignal(false);
   const [editInput, setEditInput] = createSignal("");
-  const [sheets, setSheets] = createSignal<Array<{ id: string; name: string }>>([
+  const [sheets, setSheets] = createSignal<Array<{ id: string; name: string; color?: string }>>([
     { id: "sheet-1", name: "Sheet1" },
   ]);
   const [activeSheetIndex, setActiveSheetIndex] = createSignal(0);
@@ -117,6 +118,7 @@ export function SheetEditor(props: SheetEditorProps) {
   const [slicerColumn, setSlicerColumn] = createSignal(1);
   const [slicerTitle, setSlicerTitle] = createSignal("");
   const [filterDropdownCol, setFilterDropdownCol] = createSignal<number | null>(null);
+  const [filterValueSearch, setFilterValueSearch] = createSignal("");
   const [sortDialogOpen, setSortDialogOpen] = createSignal(false);
   const [sortKeys, setSortKeys] = createSignal<Array<{ col: number; ascending: boolean }>>([
     { col: 1, ascending: true },
@@ -137,16 +139,31 @@ export function SheetEditor(props: SheetEditorProps) {
   const [contextMenu, setContextMenu] = createSignal<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
   const [numberFormatOpen, setNumberFormatOpen] = createSignal(false);
   const [validationOpen, setValidationOpen] = createSignal(false);
+  const [protection, setProtection] = createSignal<SheetProtection>({
+    enabled: false,
+    selectLockedCells: true,
+    selectUnlockedCells: true,
+  });
   const [hyperlinkDraft, setHyperlinkDraft] = createSignal("");
 
   const cellImageCache = new Map<string, HTMLImageElement | null>();
 
   let gridDirtyFull = true;
   let gridDirtyRect: { x: number; y: number; w: number; h: number } | null = null;
+  let drawGridRafId: number | null = null; // requestAnimationFrame handle for debouncing
 
   const markGridDirtyFull = () => {
     gridDirtyFull = true;
     gridDirtyRect = null;
+  };
+
+  // Debounced drawGrid: coalesces multiple draw requests into a single animation frame
+  const requestDrawGrid = () => {
+    if (drawGridRafId !== null) return; // Already scheduled
+    drawGridRafId = requestAnimationFrame(() => {
+      drawGridRafId = null;
+      drawGrid(); // Direct call inside rAF callback
+    });
   };
 
   const markGridDirtyRect = (rect: { x: number; y: number; w: number; h: number }) => {
@@ -181,41 +198,120 @@ export function SheetEditor(props: SheetEditorProps) {
   const [rowHeight, setRowHeight] = createSignal(26);
   const [columnWidths, setColumnWidths] = createSignal<Record<number, number>>({});
   const [rowHeights, setRowHeights] = createSignal<Record<number, number>>({});
+  const [hiddenCols, setHiddenCols] = createSignal<number[]>([]);
+  const [hiddenRows, setHiddenRows] = createSignal<number[]>([]);
   const headerColWidth = 40;
   const headerRowHeight = 26;
 
-  const widthAt = (col: number) => columnWidths()[col] || columnWidth();
-  const heightAt = (row: number) => rowHeights()[row] || rowHeight();
-  const offsetForColumn = (col: number) => {
-    let offset = 0;
-    for (let index = 1; index < col; index += 1) offset += widthAt(index);
-    return offset;
-  };
-  const offsetForRow = (row: number) => {
-    let offset = 0;
-    for (let index = 1; index < row; index += 1) offset += heightAt(index);
-    return offset;
-  };
-  const columnAtOffset = (offset: number) => {
-    let remaining = Math.max(0, offset);
-    let col = 1;
-    while (remaining >= widthAt(col) && col < 1000) {
-      remaining -= widthAt(col);
-      col += 1;
+  // Hidden rows/columns contribute zero size everywhere: rendering, offset
+  // math, and hit-testing all collapse them naturally. Memoized so per-cell
+  // lookups stay O(1).
+  const hiddenColsSet = createMemo(() => new Set(hiddenCols()));
+  const hiddenRowsSet = createMemo(() => new Set(hiddenRows()));
+  const widthAt = (col: number) => hiddenColsSet().has(col) ? 0 : columnWidths()[col] || columnWidth();
+  const heightAt = (row: number) => hiddenRowsSet().has(row) ? 0 : rowHeights()[row] || rowHeight();
+
+  // Offset math for mostly-uniform dimensions: every index without an override
+  // shares the default size, so offset(n) = (n - 1) * default plus corrections
+  // from overridden predecessors. The sorted override keys and their prefix
+  // sums are cached per (map identity, default size); lookups binary-search.
+  type DimensionIndex = { keys: number[]; prefix: number[]; total: number; last: number; size: number };
+  let columnIndexCache: { map: Record<number, number>; hidden: number[]; size: number; index: DimensionIndex } | null = null;
+  let rowIndexCache: { map: Record<number, number>; hidden: number[]; size: number; index: DimensionIndex } | null = null;
+
+  const buildDimensionIndex = (
+    map: Record<number, number>,
+    defaultSize: number,
+    hidden: Set<number>,
+  ): DimensionIndex => {
+    const sizeOf = (k: number) => (hidden.has(k) ? 0 : map[k] || defaultSize);
+    const keys = Object.keys(map)
+      .map(Number)
+      .filter((k) => k >= 1 && Number.isFinite(k) && sizeOf(k) !== defaultSize)
+      .sort((a, b) => a - b);
+    // Hidden rows/cols not in the map still need zero-size entries.
+    for (const k of hidden) {
+      if (k >= 1 && !(k in map)) keys.push(k);
     }
-    return { col, remainder: remaining };
-  };
-  const rowAtOffset = (offset: number) => {
-    let remaining = Math.max(0, offset);
-    let row = 1;
-    while (remaining >= heightAt(row) && row < 100000) {
-      remaining -= heightAt(row);
-      row += 1;
+    keys.sort((a, b) => a - b);
+    const prefix: number[] = [0];
+    let total = 0;
+    let last = 0;
+    for (const k of keys) {
+      total += sizeOf(k) - defaultSize;
+      prefix.push(total);
+      last = k;
     }
-    return { row, remainder: remaining };
+    return { keys, prefix, total, last, size: defaultSize };
   };
 
-  const [sheetDataCache, setSheetDataCache] = createSignal<Record<number, any>>({});
+  const dimensionOffset = (
+    index: number,
+    cacheRef: typeof columnIndexCache,
+    map: Record<number, number>,
+    defaultSize: number,
+    hidden: Set<number>,
+    hiddenKey: number[],
+  ) => {
+    if (index <= 1) return 0;
+    let built = cacheRef;
+    if (!built || built.map !== map || built.index.size !== defaultSize || built.hidden !== hiddenKey) {
+      built = { map, hidden: hiddenKey, size: defaultSize, index: buildDimensionIndex(map, defaultSize, hidden) };
+      if (cacheRef === columnIndexCache) columnIndexCache = built;
+      else rowIndexCache = built;
+    }
+    const { keys, prefix, total, last, size } = built.index;
+    const base = (index - 1) * size;
+    if (index > last) return base + total;
+    let lo = 0;
+    let hi = keys.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (keys[mid] < index) lo = mid + 1;
+      else hi = mid;
+    }
+    return base + prefix[lo];
+  };
+
+  const offsetForColumn = (col: number) =>
+    dimensionOffset(col, columnIndexCache, columnWidths(), columnWidth(), hiddenColsSet(), hiddenCols());
+  const offsetForRow = (row: number) =>
+    dimensionOffset(row, rowIndexCache, rowHeights(), rowHeight(), hiddenRowsSet(), hiddenRows());
+
+  const indexAtOffset = (
+    offset: number,
+    max: number,
+    sizeOf: (index: number) => number,
+    offsetOf: (index: number) => number,
+    seedSize: number,
+  ) => {
+    // Fast path: assume the default-sized index, then walk only across the
+    // sparse override/hidden set near the answer (a few steps at most).
+    const o = Math.max(0, offset);
+    const seed = seedSize > 0 ? seedSize : 1;
+    let index = Math.min(max, Math.floor(o / seed) + 1);
+    let delta = o - offsetOf(index);
+    while (delta >= sizeOf(index) && index < max) {
+      index += 1;
+      delta = o - offsetOf(index);
+    }
+    while (delta < 0 && index > 1) {
+      index -= 1;
+      delta = o - offsetOf(index);
+    }
+    return { index, remainder: Math.max(0, delta) };
+  };
+
+  const columnAtOffset = (offset: number) => {
+    const hit = indexAtOffset(offset, 1000, widthAt, offsetForColumn, columnWidth());
+    return { col: hit.index, remainder: hit.remainder };
+  };
+  const rowAtOffset = (offset: number) => {
+    const hit = indexAtOffset(offset, 100000, heightAt, offsetForRow, rowHeight());
+    return { row: hit.index, remainder: hit.remainder };
+  };
+
+  const [sheetDataCache, setSheetDataCache] = createSignal<Record<string, any>>({});
 
   // Cells data store: "row:col" -> { raw, display }
   const [cellsData, setCellsData] = createSignal<Record<string, GridCell>>({
@@ -280,7 +376,7 @@ export function SheetEditor(props: SheetEditorProps) {
     for (const [index, sheet] of sheets().entries()) {
       const source = index === activeSheetIndex()
         ? null
-        : sheetDataCache()[index] || props.initialContent?.sheets?.[index];
+        : sheetDataCache()[sheet.id] || props.initialContent?.sheets?.find((candidate: any) => candidate.id === sheet.id);
       result[sheet.name] = source ? gridCellsFromSheet(source) : (index === activeSheetIndex() ? cellsData() : {});
     }
     return result;
@@ -295,6 +391,8 @@ export function SheetEditor(props: SheetEditorProps) {
     setRowHeight(sheet.rowHeights?.[0] || 26);
     setColumnWidths(sheet.colWidths || {});
     setRowHeights(sheet.rowHeights || {});
+    setHiddenCols(Array.isArray(sheet.hiddenCols) ? sheet.hiddenCols : []);
+    setHiddenRows(Array.isArray(sheet.hiddenRows) ? sheet.hiddenRows : []);
     setChartType(sheet.charts?.[0]?.chartType || null);
     if (sheet.charts?.[0]) {
       setChartTitle(sheet.charts[0].title || "Chart");
@@ -325,6 +423,7 @@ export function SheetEditor(props: SheetEditorProps) {
     setScenarios(sheet.scenarios || []);
     setSlicers(sheet.slicers || []);
     setCellComments(sheet.comments || []);
+    requestDrawGrid();
   };
 
   const makeWorkbook = (cellMap: Record<string, GridCell>) =>
@@ -341,6 +440,8 @@ export function SheetEditor(props: SheetEditorProps) {
         rowHeight,
         columnWidths,
         rowHeights,
+        hiddenCols,
+        hiddenRows,
         selectionAnchor,
         activeCell,
         chartType,
@@ -421,6 +522,8 @@ export function SheetEditor(props: SheetEditorProps) {
       setRowHeight(props.initialContent.sheets[index].rowHeights?.[0] || 26);
       setColumnWidths(props.initialContent.sheets[index].colWidths || {});
       setRowHeights(props.initialContent.sheets[index].rowHeights || {});
+      setHiddenCols(props.initialContent.sheets[index].hiddenCols || []);
+      setHiddenRows(props.initialContent.sheets[index].hiddenRows || []);
       setMerges(props.initialContent.sheets[index].merges || []);
       const loadedFilter = props.initialContent.sheets[index].autoFilter;
       setAutoFilterEnabled(!!loadedFilter?.enabled);
@@ -454,8 +557,54 @@ export function SheetEditor(props: SheetEditorProps) {
     }
   });
 
-  const findMerge = (r: number, c: number) => {
-    for (const m of merges()) {
+  // Spatial index for O(1) merge cell lookup using grid bucketing
+  const MERGE_BUCKET_SIZE = 100; // Each bucket covers 100x100 cells
+  let mergeSpatialIndex: Map<string, MergeRange[]> | null = null;
+  let mergeIndexVersion = -1;
+
+  const getMergeBucketKey = (r: number, c: number): string => {
+    const bucketRow = Math.floor((r - 1) / MERGE_BUCKET_SIZE);
+    const bucketCol = Math.floor((c - 1) / MERGE_BUCKET_SIZE);
+    return `${bucketRow}:${bucketCol}`;
+  };
+
+  const buildMergeSpatialIndex = (mergeList: MergeRange[]): Map<string, MergeRange[]> => {
+    const index = new Map<string, MergeRange[]>();
+    for (const m of mergeList) {
+      // Add merge to all buckets it overlaps
+      const startBucketRow = Math.floor((m.startRow - 1) / MERGE_BUCKET_SIZE);
+      const endBucketRow = Math.floor((m.endRow - 1) / MERGE_BUCKET_SIZE);
+      const startBucketCol = Math.floor((m.startCol - 1) / MERGE_BUCKET_SIZE);
+      const endBucketCol = Math.floor((m.endCol - 1) / MERGE_BUCKET_SIZE);
+
+      for (let br = startBucketRow; br <= endBucketRow; br++) {
+        for (let bc = startBucketCol; bc <= endBucketCol; bc++) {
+          const key = `${br}:${bc}`;
+          const bucket = index.get(key);
+          if (bucket) {
+            bucket.push(m);
+          } else {
+            index.set(key, [m]);
+          }
+        }
+      }
+    }
+    return index;
+  };
+
+  const findMerge = (r: number, c: number): MergeRange | null => {
+    const currentMerges = merges();
+    // Rebuild index if merges changed (simple version check)
+    if (mergeIndexVersion !== currentMerges.length || !mergeSpatialIndex) {
+      mergeSpatialIndex = buildMergeSpatialIndex(currentMerges);
+      mergeIndexVersion = currentMerges.length;
+    }
+
+    const bucket = mergeSpatialIndex.get(getMergeBucketKey(r, c));
+    if (!bucket) return null;
+
+    // Check only merges in this bucket
+    for (const m of bucket) {
       if (r >= m.startRow && r <= m.endRow && c >= m.startCol && c <= m.endCol) {
         return m;
       }
@@ -474,13 +623,20 @@ export function SheetEditor(props: SheetEditorProps) {
     return s;
   };
 
-  const formatDisplay = (value: string, format?: NonNullable<GridCell["style"]>["format"], decimals?: number) => {
+  const serialToDateLocal = (serial: number) => {
+    const epoch = new Date(Date.UTC(1899, 11, 30));
+    epoch.setUTCDate(epoch.getUTCDate() + Math.floor(serial));
+    return epoch;
+  };
+
+  const formatDisplay = (value: string, format?: NonNullable<GridCell["style"]>["format"], decimals?: number, formatCode?: string) => {
     if (!format || format === "general") return value;
     if (format === "text") return value;
     if (value.trim() === "") return value;
     const number = Number(value);
     if (!Number.isFinite(number)) return value;
     const d = typeof decimals === "number" ? decimals : 2;
+    if (format === "custom" && formatCode) return formatWithCode(number, formatCode);
     if (format === "currency") return `$${number.toFixed(d)}`;
     if (format === "percent") return `${(number * 100).toFixed(d)}%`;
     if (format === "date") {
@@ -490,9 +646,7 @@ export function SheetEditor(props: SheetEditorProps) {
       }
       const serial = Number(value);
       if (Number.isFinite(serial) && serial > 0) {
-        const epoch = new Date(Date.UTC(1899, 11, 30));
-        epoch.setUTCDate(epoch.getUTCDate() + Math.floor(serial));
-        return epoch.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+        return serialToDateLocal(serial).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
       }
       return value;
     }
@@ -534,30 +688,57 @@ export function SheetEditor(props: SheetEditorProps) {
     setFormulaValue(source?.cells?.[`${location.row}:${location.col}`]?.formula || source?.cells?.[`${location.row}:${location.col}`]?.rawValue || "");
     emitCellInfo(location.row, location.col);
     markSelectionDirty();
-    drawGrid();
+    requestDrawGrid();
     return true;
   };
 
+  const CHART_POINT_CAP = 5000;
+
+  const CHART_SERIES_COLORS = ["#3b82f6", "#16a34a", "#8b5cf6", "#ef4444", "#f59e0b", "#0ea5e9", "#ec4899", "#84cc16", "#f97316", "#14b8a6"];
+
+  /** Chart data: labels from the first selection column, one series per remaining column. */
   const chartData = () => {
     const range = chartRange();
     const startRow = range.startRow;
     const endRow = range.endRow;
     const startCol = range.startCol;
     const endCol = range.endCol;
-    const valueCol = startCol < endCol ? startCol + 1 : startCol;
-    return Array.from({ length: Math.max(0, endRow - startRow + 1) }, (_, index) => {
+    const rowCount = Math.max(0, endRow - startRow + 1);
+    const valueCols = endCol > startCol ? endCol - startCol : 0;
+    const labels = Array.from({ length: rowCount }, (_, index) => {
       const row = startRow + index;
-      const label = cellsData()[`${row}:${startCol}`]?.display || `${row}`;
-      const value = Number(cellsData()[`${row}:${valueCol}`]?.display || 0);
-      return { label, value: Number.isFinite(value) ? value : 0 };
-    }).slice(0, 20);
+      return cellsData()[`${row}:${startCol}`]?.display || `${row}`;
+    });
+    const series: Array<{ name: string; values: number[] }> = [];
+    for (let offset = 1; offset <= valueCols; offset += 1) {
+      const col = startCol + offset;
+      const values = Array.from({ length: rowCount }, (_, index) => {
+        const row = startRow + index;
+        const value = Number(cellsData()[`${row}:${col}`]?.display || 0);
+        return Number.isFinite(value) ? value : 0;
+      });
+      series.push({
+        name: cellsData()[`${Math.max(startRow - 1, 1)}:${col}`]?.display || getColName(col),
+        values,
+      });
+    }
+    if (series.length === 0 && rowCount > 0) {
+      // Single-column selection: treat it as one value series (legacy path).
+      series.push({ name: getColName(startCol), values: labels.map((label) => Number(label) || 0) });
+    }
+    return {
+      labels: labels.slice(0, CHART_POINT_CAP),
+      series: series.map((s) => ({ ...s, values: s.values.slice(0, CHART_POINT_CAP) })),
+    };
   };
 
-  const chartMax = () => Math.max(1, ...chartData().map((item) => Math.abs(item.value)));
+  const chartMax = () => Math.max(1, ...chartData().series.flatMap((s) => s.values.map((v) => Math.abs(v))));
 
   const pieSlices = () => {
     const data = chartData();
-    const total = data.reduce((sum, item) => sum + Math.max(0, Math.abs(item.value)), 0);
+    const items = data.series[0]?.values ?? [];
+    const labels = data.labels;
+    const total = items.reduce((sum, value) => sum + Math.max(0, Math.abs(value)), 0);
     if (total <= 0) return [];
 
     const colors = ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316", "#6366f1", "#84cc16"];
@@ -566,8 +747,8 @@ export function SheetEditor(props: SheetEditorProps) {
     const r = 80;
 
     let currentAngle = -Math.PI / 2;
-    return data.map((item, index) => {
-      const val = Math.max(0, Math.abs(item.value));
+    return items.map((value, index) => {
+      const val = Math.max(0, Math.abs(value));
       const portion = val / total;
       const angle = portion * 2 * Math.PI;
       const startAngle = currentAngle;
@@ -577,7 +758,7 @@ export function SheetEditor(props: SheetEditorProps) {
       const color = colors[index % colors.length];
 
       if (portion >= 0.9999) {
-        return { isFullCircle: true, pathData: "", color, label: item.label, value: item.value };
+        return { isFullCircle: true, pathData: "", color, label: labels[index] ?? `${index + 1}`, value };
       }
 
       const x1 = cx + r * Math.cos(startAngle);
@@ -592,8 +773,8 @@ export function SheetEditor(props: SheetEditorProps) {
         isFullCircle: false,
         pathData,
         color,
-        label: item.label,
-        value: item.value,
+        label: labels[index] ?? `${index + 1}`,
+        value,
       };
     });
   };
@@ -622,14 +803,33 @@ export function SheetEditor(props: SheetEditorProps) {
     return { startRow: 1, endRow: Math.max(2, maxRow), startCol: 1, endCol: Math.max(1, maxCol) };
   };
 
+  // Unique values per filter column: memoized per (cells, bounds). The draw
+  // loop and each checkbox re-read this; without a cache the filter range is
+  // rescanned per checkbox per frame.
+  let uniqueValuesCache: {
+    cells: Record<string, GridCell>;
+    bounds: { startRow: number; endRow: number; startCol: number; endCol: number } | null;
+    perColumn: Record<number, string[]>;
+  } | null = null;
+
   const uniqueColumnValues = (col: number) => {
+    const cells = cellsData();
     const bounds = filterBounds();
     if (!bounds) return [] as string[];
+    let cache = uniqueValuesCache;
+    if (!cache || cache.cells !== cells || cache.bounds !== bounds) {
+      cache = { cells, bounds, perColumn: {} };
+      uniqueValuesCache = cache;
+    }
+    const cached = cache.perColumn[col];
+    if (cached) return cached;
     const values = new Set<string>();
     for (let row = bounds.startRow + 1; row <= bounds.endRow; row += 1) {
-      values.add(cellsData()[`${row}:${col}`]?.display || "");
+      values.add(cells[`${row}:${col}`]?.display || "");
     }
-    return Array.from(values).sort((a, b) => a.localeCompare(b)).slice(0, 200);
+    const sorted = Array.from(values).sort((a, b) => a.localeCompare(b)).slice(0, 200);
+    cache.perColumn[col] = sorted;
+    return sorted;
   };
 
   const rowMatchesFilter = (row: number) => {
@@ -667,20 +867,118 @@ export function SheetEditor(props: SheetEditorProps) {
     return false;
   };
 
-  const visualRowAtOffset = (offset: number) => {
-    let remaining = Math.max(0, offset);
-    let row = 1;
-    while (row < 100000) {
-      if (!rowMatchesFilter(row)) {
-        row += 1;
-        continue;
-      }
-      const h = heightAt(row);
-      if (remaining < h) return { row, remainder: remaining };
-      remaining -= h;
-      row += 1;
+  // Visual row index under filters: cached per (cells, slicers, filters,
+  // heights, default height). Rows outside the filter range always show, so
+  // the hidden set only spans the filter body and the walk stays bounded.
+  let visualRowCache: {
+    cells: Record<string, GridCell>;
+    slicers: SlicerConfig[];
+    filters: Record<number, string[]>;
+    query: string;
+    heights: Record<number, number>;
+    defaultHeight: number;
+    bounds: { startRow: number; endRow: number; startCol: number; endCol: number } | null;
+    hiddenRows: number[];
+    hidden: Set<number>;
+    hiddenSorted: number[];
+  } | null = null;
+
+  const hiddenFilteredRows = () => {
+    if (!autoFilterEnabled()) return hiddenRowsSet();
+    const bounds = filterBounds();
+    const cells = cellsData();
+    const slicerList = slicers();
+    const filters = columnFilters();
+    const query = filterQuery();
+    const heights = rowHeights();
+    const defHeight = rowHeight();
+    const manualHidden = hiddenRows();
+    let cache = visualRowCache;
+    if (
+      cache &&
+      cache.cells === cells &&
+      cache.slicers === slicerList &&
+      cache.filters === filters &&
+      cache.query === query &&
+      cache.heights === heights &&
+      cache.defaultHeight === defHeight &&
+      cache.bounds === bounds &&
+      cache.hiddenRows === manualHidden
+    ) {
+      return cache.hidden;
     }
-    return { row, remainder: 0 };
+    const hidden = new Set<number>(manualHidden);
+    if (bounds) {
+      for (let row = bounds.startRow + 1; row <= bounds.endRow; row += 1) {
+        if (!rowMatchesFilter(row)) hidden.add(row);
+      }
+    }
+    const hiddenSorted = Array.from(hidden).sort((a, b) => a - b);
+    visualRowCache = { cells, slicers: slicerList, filters, query, heights, defaultHeight: defHeight, bounds, hiddenRows: manualHidden, hidden, hiddenSorted };
+    return hidden;
+  };
+
+  const visualRowAtOffset = (offset: number) => {
+    const hidden = hiddenFilteredRows();
+    if (hidden.size === 0) return rowAtOffset(offset);
+    const o = Math.max(0, offset);
+    const def = rowHeight();
+    const heights = rowHeights();
+    const overrideKeys = Object.keys(heights)
+      .map(Number)
+      .filter((k) => k >= 1 && Number.isFinite(k) && heights[k] > 0 && heights[k] !== def && !hidden.has(k))
+      .sort((a, b) => a - b);
+    const overridePrefix: number[] = [0];
+    let overrideTotal = 0;
+    for (const k of overrideKeys) {
+      overrideTotal += heights[k] - def;
+      overridePrefix.push(overrideTotal);
+    }
+    const hiddenSorted = (visualRowCache && visualRowCache.hidden === hidden)
+      ? visualRowCache.hiddenSorted
+      : Array.from(hidden).sort((a, b) => a - b);
+    const hiddenBefore = (row: number) => {
+      let lo = 0;
+      let hi = hiddenSorted.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (hiddenSorted[mid] < row) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    };
+    const visualOffsetFor = (row: number) => {
+      const base = (row - 1 - hiddenBefore(row)) * def;
+      let lo = 0;
+      let hi = overrideKeys.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (overrideKeys[mid] < row) lo = mid + 1;
+        else hi = mid;
+      }
+      return base + overridePrefix[lo];
+    };
+    const nextVisible = (row: number) => {
+      let next = row;
+      while (next < 100000 && hidden.has(next)) next += 1;
+      return next;
+    };
+    // Seed: estimate the visual row from default heights, then correct for
+    // hidden rows and height overrides (a bounded number of steps).
+    let row = nextVisible(Math.min(100000, Math.floor(o / def) + 1));
+    let delta = o - visualOffsetFor(row);
+    while (delta < 0 && row > 1) {
+      let prev = row - 1;
+      while (prev > 1 && hidden.has(prev)) prev -= 1;
+      row = prev;
+      delta = o - visualOffsetFor(row);
+    }
+    while (row < 100000 && delta >= heightAt(row)) {
+      row = nextVisible(row + 1);
+      if (row >= 100000) return { row: 100000, remainder: 0 };
+      delta = o - visualOffsetFor(row);
+    }
+    return { row, remainder: Math.max(0, delta) };
   };
 
   const updateChart = (type: "bar" | "line" | "pie" | "area" | "scatter" | "doughnut" | null) => {
@@ -794,7 +1092,7 @@ export function SheetEditor(props: SheetEditorProps) {
         image.onload = () => {
           cellImageCache.set(src, image);
           markGridDirtyFull();
-          drawGrid();
+          requestDrawGrid();
         };
         image.onerror = () => cellImageCache.set(src, null);
         cellImageCache.set(src, image);
@@ -846,13 +1144,15 @@ export function SheetEditor(props: SheetEditorProps) {
       columnX += widthForColumn;
     }
     const rows: Array<{ row: number; y: number; height: number }> = [];
-    const compactRows = hasHiddenFilteredRows();
+    const hiddenRowsNow = hiddenRowsSet();
+    const compactRows = hasHiddenFilteredRows() || hiddenRowsNow.size > 0;
     const bufferHeight = 5 * rowHeight();
     if (compactRows) {
-      let logicalRow = visualRowAtOffset(scrollTop()).row;
-      let rowY = headerRowHeight - visualRowAtOffset(scrollTop()).remainder;
+      const vr = visualRowAtOffset(scrollTop());
+      let logicalRow = vr.row;
+      let rowY = headerRowHeight - vr.remainder;
       while (rowY < height + bufferHeight && logicalRow < 100000) {
-        while (logicalRow < 100000 && !rowMatchesFilter(logicalRow)) {
+        while (logicalRow < 100000 && (!rowMatchesFilter(logicalRow) || hiddenRowsNow.has(logicalRow))) {
           logicalRow += 1;
         }
         if (logicalRow >= 100000) break;
@@ -953,7 +1253,7 @@ export function SheetEditor(props: SheetEditorProps) {
         ctx.font = cellFont(style, m.startRow);
         ctx.textAlign = style?.align || "left";
         const textX = style?.align === "center" ? cellX + cellWidth / 2 : style?.align === "right" ? cellX + cellWidth - 6 : cellX + 6;
-        const text = formatDisplay(cell.display, style?.format, style?.decimals);
+        const text = formatDisplay(cell.display, style?.format, style?.decimals, style?.formatCode);
         const vAlign = style?.vAlign || "middle";
         const textY = vAlign === "top" ? cellY + 8 : vAlign === "bottom" ? cellY + cellHeight - 8 : cellY + cellHeight / 2;
         ctx.textBaseline = vAlign === "top" ? "top" : vAlign === "bottom" ? "bottom" : "middle";
@@ -1017,7 +1317,7 @@ export function SheetEditor(props: SheetEditorProps) {
           ctx.font = fontStr;
           ctx.textAlign = style?.align || "left";
           const textX = style?.align === "center" ? column.x + column.width / 2 : style?.align === "right" ? column.x + column.width - 6 : x;
-          const text = formatDisplay(cell.display, style?.format, style?.decimals);
+          const text = formatDisplay(cell.display, style?.format, style?.decimals, style?.formatCode);
           const vAlign = style?.vAlign || "middle";
           const textY =
             vAlign === "top" ? row.y + 8 : vAlign === "bottom" ? row.y + row.height - 8 : y;
@@ -1182,7 +1482,7 @@ export function SheetEditor(props: SheetEditorProps) {
         if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         clearTextMeasureCache();
         markGridDirtyFull();
-        drawGrid();
+        requestDrawGrid();
       }
     };
     resizeCanvas();
@@ -1194,7 +1494,7 @@ export function SheetEditor(props: SheetEditorProps) {
         measureGrid: (frames = 60) => {
           const count = Math.max(1, Math.min(600, Math.floor(frames)));
           const started = performance.now();
-          for (let frame = 0; frame < count; frame += 1) drawGrid();
+          for (let frame = 0; frame < count; frame += 1) requestDrawGrid();
           const durationMs = performance.now() - started;
           const averageFrameMs = durationMs / count;
           return {
@@ -1211,6 +1511,13 @@ export function SheetEditor(props: SheetEditorProps) {
     onCleanup(() => {
       if (import.meta.env.DEV && window.__perf === installedPerf) {
         window.__perf = previousPerf;
+      }
+    });
+    // Cancel any pending animation frame on unmount
+    onCleanup(() => {
+      if (drawGridRafId !== null) {
+        cancelAnimationFrame(drawGridRafId);
+        drawGridRafId = null;
       }
     });
   });
@@ -1262,7 +1569,7 @@ export function SheetEditor(props: SheetEditorProps) {
       if (props.onCellInfoChange) {
         emitCellInfo(row, col);
       }
-      drawGrid();
+      requestDrawGrid();
     }
   };
 
@@ -1296,11 +1603,41 @@ export function SheetEditor(props: SheetEditorProps) {
     setFillDragStart(null);
     const target = cellAtPoint(event);
     if (!target || (target.row === start.row && target.col === start.col)) {
-      drawGrid();
+      requestDrawGrid();
       return;
     }
+    const copyMode = event.ctrlKey || event.metaKey;
     pushHistory();
-    const next = await commands.fillSeries(makeWorkbook(cellsData()), activeSheetIndex(), start.row, start.col, target.row, target.col);
+    let next;
+    if (copyMode) {
+      // Ctrl+drag copies the selection verbatim (tile-repeat) instead of
+      // extending a series; values/styles stay exactly as selected.
+      const bounds = selectedBounds();
+      const seedCells = cellsData();
+      const rows = bounds.endRow - bounds.startRow + 1;
+      const cols = bounds.endCol - bounds.startCol + 1;
+      next = makeWorkbook(cellsData());
+      const sheet = next.sheets?.[activeSheetIndex()];
+      if (sheet) {
+        const fillDown = target.row >= start.row;
+        const fillRight = target.col >= start.col;
+        for (let row = start.row; fillDown ? row <= target.row : row >= target.row; row += fillDown ? 1 : -1) {
+          for (let col = start.col; fillRight ? col <= target.col : col >= target.col; col += fillRight ? 1 : -1) {
+            const seedRow = bounds.startRow + (((row - start.row) % rows) + rows) % rows;
+            const seedCol = bounds.startCol + (((col - start.col) % cols) + cols) % cols;
+            const seed = seedCells[`${seedRow}:${seedCol}`];
+            if (seed) sheet.cells[`${row}:${col}`] = {
+              rawValue: seed.raw,
+              displayValue: seed.display,
+              formula: seed.raw.startsWith("=") ? seed.raw : null,
+              style: seed.style ? structuredClone(seed.style) : null,
+            };
+          }
+        }
+      }
+    } else {
+      next = await commands.fillSeries(makeWorkbook(cellsData()), activeSheetIndex(), start.row, start.col, target.row, target.col);
+    }
     loadSheet(next.sheets?.[activeSheetIndex()]);
     props.onChange?.(next);
   };
@@ -1333,12 +1670,113 @@ export function SheetEditor(props: SheetEditorProps) {
     const size = Math.max(18, Math.min(320, drag.size + delta));
     if (drag.axis === "column") setColumnWidths({ ...columnWidths(), [drag.index]: size });
     else setRowHeights({ ...rowHeights(), [drag.index]: size });
+    requestDrawGrid();
+  };
+
+  /** Commit the live preview: history + onChange only once, on pointerup. */
+  const commitDimensionDrag = () => {
+    const drag = dimensionDrag();
+    if (!drag) return;
+    setDimensionDrag(null);
+    pushHistory();
     props.onChange?.(makeWorkbook(cellsData()));
-    drawGrid();
+  };
+
+  const toggleHideRows = (rows: number[], hidden: boolean) => {
+    const next = hidden
+      ? Array.from(new Set([...hiddenRows(), ...rows])).sort((a, b) => a - b)
+      : hiddenRows().filter((row) => !rows.includes(row));
+    setHiddenRows(next);
+    markGridDirtyFull();
+    requestDrawGrid();
+    queueMicrotask(() => props.onChange?.(makeWorkbook(cellsData())));
+  };
+
+  const toggleHideCols = (cols: number[], hidden: boolean) => {
+    const next = hidden
+      ? Array.from(new Set([...hiddenCols(), ...cols])).sort((a, b) => a - b)
+      : hiddenCols().filter((col) => !cols.includes(col));
+    setHiddenCols(next);
+    markGridDirtyFull();
+    requestDrawGrid();
+    queueMicrotask(() => props.onChange?.(makeWorkbook(cellsData())));
+  };
+
+  /** Rows adjacent to hidden rows inside the selection (Excel's Unhide target). */
+  const unhideCandidateRows = () => {
+    const bounds = selectedBounds();
+    const hidden = hiddenRows();
+    const candidates: number[] = [];
+    for (const row of hidden) {
+      if (row > bounds.startRow && row <= bounds.endRow + 1) candidates.push(row);
+    }
+    return candidates.length ? candidates : hidden.slice();
+  };
+
+  const unhideCandidateCols = () => {
+    const bounds = selectedBounds();
+    const hidden = hiddenCols();
+    const candidates: number[] = [];
+    for (const col of hidden) {
+      if (col > bounds.startCol && col <= bounds.endCol + 1) candidates.push(col);
+    }
+    return candidates.length ? candidates : hidden.slice();
   };
 
   const moveActiveCell = (dRow: number, dCol: number, extend = false) => {
     selectCell(activeCell().row + dRow, activeCell().col + dCol, extend);
+  };
+
+  /** Clears raw contents (keeps styles) of the current selection — Delete/Backspace and the Clear Contents menu item. */
+  const clearSelectionContents = () => {
+    const bounds = selectedBounds();
+    const next = { ...cellsData() };
+    let changed = false;
+    for (let row = bounds.startRow; row <= bounds.endRow; row += 1) {
+      for (let col = bounds.startCol; col <= bounds.endCol; col += 1) {
+        const key = `${row}:${col}`;
+        const cell = next[key];
+        if (!cell || (!cell.raw && !cell.display)) continue;
+        next[key] = { ...cell, raw: "", display: "" };
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    pushHistory();
+    setCellsData(next);
+    requestDrawGrid();
+    const workbook = makeWorkbook(next);
+    void (async () => {
+      try {
+        const recalculated = await commands.recalculateWorkbook(workbook);
+        const active = recalculated.sheets?.[activeSheetIndex()];
+        if (active) loadSheet(active);
+        props.onChange?.(recalculated);
+      } catch {
+        props.onChange?.(workbook);
+      }
+    })();
+  };
+
+  /** Ctrl+PgUp/PgDn — switch active sheet by clamped relative offset. */
+  const switchSheetByOffset = (offset: number) => {
+    const target = Math.max(0, Math.min(sheets().length - 1, activeSheetIndex() + offset));
+    if (target === activeSheetIndex()) return;
+    const workbook = makeWorkbook(cellsData());
+    props.onChange?.(workbook);
+    setActiveSheetIndex(target);
+    const source = workbook.sheets?.[target];
+    if (source) {
+      setFreezeRows(source.freezeRows || 0);
+      setFreezeCols(source.freezeCols || 0);
+      setColumnWidth(source.colWidths?.[0] || 100);
+      setRowHeight(source.rowHeights?.[0] || 26);
+      setColumnWidths(source.colWidths || {});
+      setRowHeights(source.rowHeights || {});
+      loadSheet(source);
+    }
+    emitCellInfo(activeCell().row, activeCell().col);
+    requestDrawGrid();
   };
 
   const selectCell = (row: number, col: number, extend = false) => {
@@ -1361,7 +1799,7 @@ export function SheetEditor(props: SheetEditorProps) {
     }
     setFormulaValue(cellsData()[`${next.row}:${next.col}`]?.raw || "");
     emitCellInfo(next.row, next.col);
-    drawGrid();
+    requestDrawGrid();
   };
 
   let commitInFlight: Promise<void> | null = null;
@@ -1373,11 +1811,39 @@ export function SheetEditor(props: SheetEditorProps) {
     }
     const { row, col } = activeCell();
     const key = `${row}:${col}`;
-    if (cellsData()[key]?.spill) {
+    const currentCell = cellsData()[key];
+
+    // Check if cell is a spill result (read-only)
+    if (currentCell?.spill) {
       showToast("Spill results are read-only; edit the originating formula instead.");
       setEditing(false);
       return;
     }
+
+    // Check sheet protection: locked cells cannot be edited when protection is enabled
+    const currentProtection = protection();
+    if (currentProtection.enabled && currentCell?.style?.locked) {
+      showToast("This cell is locked. Unlock it in Sheet Protection to edit.");
+      setEditing(false);
+      return;
+    }
+
+    // Check data validation: value must match validation rules
+    const validation = currentCell?.style?.validation;
+    if (validation && validation.type === "list" && val.trim()) {
+      const normalizedVal = val.trim().toLowerCase();
+      const isValid = validation.options.some(
+        (opt) => opt.trim().toLowerCase() === normalizedVal
+      );
+      // Also allow formula references that might resolve to valid values
+      const allowsFormula = val.startsWith("=") && validation.formula;
+      if (!isValid && !allowsFormula && validation.options.length > 0) {
+        showToast(`Invalid value. Allowed: ${validation.options.slice(0, 5).join(", ")}${validation.options.length > 5 ? "..." : ""}`);
+        setEditing(false);
+        return;
+      }
+    }
+
     const newMap = { ...cellsData() };
     if (!val.trim()) {
       delete newMap[key];
@@ -1390,7 +1856,7 @@ export function SheetEditor(props: SheetEditorProps) {
     if (newMap[key]?.style?.wrap) autoHeightForWrappedRows(newMap, [row]);
     setEditing(false);
     markSelectionDirty();
-    drawGrid();
+    requestDrawGrid();
 
     const workbook = makeWorkbook(newMap);
     const run = (async () => {
@@ -1441,19 +1907,20 @@ export function SheetEditor(props: SheetEditorProps) {
     const cell = activeCell();
     await emitFreezeChange(cell.row, cell.col);
     markGridDirtyFull();
-    drawGrid();
+    requestDrawGrid();
   };
 
   const unfreezePanes = async () => {
     await emitFreezeChange(0, 0);
     markGridDirtyFull();
-    drawGrid();
+    requestDrawGrid();
   };
 
   const applyNumberFormat = (value: NumberFormatValue) => {
     updateActiveStyle({
       format: value.format,
       decimals: value.decimals,
+      formatCode: value.format === "custom" ? value.code : undefined,
     });
   };
 
@@ -1474,7 +1941,7 @@ export function SheetEditor(props: SheetEditorProps) {
     setCellsData(next);
     props.onChange?.(makeWorkbook(next));
     markSelectionDirty();
-    drawGrid();
+    requestDrawGrid();
   };
 
   const addConditionalFormatRule = () => {
@@ -1491,14 +1958,14 @@ export function SheetEditor(props: SheetEditorProps) {
     setConditionalFormatting((previous) => [...previous, rule]);
     props.onChange?.(makeWorkbook(cellsData()));
     markGridDirtyFull();
-    drawGrid();
+    requestDrawGrid();
   };
 
   const removeConditionalFormatRule = (index: number) => {
     setConditionalFormatting((previous) => previous.filter((_, ruleIndex) => ruleIndex !== index));
     props.onChange?.(makeWorkbook(cellsData()));
     markGridDirtyFull();
-    drawGrid();
+    requestDrawGrid();
   };
 
   const createPivotTable = () => {
@@ -1542,7 +2009,7 @@ export function SheetEditor(props: SheetEditorProps) {
     setPivotTables((previous) => [...previous, config]);
     props.onChange?.(makeWorkbook(next));
     markGridDirtyFull();
-    drawGrid();
+    requestDrawGrid();
   };
 
   const removePivotTable = (id: string) => {
@@ -1554,7 +2021,7 @@ export function SheetEditor(props: SheetEditorProps) {
     setCellsData(next);
     props.onChange?.(makeWorkbook(next));
     markGridDirtyFull();
-    drawGrid();
+    requestDrawGrid();
   };
 
   const captureScenario = () => {
@@ -1596,7 +2063,7 @@ export function SheetEditor(props: SheetEditorProps) {
       props.onChange?.(recalculated);
     } catch {
       props.onChange?.(makeWorkbook(next));
-      drawGrid();
+      requestDrawGrid();
     }
   };
 
@@ -1625,7 +2092,7 @@ export function SheetEditor(props: SheetEditorProps) {
       setSlicerTitle("");
       props.onChange?.(makeWorkbook(cellsData()));
       markGridDirtyFull();
-      drawGrid();
+      requestDrawGrid();
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Could not create slicer.", "warning");
     }
@@ -1642,7 +2109,7 @@ export function SheetEditor(props: SheetEditorProps) {
     setCellsData(nextCells);
     props.onChange?.(makeWorkbook(nextCells));
     markGridDirtyFull();
-    drawGrid();
+    requestDrawGrid();
   };
 
   const clearSlicerSelection = (id: string) => {
@@ -1655,7 +2122,7 @@ export function SheetEditor(props: SheetEditorProps) {
     setCellsData(nextCells);
     props.onChange?.(makeWorkbook(nextCells));
     markGridDirtyFull();
-    drawGrid();
+    requestDrawGrid();
   };
 
   const removeSlicer = (id: string) => {
@@ -1664,7 +2131,7 @@ export function SheetEditor(props: SheetEditorProps) {
     setSlicers((previous) => previous.filter((slicer) => slicer.id !== id));
     props.onChange?.(makeWorkbook(cellsData()));
     markGridDirtyFull();
-    drawGrid();
+    requestDrawGrid();
   };
 
   // —— Cell comments (offline review) ————————————————
@@ -1700,6 +2167,7 @@ export function SheetEditor(props: SheetEditorProps) {
   const activeNumberFormat = (): NumberFormatValue => ({
     format: activeStyle()?.format || "general",
     decimals: activeStyle()?.decimals ?? 2,
+    ...(activeStyle()?.format === "custom" ? { code: activeStyle()?.formatCode || "" } : {}),
   });
 
   const activeValidation = (): ListValidation | null => activeStyle()?.validation ?? null;
@@ -1714,7 +2182,7 @@ export function SheetEditor(props: SheetEditorProps) {
     );
     loadSheet(next.sheets[activeSheetIndex()]);
     props.onChange?.(next);
-    drawGrid();
+    requestDrawGrid();
   };
 
   const deleteRowsAt = async (atRow: number, count = 1) => {
@@ -1727,7 +2195,7 @@ export function SheetEditor(props: SheetEditorProps) {
     );
     loadSheet(next.sheets[activeSheetIndex()]);
     props.onChange?.(next);
-    drawGrid();
+    requestDrawGrid();
   };
 
   const insertColsAt = async (atCol: number, count = 1) => {
@@ -1740,7 +2208,7 @@ export function SheetEditor(props: SheetEditorProps) {
     );
     loadSheet(next.sheets[activeSheetIndex()]);
     props.onChange?.(next);
-    drawGrid();
+    requestDrawGrid();
   };
 
   const deleteColsAt = async (atCol: number, count = 1) => {
@@ -1753,7 +2221,7 @@ export function SheetEditor(props: SheetEditorProps) {
     );
     loadSheet(next.sheets[activeSheetIndex()]);
     props.onChange?.(next);
-    drawGrid();
+    requestDrawGrid();
   };
 
   const fillDown = async () => {
@@ -1764,8 +2232,16 @@ export function SheetEditor(props: SheetEditorProps) {
     props.onChange?.(next);
   };
 
-  const sortByActiveColumn = async (ascending = true) => {
-    const bounds = selectedBounds();
+  const sortByActiveColumn = async (ascending = true, forceBounds?: { startRow: number; endRow: number; startCol: number; endCol: number }) => {
+    let bounds = forceBounds ?? selectedBounds();
+    if (!forceBounds) {
+      const expanded = expandedSortBounds(bounds);
+      if (expanded && window.confirm(
+        `Sort ${getColName(expanded.startCol)}–${getColName(expanded.endCol)} together so adjacent columns stay in sync?`,
+      )) {
+        bounds = expanded;
+      }
+    }
     pushHistory();
     const next = await commands.sortRange(
       makeWorkbook(cellsData()),
@@ -1818,7 +2294,7 @@ export function SheetEditor(props: SheetEditorProps) {
       setFilterRange(region);
       setColumnFilters({});
     }
-    drawGrid();
+    requestDrawGrid();
     queueMicrotask(() => props.onChange?.(makeWorkbook(cellsData())));
   };
 
@@ -1828,7 +2304,7 @@ export function SheetEditor(props: SheetEditorProps) {
     if (selectAll) delete next[col];
     else next[col] = [];
     setColumnFilters(next);
-    drawGrid();
+    requestDrawGrid();
     queueMicrotask(() => props.onChange?.(makeWorkbook(cellsData())));
   };
 
@@ -1842,7 +2318,9 @@ export function SheetEditor(props: SheetEditorProps) {
       if (!rowMatchesFilter(r) && printMode() === "sheet") continue;
       const cells: string[] = [];
       for (let c = bounds.startCol; c <= bounds.endCol; c += 1) {
-        const text = (cellsData()[`${r}:${c}`]?.display || "").replace(/</g, "&lt;");
+        const text = (cellsData()[`${r}:${c}`]?.display || "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;");
         cells.push(`<td>${text}</td>`);
       }
       rows.push(`<tr>${cells.join("")}</tr>`);
@@ -1877,6 +2355,7 @@ export function SheetEditor(props: SheetEditorProps) {
 
   const openFilterForColumn = (col: number) => {
     if (!autoFilterEnabled()) return;
+    setFilterValueSearch("");
     setFilterDropdownCol(filterDropdownCol() === col ? null : col);
   };
 
@@ -1892,7 +2371,7 @@ export function SheetEditor(props: SheetEditorProps) {
     if (nextArr.length === all.length) delete next[col];
     else next[col] = nextArr;
     setColumnFilters(next);
-    drawGrid();
+    requestDrawGrid();
     queueMicrotask(() => props.onChange?.(makeWorkbook(cellsData())));
   };
 
@@ -2001,7 +2480,7 @@ export function SheetEditor(props: SheetEditorProps) {
       }
       setCellsData(stripped);
       props.onChange?.(makeWorkbook(stripped));
-      drawGrid();
+      requestDrawGrid();
     } catch (e) {
       // Clipboard permissions are browser-controlled; leave the sheet unchanged.
     }
@@ -2010,6 +2489,27 @@ export function SheetEditor(props: SheetEditorProps) {
   const cellHasData = (row: number, col: number) => {
     const cell = cellsData()[`${row}:${col}`];
     return Boolean(cell && (cell.raw || cell.display));
+  };
+
+  /**
+   * Excel-style expand: when sorting one column of a wider contiguous
+   * populated region, offer to sort the whole region so rows stay in sync.
+   */
+  const expandedSortBounds = (bounds: { startRow: number; endRow: number; startCol: number; endCol: number }) => {
+    const singleColumn = bounds.startCol === bounds.endCol;
+    if (!singleColumn) return null;
+    const hasData = (col: number) => {
+      for (let row = bounds.startRow; row <= bounds.endRow; row += 1) {
+        if (cellHasData(row, col)) return true;
+      }
+      return false;
+    };
+    let startCol = bounds.startCol;
+    while (startCol > 1 && hasData(startCol - 1)) startCol -= 1;
+    let endCol = bounds.endCol;
+    while (endCol < 1000 && hasData(endCol + 1)) endCol += 1;
+    if (startCol === bounds.startCol && endCol === bounds.endCol) return null;
+    return { startRow: bounds.startRow, endRow: bounds.endRow, startCol, endCol };
   };
 
   const lastUsedCell = () => {
@@ -2093,6 +2593,8 @@ export function SheetEditor(props: SheetEditorProps) {
       columnFilters: columnFilters(),
       columnWidths: columnWidths(),
       rowHeights: rowHeights(),
+      hiddenCols: hiddenCols(),
+      hiddenRows: hiddenRows(),
       chartType: chartType(),
       chartTitle: chartTitle(),
       chartRange: { ...chartRange() },
@@ -2114,6 +2616,8 @@ export function SheetEditor(props: SheetEditorProps) {
     setColumnFilters(snap.columnFilters);
     setColumnWidths(snap.columnWidths);
     setRowHeights(snap.rowHeights);
+    setHiddenCols(snap.hiddenCols || []);
+    setHiddenRows(snap.hiddenRows || []);
     setChartType(snap.chartType);
     setChartTitle(snap.chartTitle);
     setChartRange(snap.chartRange);
@@ -2128,7 +2632,7 @@ export function SheetEditor(props: SheetEditorProps) {
     const recalculated = await commands.recalculateWorkbook(makeWorkbook(snap.cells));
     loadSheet(recalculated.sheets?.[activeSheetIndex()]);
     props.onChange?.(recalculated);
-    drawGrid();
+    requestDrawGrid();
   };
 
   const { pushHistory, undo, redo } = createSheetHistoryHandlers({
@@ -2165,7 +2669,7 @@ export function SheetEditor(props: SheetEditorProps) {
     }
     props.onChange?.(makeWorkbook(next));
     markSelectionDirty();
-    drawGrid();
+    requestDrawGrid();
   };
 
   /**
@@ -2193,7 +2697,7 @@ export function SheetEditor(props: SheetEditorProps) {
     setCellsData(next);
     props.onChange?.(makeWorkbook(next));
     markSelectionDirty();
-    drawGrid();
+    requestDrawGrid();
   };
 
   const applyActiveHyperlink = () => {
@@ -2287,6 +2791,7 @@ export function SheetEditor(props: SheetEditorProps) {
       else if (detail.id === "bold") updateActiveStyle({ bold: !activeStyle()?.bold });
       else if (detail.id === "italic") updateActiveStyle({ italic: !activeStyle()?.italic });
       else if (detail.id === "underline") updateActiveStyle({ underline: !activeStyle()?.underline });
+      else if (detail.id === "clear-contents") void clearSelectionContents();
       else if (detail.id === "clear-formatting") {
         const bounds = selectedBounds();
         const next = { ...cellsData() };
@@ -2300,7 +2805,7 @@ export function SheetEditor(props: SheetEditorProps) {
         pushHistory();
         setCellsData(next);
         props.onChange?.(makeWorkbook(next));
-        drawGrid();
+        requestDrawGrid();
       }
     };
     window.addEventListener(EDITOR_COMMAND, onCommand);
@@ -2323,7 +2828,10 @@ export function SheetEditor(props: SheetEditorProps) {
   };
   const addSheet = () => {
     const index = sheets().length + 1;
-    const newSheet = { id: `sheet-${index}`, name: `Sheet${index}` };
+    const newSheet = {
+      id: `sheet-${typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : Date.now()}`,
+      name: `Sheet${index}`,
+    };
     setSheets([...sheets(), newSheet]);
     const workbook = makeWorkbook(cellsData());
     workbook.sheets = workbook.sheets || [];
@@ -2351,13 +2859,38 @@ export function SheetEditor(props: SheetEditorProps) {
     const next = [...sheets()];
     next[index] = { ...current, name: nextName };
     setSheets(next);
-    
+
     const workbook = makeWorkbook(cellsData());
     if (workbook.sheets?.[index]) {
       workbook.sheets[index].name = nextName;
     }
     props.onChange?.(workbook);
   };
+
+  const reorderSheet = (from: number, to: number) => {
+    if (from === to || from < 0 || to < 0 || from >= sheets().length || to >= sheets().length) return;
+    const next = [...sheets()];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setSheets(next);
+    let nextActive = activeSheetIndex();
+    if (nextActive === from) nextActive = to;
+    else if (from < nextActive && to >= nextActive) nextActive -= 1;
+    else if (from > nextActive && to <= nextActive) nextActive += 1;
+    setActiveSheetIndex(nextActive);
+    queueMicrotask(() => props.onChange?.(makeWorkbook(cellsData())));
+  };
+
+  const recolorSheet = (index: number, color: string | null) => {
+    const current = sheets()[index];
+    if (!current) return;
+    const next = [...sheets()];
+    next[index] = { ...current, color: color || undefined };
+    setSheets(next);
+    queueMicrotask(() => props.onChange?.(makeWorkbook(cellsData())));
+  };
+
+  const TAB_COLORS = ["#ef4444", "#f97316", "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6", "#ec4899", "#64748b"];
 
   const duplicateSheet = (index: number) => {
     const current = sheets()[index];
@@ -2382,15 +2915,17 @@ export function SheetEditor(props: SheetEditorProps) {
 
   const deleteSheet = (index: number) => {
     if (sheets().length <= 1) return;
-    const nextSheets = [...sheets()];
-    nextSheets.splice(index, 1);
-    setSheets(nextSheets);
-    
     const workbook = makeWorkbook(cellsData());
     if (workbook.sheets) {
       workbook.sheets.splice(index, 1);
     }
-    
+    const nextSheets = (workbook.sheets || []).map((sheet: any) => ({
+      id: sheet.id,
+      name: sheet.name,
+      color: sheet.tabColor,
+    }));
+    setSheets(nextSheets);
+
     let nextActive = activeSheetIndex();
     if (nextActive >= nextSheets.length) {
       nextActive = nextSheets.length - 1;
@@ -2409,7 +2944,7 @@ export function SheetEditor(props: SheetEditorProps) {
         loadSheet(source);
       }
       emitCellInfo(activeCell().row, activeCell().col);
-      drawGrid();
+      requestDrawGrid();
     } else {
       setActiveSheetIndex(nextActive);
     }
@@ -2421,7 +2956,7 @@ export function SheetEditor(props: SheetEditorProps) {
     const next = { ...columnWidths(), [col]: Math.max(48, Math.min(320, widthAt(col) + delta)) };
     setColumnWidths(next);
     props.onChange?.(makeWorkbook(cellsData()));
-    drawGrid();
+    requestDrawGrid();
   };
 
   const resizeRows = (delta: number) => {
@@ -2429,7 +2964,7 @@ export function SheetEditor(props: SheetEditorProps) {
     const next = { ...rowHeights(), [row]: Math.max(18, Math.min(80, heightAt(row) + delta)) };
     setRowHeights(next);
     props.onChange?.(makeWorkbook(cellsData()));
-    drawGrid();
+    requestDrawGrid();
   };
 
   const findNextCell = () => {
@@ -2456,7 +2991,7 @@ export function SheetEditor(props: SheetEditorProps) {
     setSelectionAnchor({ row, col });
     setFormulaValue(cell.raw);
     emitCellInfo(row, col);
-    drawGrid();
+    requestDrawGrid();
   };
 
   const replaceCurrentCell = async () => {
@@ -2475,7 +3010,10 @@ export function SheetEditor(props: SheetEditorProps) {
       return;
     }
     const replacement = replaceWith();
-    const nextRaw = cell.raw.includes(query)
+    const rawMatches = matchCase()
+      ? cell.raw.includes(query)
+      : cell.raw.toLowerCase().includes(query.toLowerCase());
+    const nextRaw = rawMatches
       ? (matchCase()
         ? cell.raw.replace(query, replacement)
         : cell.raw.replace(new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), replacement))
@@ -2487,7 +3025,7 @@ export function SheetEditor(props: SheetEditorProps) {
     loadSheet(recalculated.sheets?.[activeSheetIndex()]);
     props.onChange?.(recalculated);
     setFormulaValue(nextRaw);
-    drawGrid();
+    requestDrawGrid();
     findNextCell();
   };
 
@@ -2516,7 +3054,7 @@ export function SheetEditor(props: SheetEditorProps) {
     const recalculated = await commands.recalculateWorkbook(makeWorkbook(next));
     loadSheet(recalculated.sheets?.[activeSheetIndex()]);
     props.onChange?.(recalculated);
-    drawGrid();
+    requestDrawGrid();
   };
 
   const addNamedRange = (name: string, rangeStr: string) => {
@@ -3044,7 +3582,7 @@ export function SheetEditor(props: SheetEditorProps) {
                     loadSheet(source);
                   }
                   emitCellInfo(activeCell().row, activeCell().col);
-                  drawGrid();
+                  requestDrawGrid();
                 }}
               >
                 {sheet.name}
@@ -3229,24 +3767,34 @@ export function SheetEditor(props: SheetEditorProps) {
             isFillHandlePoint,
             setFillDragStart,
             setSuppressNextClick,
-            startDimensionDrag,
-            updateDimensionDrag,
+             startDimensionDrag,
+             updateDimensionDrag,
+             commitDimensionDrag,
             fillDragStart,
             finishFillDrag,
             dimensionDrag,
             setDimensionDrag,
-            getColName,
-            cellsData,
-            cellHyperlink,
-            onOpenHyperlink: openSheetHyperlink,
+             getColName,
+             cellsData,
+             cellHyperlink,
+             onOpenHyperlink: openSheetHyperlink,
+             toggleHideRows,
+             toggleHideCols,
+             unhideCandidateRows,
+             unhideCandidateCols,
+             hiddenRows,
+             hiddenCols,
             chartType,
             chartTitle: chartTitle(),
             chartTop: () => headerRowHeight - scrollTop() + offsetForRow(chartRange().startRow),
             chartLeft: () => headerColWidth - scrollLeft() + offsetForColumn(chartRange().startCol),
-            chartData,
-            chartMax,
-            pieSlices,
-            conditionalFormatting,
+             chartData,
+             chartMax,
+             pieSlices,
+              SERIES_COLORS: CHART_SERIES_COLORS,
+              conditionalFormatting,
+              clearSelectionContents,
+              switchSheetByOffset,
           }}
         />
         <Show when={editing()}>
@@ -3330,6 +3878,19 @@ export function SheetEditor(props: SheetEditorProps) {
             return (
               <button
                 type="button"
+                draggable={true}
+                onDragStart={(e) => {
+                  e.dataTransfer?.setData("text/redoc-sheet", String(index()));
+                  if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+                }}
+                onDragOver={(e) => {
+                  if (e.dataTransfer?.types.includes("text/redoc-sheet")) e.preventDefault();
+                }}
+                onDrop={(e) => {
+                  const from = Number(e.dataTransfer?.getData("text/redoc-sheet"));
+                  if (Number.isFinite(from)) reorderSheet(from, index());
+                  e.preventDefault();
+                }}
                 onClick={() => {
                   const workbook = makeWorkbook(cellsData());
                   props.onChange?.(workbook);
@@ -3345,7 +3906,7 @@ export function SheetEditor(props: SheetEditorProps) {
                     loadSheet(source);
                   }
                   emitCellInfo(activeCell().row, activeCell().col);
-                  drawGrid();
+                  requestDrawGrid();
                 }}
                 onDblClick={() => renameSheet(index())}
                 onContextMenu={(e) => {
@@ -3355,6 +3916,27 @@ export function SheetEditor(props: SheetEditorProps) {
                     { id: "duplicate-sheet", label: "Duplicate Sheet", action: () => duplicateSheet(index()) },
                     { id: "delete-sheet", label: "Delete Sheet", action: () => deleteSheet(index()), disabled: sheets().length <= 1 },
                   ];
+                  if (sheet.color) {
+                    items.push({
+                      id: "clear-sheet-color",
+                      label: "Clear Tab Color",
+                      action: () => recolorSheet(index(), null),
+                    });
+                  }
+                  items.push({ id: "sep-sheet-color", label: "", separator: true });
+                  items.push({
+                    id: "sheet-colors",
+                    label: "Tab Color",
+                    action: () => {
+                      const pick = window.prompt(
+                        `Tab color (hex or blank): ${TAB_COLORS.join(", ")}`,
+                        sheet.color || TAB_COLORS[4],
+                      );
+                      if (pick === null) return;
+                      const hex = pick.trim();
+                      recolorSheet(index(), /^#[0-9a-f]{6}$/i.test(hex) ? hex : null);
+                    },
+                  });
                   setContextMenu({ x: e.clientX, y: e.clientY, items });
                 }}
                 style={{
@@ -3364,6 +3946,7 @@ export function SheetEditor(props: SheetEditorProps) {
                   background: active() ? "var(--bg-surface)" : "transparent",
                   border: active() ? "1px solid var(--border-color)" : "1px solid transparent",
                   "border-bottom": active() ? "1px solid var(--bg-surface)" : "1px solid transparent",
+                  "border-top": sheet.color ? `3px solid ${sheet.color}` : undefined,
                   "font-size": "11px",
                   "font-weight": active() ? "600" : "400",
                   color: active() ? "var(--text-primary)" : "var(--text-secondary)",
@@ -3400,6 +3983,14 @@ export function SheetEditor(props: SheetEditorProps) {
             <button type="button" class="g-toolbar-btn" onClick={() => setColumnFilterAll(filterDropdownCol()!, true)}>Select All</button>
             <button type="button" class="g-toolbar-btn" onClick={() => setColumnFilterAll(filterDropdownCol()!, false)}>Clear</button>
           </div>
+          <input
+            class="g-toolbar-input"
+            aria-label="Search filter values"
+            placeholder="Search values…"
+            value={filterValueSearch()}
+            onInput={(e) => setFilterValueSearch(e.currentTarget.value)}
+            style={{ width: "100%", "margin-bottom": "8px", height: "26px", padding: "0 8px", "box-sizing": "border-box" }}
+          />
           <div style={{ display: "flex", gap: "6px", "margin-bottom": "8px" }}>
             <button
               type="button"
@@ -3422,7 +4013,7 @@ export function SheetEditor(props: SheetEditorProps) {
               Sort Desc
             </button>
           </div>
-          <For each={uniqueColumnValues(filterDropdownCol()!)}>
+          <For each={uniqueColumnValues(filterDropdownCol()!).filter((value) => value.toLowerCase().includes(filterValueSearch().trim().toLowerCase()))}>
             {(value) => {
               const col = () => filterDropdownCol()!;
               const all = () => uniqueColumnValues(col());
@@ -3494,3 +4085,4 @@ export function SheetEditor(props: SheetEditorProps) {
     </div>
   );
 }
+

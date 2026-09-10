@@ -206,6 +206,8 @@ export function ShapeBody(props: {
   const shadow = shapeShadowCss(props.shadow);
   const background = shapeFillCss(fill, props.gradient);
   if (props.type === "line" || props.type === "arrow") {
+    // Canonical line/arrow geometry: a diagonal from the box's top-left
+    // corner to its bottom-right corner, matching PPTX/PDF/PNG exports.
     return (
       <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
         <defs>
@@ -215,9 +217,9 @@ export function ShapeBody(props: {
         </defs>
         <line
           x1="0"
-          y1="50"
+          y1="0"
           x2="100"
-          y2="50"
+          y2="100"
           stroke={fill}
           stroke-width="4"
           vector-effect="non-scaling-stroke"

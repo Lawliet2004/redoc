@@ -45,16 +45,36 @@ fn url_decode(input: &str) -> String {
     let mut i = 0;
     while i < input_bytes.len() {
         if input_bytes[i] == b'%' && i + 2 < input_bytes.len() {
-            if let Ok(b) = u8::from_str_radix(&input[i + 1..i + 3], 16) {
-                bytes.push(b);
-                i += 3;
-                continue;
+            let hex = [input_bytes[i + 1], input_bytes[i + 2]];
+            if hex[0].is_ascii_hexdigit() && hex[1].is_ascii_hexdigit() {
+                if let Ok(hex_str) = std::str::from_utf8(&hex) {
+                    if let Ok(b) = u8::from_str_radix(hex_str, 16) {
+                        bytes.push(b);
+                        i += 3;
+                        continue;
+                    }
+                }
             }
         }
         bytes.push(input_bytes[i]);
         i += 1;
     }
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn ensure_zip_magic(path: &Path, label: &str) -> Result<(), String> {
+    use std::io::Read;
+    let mut header = [0u8; 4];
+    let read = std::fs::File::open(path)
+        .and_then(|mut file| file.read(&mut header))
+        .map_err(|e| format!("Could not read {}: {}", label, e))?;
+    if read < 4 || header != *b"PK\x03\x04" {
+        return Err(format!(
+            "{} does not look like a valid {} file (bad ZIP header); the file may be corrupt or renamed",
+            label, label
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_file_path(arg: &str) -> PathBuf {
@@ -146,7 +166,9 @@ fn update_settings(
             None,
         );
         *state.settings.write() = normalized;
-        let _ = state.persist_settings();
+        state
+            .persist_settings()
+            .map_err(|error| format!("Could not save settings: {error}"))?;
         Ok(())
     })
 }
@@ -181,12 +203,11 @@ fn get_recents(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<RecentEntry
 #[specta::specta]
 fn toggle_pin_recent(state: tauri::State<'_, Arc<AppState>>, id: String) -> Result<bool, String> {
     handle_panic!({
-        let res = (|| {
-            let pinned = state.recents.write().toggle_pin(&id);
-            let _ = state.persist_recents();
-            pinned
-        })();
-        Ok(res)
+        let pinned = state.recents.write().toggle_pin(&id);
+        state
+            .persist_recents()
+            .map_err(|error| format!("Could not save recents: {error}"))?;
+        Ok(pinned)
     })
 }
 
@@ -210,6 +231,7 @@ fn check_recovery(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<Recovere
 struct OpenedDocument {
     meta: RedocMeta,
     body: UntypedJson,
+    warnings: Vec<String>,
 }
 
 #[derive(serde::Serialize, specta::Type)]
@@ -268,6 +290,7 @@ fn create_new_document(
         Ok(OpenedDocument {
             meta: container.meta,
             body: UntypedJson(container.body),
+            warnings: Vec::new(),
         })
     })
 }
@@ -280,6 +303,8 @@ fn open_document(
 ) -> Result<OpenedDocument, String> {
     handle_panic!({
         let normalized = normalize_file_path(&path);
+        let path_display = normalized.to_string_lossy().to_string();
+        ensure_zip_magic(Path::new(&normalized), &path_display)?;
         let container = RedocContainer::read_from_file(&normalized).map_err(|e| e.to_string())?;
         let actor = state.settings.read().author.display_name.clone();
         audit_event(
@@ -298,6 +323,7 @@ fn open_document(
         Ok(OpenedDocument {
             meta: container.meta,
             body: UntypedJson(container.body),
+            warnings: container.repair.warnings,
         })
     })
 }
@@ -307,10 +333,13 @@ fn open_document(
 fn open_recovered_document(path: String) -> Result<OpenedDocument, String> {
     handle_panic!({
         let normalized = normalize_file_path(&path);
+        let path_display = normalized.to_string_lossy().to_string();
+        ensure_zip_magic(Path::new(&normalized), &path_display)?;
         let container = RedocContainer::read_from_file(&normalized).map_err(|e| e.to_string())?;
         Ok(OpenedDocument {
             meta: container.meta,
             body: UntypedJson(container.body),
+            warnings: container.repair.warnings,
         })
     })
 }
@@ -355,7 +384,6 @@ fn save_document(
             serde_json::from_str(&body_json).map_err(|e| e.to_string())?;
         let author = sanitize_author_name(&state.settings.read().author.display_name);
         let mut container = RedocContainer::new_with_author(&mode, &title, body, Some(&author));
-        container.add_inline_data_uri_assets();
         if let Some(id) = document_id {
             container.meta.id = id;
         }
@@ -363,6 +391,14 @@ fn save_document(
         // when overwriting an existing file (last-write-wins keeps the newest
         // body, but attribution accumulates for the history drawer).
         if let Ok(previous) = RedocContainer::read_from_file(&normalized) {
+            if previous.meta.format_version > redoc_file_io::CURRENT_FORMAT_VERSION {
+                return Err(format!(
+                    "Refusing to save: {} uses newer format version {} (supported: {}). Save As a new file instead.",
+                    normalized.to_string_lossy(),
+                    previous.meta.format_version,
+                    redoc_file_io::CURRENT_FORMAT_VERSION
+                ));
+            }
             for name in previous
                 .meta
                 .collaborators
@@ -413,13 +449,28 @@ fn autosave_document(
         let author = sanitize_author_name(&state.settings.read().author.display_name);
         let mut container = RedocContainer::new_with_author(&mode, &title, body, Some(&author));
         container.meta.id = doc_id.clone();
-        container.add_inline_data_uri_assets();
         let snapshots = redoc_file_io::SnapshotManager::new(state.recovery.autosave_dir());
         let path = snapshots
             .write_snapshot(&doc_id, &mut container)
             .map_err(|e| e.to_string())?;
         audit_event(&author, "document.autosave", &doc_id, Some(&mode));
         Ok(path.to_string_lossy().to_string())
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+fn discard_doc_snapshot(
+    state: tauri::State<'_, Arc<AppState>>,
+    doc_id: String,
+) -> Result<(), String> {
+    handle_panic!({
+        // Called when the user explicitly discards unsaved changes on close;
+        // without this the snapshot lingers and shows up as a stale recovery
+        // entry on every future launch.
+        let _ = redoc_file_io::SnapshotManager::new(state.recovery.autosave_dir())
+            .remove_snapshot(&doc_id);
+        Ok(())
     })
 }
 
@@ -506,9 +557,18 @@ fn apply_export_fixups(
     })
 }
 
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ExportProgress {
+    stage: String,
+    /// 0..=100 coarse indicator; 100 only on completion.
+    percent: u32,
+}
+
 #[tauri::command]
 #[specta::specta]
 fn export_document_to_file(
+    app: tauri::AppHandle,
     path: String,
     mode: String,
     format: String,
@@ -517,8 +577,31 @@ fn export_document_to_file(
 ) -> Result<(), String> {
     handle_panic!({
         let normalized = normalize_file_path(&path);
+        let _ = app.emit(
+            "export-progress",
+            ExportProgress {
+                stage: "rendering".to_string(),
+                percent: 10,
+            },
+        );
         let bytes = export_document(mode, format, body_json, title)?;
-        redoc_file_io::write_bytes_atomic(&normalized, &bytes).map_err(|e| e.to_string())
+        let _ = app.emit(
+            "export-progress",
+            ExportProgress {
+                stage: "writing".to_string(),
+                percent: 70,
+            },
+        );
+        let result =
+            redoc_file_io::write_bytes_atomic(&normalized, &bytes).map_err(|e| e.to_string());
+        let _ = app.emit(
+            "export-progress",
+            ExportProgress {
+                stage: "done".to_string(),
+                percent: 100,
+            },
+        );
+        result
     })
 }
 
@@ -566,11 +649,8 @@ fn export_sheet_csv_cmd(sheet_data: SheetData) -> Result<String, String> {
 fn export_csv_to_file(path: String, sheet_data: SheetData) -> Result<(), String> {
     handle_panic!({
         let normalized = normalize_file_path(&path);
-        std::fs::write(
-            normalized,
-            redoc_sheet_engine::export_sheet_to_csv(&sheet_data),
-        )
-        .map_err(|e| e.to_string())
+        let csv = redoc_sheet_engine::export_sheet_to_csv(&sheet_data);
+        redoc_file_io::write_bytes_atomic(&normalized, csv.as_bytes()).map_err(|e| e.to_string())
     })
 }
 
@@ -580,6 +660,15 @@ fn import_csv_file(path: String) -> Result<WorkbookModel, String> {
     handle_panic!({
         let normalized = normalize_file_path(&path);
         let csv = std::fs::read(&normalized).map_err(|e| e.to_string())?;
+        if csv.starts_with(b"PK\x03\x04") {
+            return Err(
+                "CSV file starts with ZIP bytes; it is probably a renamed .zip/.xlsx file"
+                    .to_string(),
+            );
+        }
+        if csv.iter().take(512).any(|byte| *byte == 0) {
+            return Err("CSV file contains NUL bytes; it is not plain text".to_string());
+        }
         let name = normalized
             .file_stem()
             .and_then(|name| name.to_str())
@@ -601,6 +690,15 @@ fn import_csv_file_with_options(
     handle_panic!({
         let normalized = normalize_file_path(&path);
         let csv = std::fs::read(&normalized).map_err(|e| e.to_string())?;
+        if csv.starts_with(b"PK\x03\x04") {
+            return Err(
+                "CSV file starts with ZIP bytes; it is probably a renamed .zip/.xlsx file"
+                    .to_string(),
+            );
+        }
+        if csv.iter().take(512).any(|byte| *byte == 0) {
+            return Err("CSV file contains NUL bytes; it is not plain text".to_string());
+        }
         let name = normalized
             .file_stem()
             .and_then(|name| name.to_str())
@@ -620,6 +718,8 @@ fn import_csv_file_with_options(
 fn import_xlsx_file(path: String) -> Result<XlsxImportResponse, String> {
     handle_panic!({
         let normalized = normalize_file_path(&path);
+        let path_display = normalized.to_string_lossy().to_string();
+        ensure_zip_magic(Path::new(&normalized), &path_display)?;
         redoc_export::import_workbook_from_xlsx_with_report(&normalized)
             .map(|result| XlsxImportResponse {
                 workbook: result.workbook,
@@ -634,6 +734,8 @@ fn import_xlsx_file(path: String) -> Result<XlsxImportResponse, String> {
 fn import_docx_file(path: String) -> Result<DocxImportResponse, String> {
     handle_panic!({
         let normalized = normalize_file_path(&path);
+        let path_display = normalized.to_string_lossy().to_string();
+        ensure_zip_magic(Path::new(&normalized), &path_display)?;
         redoc_export::import_docx_to_doc_with_report(&normalized)
             .map(|result| DocxImportResponse {
                 document: UntypedJson(result.document),
@@ -648,6 +750,8 @@ fn import_docx_file(path: String) -> Result<DocxImportResponse, String> {
 fn import_pptx_file(path: String) -> Result<PptxImportResponse, String> {
     handle_panic!({
         let normalized = normalize_file_path(&path);
+        let path_display = normalized.to_string_lossy().to_string();
+        ensure_zip_magic(Path::new(&normalized), &path_display)?;
         redoc_export::import_deck_from_pptx_with_report(&normalized)
             .map(|result| PptxImportResponse {
                 deck: result.deck,
@@ -988,6 +1092,7 @@ fn specta_builder() -> SpectaBuilder<tauri::Wry> {
         mark_clean_shutdown,
         save_document,
         autosave_document,
+        discard_doc_snapshot,
         export_document,
         inspect_export_compatibility,
         apply_export_fixups,
@@ -1044,6 +1149,23 @@ pub fn run() {
     let specta_builder = specta_builder();
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            #[cfg(any(windows, target_os = "linux"))]
+            {
+                let paths = argv
+                    .iter()
+                    .skip(1)
+                    .filter_map(|arg| path_from_arg(arg))
+                    .filter(|path| is_redoc_path(path))
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                queue_open_paths(app, paths);
+            }
+            #[cfg(not(any(windows, target_os = "linux")))]
+            {
+                let _ = (app, argv);
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_window_state::Builder::default().build());
@@ -1092,6 +1214,28 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ensure_zip_magic_rejects_non_zip() {
+        let dir = std::env::temp_dir().join(format!(
+            "redoc-magic-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let bad = dir.join("not-a-zip.redoc");
+        std::fs::write(&bad, b"plain text, definitely not a zip").expect("write file");
+        assert!(ensure_zip_magic(Path::new(&bad), "not-a-zip.redoc").is_err());
+
+        let good = dir.join("zip.redoc");
+        let mut zip_bytes = b"PK\x03\x04".to_vec();
+        zip_bytes.extend_from_slice(b"rest of archive");
+        std::fs::write(&good, zip_bytes).expect("write file");
+        assert!(ensure_zip_magic(Path::new(&good), "zip.redoc").is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn test_normalize_file_path_windows_uri() {

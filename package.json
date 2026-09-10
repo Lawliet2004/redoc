@@ -11,6 +11,8 @@
     "tauri:dev": "pnpm --filter @redoc/desktop exec tauri dev",
     "tauri:build": "pnpm --filter @redoc/desktop exec tauri build",
     "test": "vitest run && cargo test --workspace",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
     "a11y:check": "vitest run --config vitest.a11y.config.ts",
     "performance:check": "node scripts/perf-budget.mjs",
     "typecheck": "pnpm exec tsc -p apps/desktop/tsconfig.json --noEmit",
@@ -19,7 +21,9 @@
     "ledger:check": "node scripts/validate-capability-ledger.mjs"
   },
   "devDependencies": {
+    "@playwright/test": "^1.49.0",
     "@tauri-apps/cli": "^2.1.0",
+    "@vitest/coverage-v8": "^2.1.4",
     "axe-core": "^4.12.1",
     "jsdom": "^30.0.1",
     "solid-js": "^1.9.14",

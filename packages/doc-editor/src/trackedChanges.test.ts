@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getTrackedChangeStats, getTrackedChangeSummaries, resolveTrackedChange, resolveTrackedChanges, newTrackedChangeAttrs, insertedRangesFromTransaction } from "./trackedChanges";
+import { getTrackedChangeStats, getTrackedChangeSummaries, resolveTrackedChange, resolveTrackedChanges, newTrackedChangeAttrs, insertedRangesFromTransaction, deletedRangesFromTransaction } from "./trackedChanges";
 
 const doc = {
   type: "doc",
@@ -80,5 +80,29 @@ describe("tracked changes", () => {
   it("ignores transactions whose steps carry no slice", () => {
     const tr = { steps: [{ getMap: () => ({ forEach: () => {} }) }] };
     expect(insertedRangesFromTransaction(tr)).toEqual([]);
+  });
+
+  it("derives deleted ranges from replace-step maps and keeps text-bearing spans only", () => {
+    const deleteStep = {
+      slice: { size: 0 },
+      getMap: () => ({
+        forEach: (fn: (a: number, b: number, c: number, d: number) => void) => fn(2, 6, 2, 2),
+      }),
+    };
+    const textOldDoc = {
+      nodesBetween: (_from: number, _to: number, fn: (node: any, _pos: number) => void) => {
+        fn({ isText: true, text: "word" }, 3);
+      },
+    };
+    expect(deletedRangesFromTransaction({ steps: [deleteStep] }, textOldDoc)).toEqual([
+      { from: 2, to: 6 },
+    ]);
+    // Deletions that contained no text (e.g. block-level removals) are skipped.
+    const blockOldDoc = {
+      nodesBetween: (_from: number, _to: number, fn: (node: any, _pos: number) => void) => {
+        fn({ isText: false, isBlock: true }, 2);
+      },
+    };
+    expect(deletedRangesFromTransaction({ steps: [deleteStep] }, blockOldDoc)).toEqual([]);
   });
 });

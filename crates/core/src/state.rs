@@ -28,6 +28,53 @@ pub struct AppState {
     recents_path: std::path::PathBuf,
 }
 
+/// Write bytes to a temp file next to the target, fsync, then rename over it
+/// so a crash mid-write never leaves a truncated settings/recents file.
+pub fn write_bytes_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let temp_path = parent.join(format!(".tmp_{}", uuid::Uuid::now_v7()));
+    struct TempGuard(std::path::PathBuf);
+    impl Drop for TempGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let guard = TempGuard(temp_path.clone());
+    {
+        let mut file = std::fs::File::create(&temp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    match std::fs::rename(&temp_path, path) {
+        Ok(()) => {
+            std::mem::forget(guard);
+            Ok(())
+        }
+        Err(err) if !path.exists() => Err(err),
+        Err(_) => {
+            let target_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("state");
+            let backup_path = parent.join(format!(".{}.bak-{}", target_name, uuid::Uuid::now_v7()));
+            std::fs::rename(path, &backup_path)?;
+            match std::fs::rename(&temp_path, path) {
+                Ok(()) => {
+                    std::mem::forget(guard);
+                    let _ = std::fs::remove_file(backup_path);
+                    Ok(())
+                }
+                Err(rename_err) => {
+                    std::fs::rename(&backup_path, path)?;
+                    Err(rename_err)
+                }
+            }
+        }
+    }
+}
+
 impl AppState {
     pub fn new(app_data_dir: std::path::PathBuf) -> Self {
         let settings_path = app_data_dir.join("settings.json");
@@ -54,25 +101,15 @@ impl AppState {
     }
 
     pub fn persist_settings(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(
-            self.settings_path
-                .parent()
-                .unwrap_or(std::path::Path::new(".")),
-        )?;
         let json =
             serde_json::to_vec_pretty(&*self.settings.read()).map_err(std::io::Error::other)?;
-        std::fs::write(&self.settings_path, json)
+        write_bytes_atomic(&self.settings_path, &json)
     }
 
     pub fn persist_recents(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(
-            self.recents_path
-                .parent()
-                .unwrap_or(std::path::Path::new(".")),
-        )?;
         let json =
             serde_json::to_vec_pretty(&*self.recents.read()).map_err(std::io::Error::other)?;
-        std::fs::write(&self.recents_path, json)
+        write_bytes_atomic(&self.recents_path, &json)
     }
 
     pub fn log_dir(&self) -> std::path::PathBuf {
@@ -104,5 +141,22 @@ mod tests {
         assert_eq!(loaded.settings.read().theme, "dark");
         assert_eq!(loaded.recents.read().entries[0].title, "Example");
         let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn write_bytes_atomic_replaces_and_cleans_temp_files() {
+        let dir = std::env::temp_dir().join(format!("redoc-atomic-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let target = dir.join("state.json");
+        write_bytes_atomic(&target, b"first").expect("initial write");
+        write_bytes_atomic(&target, b"second").expect("replacement write");
+        assert_eq!(std::fs::read(&target).expect("read target"), b"second");
+        let leftovers = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp_"))
+            .count();
+        assert_eq!(leftovers, 0, "atomic state write left temp files behind");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

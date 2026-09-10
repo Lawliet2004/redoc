@@ -42,9 +42,31 @@ pub struct MergeDecision {
     pub changed: bool,
 }
 
+fn sanitize_snapshot_id(doc_id: &str) -> Result<&str, FileIoError> {
+    if doc_id.is_empty()
+        || doc_id.len() > 80
+        || !doc_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(FileIoError::InvalidDocId(doc_id.to_string()));
+    }
+    Ok(doc_id)
+}
+
 impl SnapshotManager {
     pub fn new(autosave_dir: PathBuf) -> Self {
         Self { autosave_dir }
+    }
+
+    fn snapshot_file(&self, doc_id: &str, suffix: &str) -> Result<PathBuf, FileIoError> {
+        let id = sanitize_snapshot_id(doc_id)?;
+        let name = format!("{id}{suffix}");
+        let path = self.autosave_dir.join(&name);
+        if path.file_name().and_then(|name| name.to_str()) != Some(name.as_str()) {
+            return Err(FileIoError::InvalidDocId(doc_id.to_string()));
+        }
+        Ok(path)
     }
 
     pub fn write_snapshot(
@@ -53,7 +75,7 @@ impl SnapshotManager {
         container: &mut RedocContainer,
     ) -> Result<PathBuf, FileIoError> {
         std::fs::create_dir_all(&self.autosave_dir)?;
-        let snapshot_file = self.autosave_dir.join(format!("{}.redoc", doc_id));
+        let snapshot_file = self.snapshot_file(doc_id, ".redoc")?;
 
         // Hash-gate autosave: skip writing snapshot if hash hasn't changed
         if snapshot_file.exists() {
@@ -67,9 +89,9 @@ impl SnapshotManager {
         }
 
         // 3-deep snapshot rotation (.bak3 <- .bak2 <- .bak1 <- primary)
-        let bak1 = self.autosave_dir.join(format!("{}.redoc.bak1", doc_id));
-        let bak2 = self.autosave_dir.join(format!("{}.redoc.bak2", doc_id));
-        let bak3 = self.autosave_dir.join(format!("{}.redoc.bak3", doc_id));
+        let bak1 = self.snapshot_file(doc_id, ".redoc.bak1")?;
+        let bak2 = self.snapshot_file(doc_id, ".redoc.bak2")?;
+        let bak3 = self.snapshot_file(doc_id, ".redoc.bak3")?;
 
         if bak2.exists() {
             let _ = std::fs::rename(&bak2, &bak3);
@@ -86,14 +108,17 @@ impl SnapshotManager {
     }
 
     pub fn remove_snapshot(&self, doc_id: &str) -> std::io::Result<()> {
-        let snapshot_file = self.autosave_dir.join(format!("{}.redoc", doc_id));
+        let Ok(snapshot_file) = self.snapshot_file(doc_id, ".redoc") else {
+            return Ok(());
+        };
         if snapshot_file.exists() {
             let _ = std::fs::remove_file(snapshot_file);
         }
         for i in 1..=3 {
-            let bak = self.autosave_dir.join(format!("{}.redoc.bak{}", doc_id, i));
-            if bak.exists() {
-                let _ = std::fs::remove_file(bak);
+            if let Ok(bak) = self.snapshot_file(doc_id, &format!(".redoc.bak{i}")) {
+                if bak.exists() {
+                    let _ = std::fs::remove_file(bak);
+                }
             }
         }
         Ok(())
@@ -101,10 +126,10 @@ impl SnapshotManager {
 
     fn history_slot(&self, doc_id: &str, slot: &str) -> Option<HistoryEntry> {
         let file = match slot {
-            "current" => self.autosave_dir.join(format!("{}.redoc", doc_id)),
-            "bak1" => self.autosave_dir.join(format!("{}.redoc.bak1", doc_id)),
-            "bak2" => self.autosave_dir.join(format!("{}.redoc.bak2", doc_id)),
-            "bak3" => self.autosave_dir.join(format!("{}.redoc.bak3", doc_id)),
+            "current" => self.snapshot_file(doc_id, ".redoc").ok()?,
+            "bak1" => self.snapshot_file(doc_id, ".redoc.bak1").ok()?,
+            "bak2" => self.snapshot_file(doc_id, ".redoc.bak2").ok()?,
+            "bak3" => self.snapshot_file(doc_id, ".redoc.bak3").ok()?,
             _ => return None,
         };
         if !file.exists() {
@@ -260,6 +285,21 @@ mod tests {
         assert!(!bak1.exists());
         assert!(!bak2.exists());
         assert!(!bak3.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_path_traversal_document_ids() {
+        let dir =
+            std::env::temp_dir().join(format!("redoc-snapshots-safe-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("create snapshot dir");
+        let manager = SnapshotManager::new(dir.clone());
+        let mut container = RedocContainer::new("doc", "Bad", json!({ "v": 1 }));
+        let error = manager
+            .write_snapshot("../escape", &mut container)
+            .expect_err("traversal id must fail");
+        assert!(matches!(error, FileIoError::InvalidDocId(_)));
+        assert!(std::fs::read_dir(&dir).expect("read dir").next().is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

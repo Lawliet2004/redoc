@@ -66,4 +66,6 @@ fn missing_asset() {
     let loaded = RedocContainer::read_from_file(tmp.path()).unwrap();
     assert_eq!(loaded.meta.assets.len(), 1);
     assert!(!loaded.assets_data.contains_key("fake_hash"));
+    assert_eq!(loaded.repair.missing_assets, vec!["fake_hash".to_string()]);
+    assert!(!loaded.repair.warnings.is_empty());
 }

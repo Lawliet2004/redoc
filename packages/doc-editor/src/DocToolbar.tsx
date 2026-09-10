@@ -1,4 +1,4 @@
-import { createSignal, Show, For } from "solid-js";
+import { createSignal, For, Show } from "solid-js";
 import {
   ToolbarRow, ToolbarButton, ToolbarSep, ToolbarSelect, ToolbarColor
 } from "@redoc/editor-common";
@@ -6,9 +6,13 @@ import { t } from "@redoc/ui";
 import {
   IconBold, IconItalic, IconUnderline, IconStrikethrough, IconAlignLeft, IconAlignCenter,
   IconAlignRight, IconAlignJustify, IconList, IconOrderedList, IconUndo, IconRedo, IconSearch,
-  IconTable, IconImage, IconLink, IconClearFormat,
+  IconTable, IconImage, IconLink, IconClearFormat, IconSuperscript, IconSubscript,
+  IconTextColor, IconHighlight, IconLineSpacing, IconIndent, IconOutdent,
 } from "@redoc/icons";
 import type { DocToolbarProps } from "./docToolbarTypes";
+
+const LINE_SPACINGS = ["1.0", "1.15", "1.5", "2.0", "3.0"];
+const SPACINGS = [0, 3, 6, 12, 18, 24];
 
 export type { DocToolbarProps } from "./docToolbarTypes";
 
@@ -50,6 +54,16 @@ export function DocToolbar(props: DocToolbarProps) {
     { label: "Toggle header row", action: props.onToggleHeaderRow },
     { label: "Format Painter", action: props.onToggleFormatPainter },
   ];
+
+  const spacingSelect = (label: string, value: string, onChange: (v: string) => void) => (
+    <ToolbarSelect
+      ariaLabel={label}
+      width="64px"
+      value={value}
+      onChange={onChange}
+      options={SPACINGS.map((s) => ({ value: String(s), label: String(s) }))}
+    />
+  );
 
   return (
     <ToolbarRow>
@@ -104,15 +118,28 @@ export function DocToolbar(props: DocToolbarProps) {
       <ToolbarButton title="Italic (Ctrl+I)" onClick={props.onToggleItalic}><IconItalic /></ToolbarButton>
       <ToolbarButton title="Underline (Ctrl+U)" onClick={props.onToggleUnderline}><IconUnderline /></ToolbarButton>
       <ToolbarButton title="Strikethrough" onClick={props.onToggleStrike}><IconStrikethrough /></ToolbarButton>
+      <ToolbarButton title="Superscript (Ctrl+.)" onClick={props.onToggleSuper}><IconSuperscript /></ToolbarButton>
+      <ToolbarButton title="Subscript (Ctrl+,)" onClick={props.onToggleSub}><IconSubscript /></ToolbarButton>
+      <ToolbarColor title="Text Color" value={props.textColor} onChange={props.onChangeTextColor}><IconTextColor /></ToolbarColor>
+      <ToolbarColor title="Highlight Color" value={props.highlightColor} onChange={props.onChangeHighlightColor}><IconHighlight /></ToolbarColor>
       <ToolbarButton title="Clear Direct Formatting" onClick={props.onClearFormatting}><IconClearFormat /></ToolbarButton>
       <ToolbarSep />
       <ToolbarButton title="Align Left" onClick={props.onAlignLeft}><IconAlignLeft /></ToolbarButton>
       <ToolbarButton title="Align Center" onClick={props.onAlignCenter}><IconAlignCenter /></ToolbarButton>
       <ToolbarButton title="Align Right" onClick={props.onAlignRight}><IconAlignRight /></ToolbarButton>
       <ToolbarButton title="Justify" onClick={props.onAlignJustify}><IconAlignJustify /></ToolbarButton>
+      <ToolbarButton title="Decrease Indent" onClick={props.onDecreaseIndent}><IconOutdent /></ToolbarButton>
+      <ToolbarButton title="Increase Indent" onClick={props.onIncreaseIndent}><IconIndent /></ToolbarButton>
       <ToolbarSep />
       <ToolbarButton title="Bullets" onClick={props.onListBullet}><IconList /></ToolbarButton>
       <ToolbarButton title="Numbering" onClick={props.onListOrdered}><IconOrderedList /></ToolbarButton>
+      <ToolbarSelect
+        ariaLabel="Line spacing"
+        width="64px"
+        value={props.currentLineSpacing}
+        onChange={(v) => props.onChangeLineSpacing(Number(v))}
+        options={LINE_SPACINGS.map((s) => ({ value: s, label: s }))}
+      />
       <ToolbarSep />
       <ToolbarButton title="Insert Table" onClick={props.onInsertTable}><IconTable /></ToolbarButton>
       <ToolbarButton title="Insert Image" onClick={props.onInsertImage}><IconImage /></ToolbarButton>
@@ -129,6 +156,17 @@ export function DocToolbar(props: DocToolbarProps) {
         </ToolbarButton>
         <Show when={overflowOpen()}>
           <div role="menu" aria-label={t("toolbar.overflowLabel")} class="g-cmd-menu g-cmd-overflow">
+            <div class="g-cmd-menuitem" role="none" style={{ display: "flex", "align-items": "center", gap: "8px", padding: "6px 12px" }}>
+              <span><IconLineSpacing /></span>
+              <label style={{ display: "flex", "align-items": "center", gap: "6px", "font-size": "13px" }}>
+                Spacing before
+                {spacingSelect("Spacing before", String(props.spacingBefore), (v) => props.onChangeSpacingBefore(Number(v)))}
+              </label>
+              <label style={{ display: "flex", "align-items": "center", gap: "6px", "font-size": "13px" }}>
+                after
+                {spacingSelect("Spacing after", String(props.spacingAfter), (v) => props.onChangeSpacingAfter(Number(v)))}
+              </label>
+            </div>
             <For each={overflowGroups}>
               {(item) => (
                 <button

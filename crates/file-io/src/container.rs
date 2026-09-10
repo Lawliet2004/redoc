@@ -62,6 +62,8 @@ pub enum FileIoError {
     },
     #[error("Asset hash mismatch for {hash}")]
     AssetHashMismatch { hash: String },
+    #[error("Invalid document id: {0}")]
+    InvalidDocId(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -111,6 +113,8 @@ pub struct RedocContainer {
     pub meta: RedocMeta,
     pub body: serde_json::Value,
     pub assets_data: std::collections::HashMap<String, Vec<u8>>, // hash -> bytes
+    #[serde(default)]
+    pub repair: ContainerRepairReport,
 }
 
 /// Friendly, non-fatal report attached to a container read: missing assets,
@@ -160,7 +164,7 @@ impl RedocContainer {
                 "write".to_string(),
                 "comment".to_string(),
             ],
-            app_version: "0.1.0".to_string(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
             assets: Vec::new(),
             dirty_on_crash: Some(false),
             read_only: None,
@@ -171,6 +175,7 @@ impl RedocContainer {
             meta,
             body,
             assets_data: std::collections::HashMap::new(),
+            repair: ContainerRepairReport::default(),
         }
     }
 
@@ -190,42 +195,6 @@ impl RedocContainer {
             });
         }
         hash
-    }
-
-    pub fn add_inline_data_uri_assets(&mut self) {
-        fn collect(value: &serde_json::Value, assets: &mut Vec<(String, String, Vec<u8>)>) {
-            match value {
-                serde_json::Value::String(text) if text.starts_with("data:") => {
-                    if let Some((header, encoded)) = text.split_once(',') {
-                        let mime = header
-                            .strip_prefix("data:")
-                            .and_then(|value| value.split(';').next())
-                            .unwrap_or("application/octet-stream")
-                            .to_string();
-                        if let Some(bytes) = decode_base64(encoded) {
-                            assets.push(("inline-asset".to_string(), mime, bytes));
-                        }
-                    }
-                }
-                serde_json::Value::Array(values) => {
-                    for value in values {
-                        collect(value, assets);
-                    }
-                }
-                serde_json::Value::Object(values) => {
-                    for value in values.values() {
-                        collect(value, assets);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let mut assets = Vec::new();
-        collect(&self.body, &mut assets);
-        for (name, mime, data) in assets {
-            self.add_asset(&name, &mime, data);
-        }
     }
 
     pub fn read_from_file<P: AsRef<Path>>(path: P) -> Result<Self, FileIoError> {
@@ -267,6 +236,7 @@ impl RedocContainer {
             serde_json::from_str(&content)?
         };
 
+        let original_format_version = meta.format_version;
         if meta.format_version > CURRENT_FORMAT_VERSION {
             meta.read_only = Some(true);
             meta.warning = Some(format!(
@@ -285,6 +255,7 @@ impl RedocContainer {
 
         // Read assets
         let mut assets_data = std::collections::HashMap::new();
+        let mut missing_assets = Vec::new();
         let mut total_asset_bytes = 0u64;
         for asset in &meta.assets {
             if asset.hash.is_empty()
@@ -344,6 +315,29 @@ impl RedocContainer {
                     });
                 }
                 assets_data.insert(asset.hash.clone(), data);
+            } else {
+                missing_assets.push(asset.hash.clone());
+            }
+        }
+
+        let mut warnings = Vec::new();
+        let mut read_only = false;
+        let mut migrated = false;
+        if !missing_assets.is_empty() {
+            warnings.push(format!(
+                "{} listed asset(s) are missing from the archive",
+                missing_assets.len()
+            ));
+        }
+        if original_format_version > CURRENT_FORMAT_VERSION {
+            read_only = true;
+        }
+        if original_format_version < CURRENT_FORMAT_VERSION {
+            migrated = true;
+        }
+        if let Some(warning) = &meta.warning {
+            if !warning.is_empty() && !warnings.iter().any(|w| w == warning) {
+                warnings.push(warning.clone());
             }
         }
 
@@ -351,6 +345,12 @@ impl RedocContainer {
             meta,
             body,
             assets_data,
+            repair: ContainerRepairReport {
+                warnings,
+                read_only,
+                migrated,
+                missing_assets,
+            },
         })
     }
 
@@ -471,33 +471,6 @@ pub fn write_bytes_atomic<P: AsRef<Path>>(path: P, bytes: &[u8]) -> Result<(), F
     Ok(())
 }
 
-fn decode_base64(value: &str) -> Option<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut buffer = 0u32;
-    let mut bits = 0u8;
-    for byte in value.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
-        if byte == b'=' {
-            break;
-        }
-        let value = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        } as u32;
-        buffer = (buffer << 6) | value;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            output.push((buffer >> bits) as u8);
-            buffer &= (1 << bits) - 1;
-        }
-    }
-    Some(output)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,19 +495,26 @@ mod tests {
     }
 
     #[test]
-    fn indexes_inline_data_uri_assets() {
+    fn data_uri_images_are_not_duplicated_into_assets() {
+        let path =
+            std::env::temp_dir().join(format!("redoc-inline-{}.redoc", uuid::Uuid::now_v7()));
         let mut container = RedocContainer::new(
             "slide",
             "Image",
             serde_json::json!({ "src": "data:image/png;base64,aGVsbG8=" }),
         );
-        container.add_inline_data_uri_assets();
-        assert_eq!(container.meta.assets.len(), 1);
-        assert_eq!(container.meta.assets[0].mime, "image/png");
-        assert_eq!(
-            container.assets_data.get(&container.meta.assets[0].hash),
-            Some(&b"hello".to_vec())
+        container.save_atomic(&path).expect("save container");
+
+        let loaded = RedocContainer::read_from_file(&path).expect("read container");
+        assert!(
+            loaded.meta.assets.is_empty(),
+            "data-URI images must not be copied into assets/"
         );
+        assert_eq!(
+            loaded.body,
+            serde_json::json!({ "src": "data:image/png;base64,aGVsbG8=" })
+        );
+        std::fs::remove_file(path).expect("cleanup test container");
     }
 
     #[test]
@@ -610,6 +590,32 @@ mod tests {
         let loaded = RedocContainer::read_from_file(&path).expect("read future container");
         assert_eq!(loaded.meta.read_only, Some(true));
         assert!(loaded.meta.warning.is_some());
+        assert!(loaded.repair.read_only);
+        assert!(!loaded.repair.warnings.is_empty());
+        std::fs::remove_file(path).expect("cleanup test container");
+    }
+
+    #[test]
+    fn missing_listed_assets_surface_in_repair_report() {
+        let path =
+            std::env::temp_dir().join(format!("redoc-missing-{}.redoc", uuid::Uuid::now_v7()));
+        let mut original = RedocContainer::new(
+            "doc",
+            "Missing Asset",
+            serde_json::json!({ "type": "doc", "content": [] }),
+        );
+        original.meta.assets.push(AssetInfo {
+            hash: "f".repeat(64),
+            mime: "image/png".to_string(),
+            name: "gone.png".to_string(),
+            size: 7,
+        });
+        original.save_atomic(&path).expect("save container");
+
+        let loaded = RedocContainer::read_from_file(&path).expect("read container");
+        assert_eq!(loaded.repair.missing_assets, vec!["f".repeat(64)]);
+        assert!(!loaded.repair.warnings.is_empty());
+        assert!(!loaded.repair.read_only);
         std::fs::remove_file(path).expect("cleanup test container");
     }
 }

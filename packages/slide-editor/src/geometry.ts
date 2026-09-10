@@ -42,10 +42,12 @@ export function snapElementPosition(
   rawX: number,
   rawY: number,
   peers: SnapElement[],
+  canvasWidth = 960,
+  canvasHeight = 540,
 ): SnapResult {
   const others = peers.filter((element) => element.id !== selected.id);
-  const xPositions = [480];
-  const yPositions = [270];
+  const xPositions = [canvasWidth / 2];
+  const yPositions = [canvasHeight / 2];
   for (const element of others) {
     xPositions.push(element.x, element.x + element.width / 2, element.x + element.width);
     yPositions.push(element.y, element.y + element.height / 2, element.y + element.height);
@@ -53,12 +55,34 @@ export function snapElementPosition(
 
   const xSnap = nearestSnap(rawX, selected.width, xPositions);
   const ySnap = nearestSnap(rawY, selected.height, yPositions);
-  const x = Math.max(0, Math.min(960 - selected.width, xSnap?.value ?? rawX));
-  const y = Math.max(0, Math.min(540 - selected.height, ySnap?.value ?? rawY));
+  const x = Math.max(0, Math.min(canvasWidth - selected.width, xSnap?.value ?? rawX));
+  const y = Math.max(0, Math.min(canvasHeight - selected.height, ySnap?.value ?? rawY));
   const guides: AlignmentGuide[] = [];
   if (xSnap) guides.push({ axis: "x", position: xSnap.guide });
   if (ySnap) guides.push({ axis: "y", position: ySnap.guide });
   return { x, y, guides };
+}
+
+/** Window of filmstrip rows to render: a buffer around the scroll viewport
+ * plus the pinned (active) row so keyboard navigation stays visible. */
+export function visibleThumbRange(
+  scrollTop: number,
+  viewportHeight: number,
+  count: number,
+  itemHeight: number,
+  buffer: number,
+  pinnedIndex: number,
+): { first: number; last: number } {
+  if (count <= 0 || itemHeight <= 0) return { first: 0, last: -1 };
+  const first = Math.max(0, Math.floor(scrollTop / itemHeight) - buffer);
+  const last = Math.min(
+    count - 1,
+    Math.ceil((scrollTop + Math.max(0, viewportHeight)) / itemHeight) + buffer,
+  );
+  if (pinnedIndex >= 0 && pinnedIndex < count) {
+    return { first: Math.min(first, pinnedIndex), last: Math.max(last, pinnedIndex) };
+  }
+  return { first, last };
 }
 export function computeBounds(elements: SnapElement[]) {
   if (elements.length === 0) return null;

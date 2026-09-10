@@ -84,6 +84,8 @@ export const commands = {
     ) as RedocMeta,
   autosaveDocument: async (docId: string, mode: string, title: string, body: unknown) =>
     unwrap(await generatedCommands.autosaveDocument(docId, mode, title, JSON.stringify(body))),
+  discardDocSnapshot: async (docId: string) =>
+    unwrap(await generatedCommands.discardDocSnapshot(docId)),
   exportDocument: async (mode: string, format: string, body: unknown, title: string) =>
     unwrap(await generatedCommands.exportDocument(mode, format, JSON.stringify(body), title)),
   inspectExportCompatibility: async (mode: string, format: string, body: unknown) =>

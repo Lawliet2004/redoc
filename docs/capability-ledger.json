@@ -26,8 +26,8 @@
       "status": "verified",
       "evidence": [
         "apps/desktop/src/App.tsx",
-        "apps/desktop/src/shell/fileRouting.ts",
-        "apps/desktop/src/shell/fileRouting.test.ts"
+        "packages/editor-common/src/fileRouting.ts",
+        "packages/editor-common/src/fileRouting.test.ts"
       ],
       "targetPhase": "office-sessions"
     },
@@ -115,8 +115,8 @@
         "crates/export/src/pdf.rs",
         "crates/export/src/docx.rs::round_trips_docx_page_setup_and_header_footer_fields",
         "crates/export/src/docx.rs::round_trips_native_page_fields_in_document_body",
-        "crates/export/src/docx.rs::round_trips_docx_section_columns",
-        "crates/export/src/docx.rs::exports_per_section_page_properties"
+        "crates/export/src/docx.rs::imports_simple_page_field_with_cached_result",
+        "crates/export/src/docx.rs::round_trips_docx_section_columns"
       ],
       "targetPhase": "document-completion"
     },
@@ -185,6 +185,11 @@
         "crates/export/src/docx.rs::skips_unsupported_simple_field_with_warning",
         "crates/export/src/docx.rs::exports_bounded_paragraph_spacing",
         "crates/export/src/docx.rs::round_trips_paragraph_layout_attributes",
+        "crates/export/src/docx.rs::round_trips_table_header_rows",
+        "crates/export/src/docx.rs::exports_table_column_widths_and_rectangular_merges",
+        "crates/export/src/docx.rs::exports_ordered_list_start_values",
+        "crates/export/src/docx.rs::exports_comment_thread_replies",
+        "crates/export/src/docx.rs::exports_image_dimensions_from_attrs",
         "crates/export/src/docx.rs::round_trips_named_paragraph_styles",
         "crates/export/src/docx.rs::round_trips_native_footnotes",
         "crates/export/src/compatibility.rs::accepts_supported_section_breaks_and_bookmark_marks",
@@ -199,7 +204,7 @@
     {
       "id": "sheet.grid-editing",
       "area": "spreadsheet",
-      "title": "Virtualized grid, cell editing, selection, clipboard, history, and cell borders",
+      "title": "Virtualized grid, cell editing, selection, clipboard (RFC-4180 TSV), history, cell borders, and hidden rows/columns",
       "status": "verified",
       "evidence": [
         "packages/sheet-editor/src/SheetEditor.tsx",
@@ -209,7 +214,12 @@
         "packages/sheet-editor/src/cellBorders.test.ts",
         "crates/sheet-engine/src/cell.rs::CellBorders",
         "crates/sheet-engine/src/workbook/workbook_core.rs::tests::cell_borders_survive_serialization",
-        "crates/export/src/xlsx.rs::tests::xlsx_round_trips_cell_borders"
+        "crates/export/src/xlsx.rs::tests::xlsx_round_trips_cell_borders",
+        "packages/utils/src/index.ts::parseTsv",
+        "packages/utils/src/index.test.ts",
+        "packages/sheet-editor/src/SheetEditor.tsx::toggleHideRows",
+        "crates/sheet-engine/src/workbook/ops.rs::tests::hide_flags_round_trip_through_serialization",
+        "crates/export/src/xlsx.rs::tests::xlsx_round_trips_hidden_rows_and_cols"
       ],
       "targetPhase": "maintain"
     },
@@ -299,7 +309,14 @@
         "packages/sheet-editor/src/cellComments.ts",
         "packages/sheet-editor/src/cellComments.test.ts",
         "packages/sheet-editor/src/sheetModel.test.ts::persists_the_six_designer_chart_types_through_workbook_builds",
-        "crates/export/src/xlsx.rs::chart_type_for_maps_all_six_designer_chart_types"
+        "crates/export/src/xlsx.rs::chart_type_for_maps_all_six_designer_chart_types",
+        "crates/sheet-engine/src/workbook/ops.rs::fill_series",
+        "crates/sheet-engine/src/workbook/ops.rs::tests::detects_linear_step_from_two_seed_cells",
+        "crates/sheet-engine/src/workbook/ops.rs::tests::date_series_steps_days_for_date_formatted_serials",
+        "crates/sheet-engine/src/workbook/ops.rs::tests::text_number_series_increments_suffix",
+        "packages/sheet-editor/src/NumberFormatDialog.tsx",
+        "packages/sheet-editor/src/numberFormatCodes.ts",
+        "packages/sheet-editor/src/numberFormatCodes.test.ts"
       ],
       "targetPhase": "spreadsheet-completion"
     },
@@ -321,7 +338,11 @@
         "crates/export/src/xlsx.rs::xlsx_export_rejects_malformed_hyperlinks",
         "crates/export/src/xlsx.rs::xlsx_export_emits_native_png_cell_images",
         "packages/sheet-editor/src/hyperlinks.test.ts",
-        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_table_metadata"
+        "crates/export/src/xlsx.rs::xlsx_round_trip_preserves_table_metadata",
+        "crates/sheet-engine/src/csv_io.rs::tests::exports_leading_bom_for_excel",
+        "crates/sheet-engine/src/csv_io.rs::tests::exports_quotes_fields_with_carriage_returns",
+        "crates/export/src/xlsx.rs::tests::xlsx_round_trips_custom_format_codes",
+        "crates/export/src/xlsx.rs::tests::xlsx_round_trips_sheet_tab_colors"
       ],
       "targetPhase": "office-sessions"
     },
@@ -335,6 +356,10 @@
         "packages/slide-editor/src/geometry.test.ts",
         "packages/slide-editor/src/deckNormalize.ts::normalizeSlideComments",
         "packages/slide-editor/src/deckNormalize.test.ts::round_trips_slide_comments_through_toDeck",
+        "packages/slide-editor/src/deckNormalize.ts::generateSlideId",
+        "packages/slide-editor/src/deckNormalize.test.ts::generateSlideId",
+        "packages/slide-editor/src/deckNormalize.test.ts::round_trips_line_and_pie_chart_types_with_data",
+        "packages/slide-editor/src/shapeUtils.test.ts::mergeTableCells",
         "crates/export/src/pptx.rs::round_trips_slide_comments_with_author_metadata",
         "crates/export/src/pptx_import.rs::parse_slide_comments",
         "crates/export/src/pptx_import.rs::parse_comment_authors"
@@ -344,11 +369,30 @@
     {
       "id": "slide.masters-and-themes",
       "area": "presentation",
-      "title": "Slide masters, layouts, placeholders, and themes",
+      "title": "Slide masters, layouts, placeholders, themes, and master chrome (header/footer/date/slide-number) rendered in editor and presenter",
       "status": "implemented",
       "evidence": [
         "packages/slide-editor/src/SlideEditor.tsx",
+        "packages/slide-editor/src/deckNormalize.ts::resolveSlideChrome",
+        "packages/slide-editor/src/deckNormalize.ts::slideChromeOverlays",
+        "packages/slide-editor/src/deckNormalize.test.ts::slideChromeOverlays",
+        "packages/slide-editor/src/PresenterView.tsx::SlideStage",
         "crates/slide-engine/src/deck.rs"
+      ],
+      "targetPhase": "presentation-completion"
+    },
+    {
+      "id": "slide.presenting",
+      "area": "presentation",
+      "title": "Fullscreen audience slideshow (F5/Shift+F5, Esc exit) plus presenter window with notes, timer, and animation playback",
+      "status": "implemented",
+      "evidence": [
+        "packages/slide-editor/src/AudienceSlideshow.tsx",
+        "packages/slide-editor/src/PresenterView.tsx",
+        "packages/slide-editor/src/presenterControls.ts",
+        "packages/slide-editor/src/presenterControls.test.ts",
+        "packages/slide-editor/src/presenterSession.ts",
+        "packages/slide-editor/src/SlideEditor.css::g-slide-anim-morph"
       ],
       "targetPhase": "presentation-completion"
     },
@@ -383,7 +427,7 @@
     {
       "id": "slide.office-roundtrip",
       "area": "presentation",
-      "title": "PPTX import/export with masters, media, notes, and animations",
+      "title": "PPTX import/export with masters, media, notes, animations, table merges, and internal slide jumps",
       "status": "partial",
       "evidence": [
         "crates/export/src/pptx.rs",
@@ -392,6 +436,8 @@
         "crates/export/src/pptx.rs::exports_common_shape_presets_as_native_geometry",
         "crates/export/src/pptx.rs::exports_safe_element_hyperlinks_as_external_relationships",
         "crates/export/src/pptx_import.rs::round_trips_native_pptx_tables",
+        "crates/export/src/pptx_import.rs::round_trips_native_pptx_table_merges_and_style",
+        "crates/export/src/pptx_import.rs::round_trips_internal_slide_jump_hyperlinks",
         "crates/export/src/pptx_import.rs::round_trips_native_pptx_charts",
         "crates/export/src/pptx_import.rs::round_trips_common_shape_presets_to_canonical_names",
         "crates/export/src/pptx_import.rs::round_trips_supported_slide_layouts",
@@ -401,6 +447,7 @@
         "crates/export/src/pptx_import.rs::parse_theme",
         "crates/export/src/pptx_import.rs::parse_slide_background",
         "crates/export/src/pptx_import.rs::honors_presentation_slide_relationship_order",
+        "crates/export/src/pdf.rs::slide_pdf_renders_line_charts_as_polyline",
         "packages/slide-editor/src/SlideEditor.tsx",
         "packages/slide-editor/src/hyperlinks.ts",
         "packages/slide-editor/src/hyperlinks.test.ts",
@@ -430,6 +477,7 @@
         "crates/core/src/recovery.rs",
         "apps/desktop/src/App.tsx",
         "crates/file-io/src/snapshots.rs",
+        "crates/file-io/tests/recovery.rs",
         "crates/core/src/logging.rs::rolls_log_before_a_write_would_exceed_the_size_bound",
         "crates/core/src/logging.rs::keeps_a_bounded_number_of_rotated_logs"
       ],

@@ -150,7 +150,7 @@ fn pdf_field_text(node: &serde_json::Value) -> Option<String> {
     })
 }
 
-// ── Styled-run PDF layout ──────────────────────────────────────────────────
+// â”€â”€ Styled-run PDF layout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Upgrades the legacy text-flattening exporter to run-level fidelity: bold /
 // italic font variants, alignment, list markers and real table grids, while
 // keeping pagination, images and header/footer behavior intact.
@@ -169,7 +169,7 @@ struct PdfParagraphStyle {
     align: Option<String>,
     indent: f32,
     is_code: bool,
-    /// Rendered prefix for list items ("• ", "1. ", …).
+    /// Rendered prefix for list items ("â€¢ ", "1. ", â€¦).
     list_prefix: Option<String>,
     spacing_after: f32,
 }
@@ -455,7 +455,7 @@ fn block_style_from_node(
     let spacing_after = attrs
         .and_then(|a| a.get("spacingAfter"))
         .and_then(|v| v.as_f64())
-        .map(|v| (v as f32) * 0.3528) // pt → mm
+        .map(|v| (v as f32) * 0.3528) // pt â†’ mm
         .unwrap_or(if is_heading { 6.0 } else { 4.0 });
     PdfParagraphStyle {
         align: attrs
@@ -480,6 +480,10 @@ fn collect_pdf_blocks(
     let node_type = node.get("type").and_then(|v| v.as_str());
     match node_type {
         Some("page_break") => blocks.push(PdfBlock::PageBreak),
+        // A section break always forces a new page in the PDF render; the
+        // embedded page setup applies to what follows (approximated here —
+        // the PDF pipeline uses one page geometry per document).
+        Some("section_break") => blocks.push(PdfBlock::PageBreak),
         Some("image") => {
             if let Some(src) = node
                 .get("attrs")
@@ -491,7 +495,28 @@ fn collect_pdf_blocks(
                 }
             }
         }
-        Some("paragraph" | "heading" | "blockquote" | "code_block") => {
+        Some("blockquote") => {
+            if let Some(children) = node.get("content").and_then(|c| c.as_array()) {
+                let has_blocks = children
+                    .iter()
+                    .any(|child| child.get("type").and_then(|t| t.as_str()) == Some("paragraph"));
+                if has_blocks {
+                    for child in children {
+                        collect_pdf_blocks(child, blocks, list_stack);
+                    }
+                } else {
+                    let style = block_style_from_node(node, false, false);
+                    let mut runs: Vec<PdfRun> = Vec::new();
+                    for child in children {
+                        runs.extend(collect_runs(child, 11.0));
+                    }
+                    if !runs.is_empty() {
+                        blocks.push(PdfBlock::Paragraph { runs, style });
+                    }
+                }
+            }
+        }
+        Some("paragraph" | "heading" | "code_block") => {
             let is_heading = node_type == Some("heading");
             let is_code = node_type == Some("code_block");
             let heading_level = node
@@ -516,7 +541,7 @@ fn collect_pdf_blocks(
                 style.list_prefix = Some(if ordered {
                     format!("{counter}. ")
                 } else {
-                    "• ".to_string()
+                    "â€¢ ".to_string()
                 });
             }
             let mut runs: Vec<PdfRun> = Vec::new();
@@ -1064,55 +1089,299 @@ pub fn export_workbook_to_pdf(
     workbook: &WorkbookModel,
     title: &str,
 ) -> Result<Vec<u8>, ExportError> {
-    let (doc, mut page, mut layer) = PdfDocument::new(title, Mm(210.0), Mm(297.0), "Sheet 1");
+    // Landscape A4 grid rendering: row gutter + per-column widths sized to
+    // content (bounded), cell borders, column letters and row numbers.
+    const PAGE_W: f32 = 297.0;
+    const PAGE_H: f32 = 210.0;
+    const MARGIN: f32 = 12.0;
+    const GUTTER_W: f32 = 14.0; // row-number column
+    const ROW_H: f32 = 7.0;
+    const CHAR_W: f32 = 2.1; // approx Helvetica 8.5pt advance
+    const MAX_COL_W: f32 = 60.0;
+    const MAX_COLS_PER_PAGE: usize = 12;
+
+    let (doc, first_page, first_layer) = PdfDocument::new(title, Mm(PAGE_W), Mm(PAGE_H), "Sheet 1");
     let font = doc
         .add_builtin_font(BuiltinFont::Helvetica)
         .map_err(|error| ExportError::Pdf(format!("{:?}", error)))?;
-    let sheet = workbook.sheets.get(workbook.active_sheet_index);
-    let mut y = 280.0_f32;
-    let mut page_number = 1;
-    let write_line = |doc: &PdfDocumentReference,
-                      page: &mut PdfPageIndex,
-                      layer: &mut PdfLayerIndex,
-                      y: &mut f32,
-                      page_number: &mut usize,
-                      text: &str| {
-        if *y < 18.0 {
-            *page_number += 1;
-            let next = doc.add_page(Mm(210.0), Mm(297.0), format!("Sheet {}", *page_number));
-            *page = next.0;
-            *layer = next.1;
-            *y = 280.0;
-        }
-        let current = doc.get_page(*page).get_layer(*layer);
-        current.begin_text_section();
-        current.set_font(&font, 9.0);
-        current.set_text_cursor(Mm(15.0), Mm(*y));
-        current.write_text(text, &font);
-        current.end_text_section();
-        *y -= 6.0;
+    let bold = doc
+        .add_builtin_font(BuiltinFont::HelveticaBold)
+        .map_err(|error| ExportError::Pdf(format!("{:?}", error)))?;
+
+    let Some(sheet) = workbook.sheets.get(workbook.active_sheet_index) else {
+        let mut buffer = Vec::new();
+        doc.save(&mut BufWriter::new(&mut buffer))
+            .map_err(|error| ExportError::Pdf(format!("{:?}", error)))?;
+        return Ok(buffer);
     };
-    write_line(&doc, &mut page, &mut layer, &mut y, &mut page_number, title);
-    if let Some(sheet) = sheet {
-        let mut keys: Vec<_> = sheet.cells.keys().collect();
-        keys.sort();
-        for key in keys {
-            if let Some(cell) = sheet.cells.get(key) {
-                write_line(
-                    &doc,
-                    &mut page,
-                    &mut layer,
-                    &mut y,
-                    &mut page_number,
-                    &format!("{}: {}", key, cell.display_value),
-                );
-            }
+
+    // Collect populated cells into (row, col) -> display text.
+    let mut cells: Vec<(u32, u32, String)> = Vec::new();
+    for (key, cell) in &sheet.cells {
+        let (row, col) = parse_row_col(key);
+        let text = if cell.display_value.is_empty() {
+            cell.raw_value.clone()
+        } else {
+            cell.display_value.clone()
+        };
+        if !text.trim().is_empty() {
+            cells.push((row, col, truncate_cell_text(&text)));
         }
     }
+    cells.sort_by_key(|(row, col, _)| (*row, *col));
+    if cells.is_empty() {
+        cells.push((1, 1, "(empty sheet)".to_string()));
+    }
+    let max_row = cells.iter().map(|(r, _, _)| *r).max().unwrap_or(1);
+    let cols: Vec<u32> = {
+        let mut set = std::collections::BTreeSet::new();
+        for (_, c, _) in &cells {
+            set.insert(*c);
+        }
+        set.into_iter().collect()
+    };
+
+    // Column widths in mm based on content, bounded.
+    let col_widths: Vec<f32> = cols
+        .iter()
+        .map(|c| {
+            let longest = cells
+                .iter()
+                .filter(|(_, cc, _)| cc == c)
+                .map(|(_, _, t)| t.chars().count() as f32)
+                .fold(0.0_f32, f32::max);
+            (longest * CHAR_W + 6.0).clamp(16.0, MAX_COL_W)
+        })
+        .collect();
+
+    // Split columns into page chunks that fit the printable width.
+    let printable_w = PAGE_W - 2.0 * MARGIN - GUTTER_W;
+    let mut column_chunks: Vec<Vec<usize>> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let mut current_w = 0.0_f32;
+    for (i, w) in col_widths.iter().enumerate() {
+        if !current.is_empty()
+            && (current_w + w > printable_w || current.len() >= MAX_COLS_PER_PAGE)
+        {
+            column_chunks.push(std::mem::take(&mut current));
+            current_w = 0.0;
+        }
+        current.push(i);
+        current_w += w;
+    }
+    if !current.is_empty() {
+        column_chunks.push(current);
+    }
+
+    let rows_per_page = ((PAGE_H - 2.0 * MARGIN - 10.0) / ROW_H).floor().max(1.0) as u32;
+
+    let border = || Color::Rgb(Rgb::new(0.78, 0.82, 0.87, None));
+    let header_fill = || Color::Rgb(Rgb::new(0.93, 0.95, 0.98, None));
+    let text_color = || Color::Rgb(Rgb::new(0.09, 0.13, 0.2, None));
+    let header_text_color = || Color::Rgb(Rgb::new(0.2, 0.28, 0.4, None));
+
+    let mut page_ref = (first_page, first_layer);
+    let mut page_count = 0usize;
+    for chunk in &column_chunks {
+        let total_row_pages = max_row.div_ceil(rows_per_page).max(1);
+        for row_page in 0..total_row_pages {
+            let row_start = row_page * rows_per_page + 1;
+            let row_end = (row_start + rows_per_page - 1).min(max_row);
+            if page_count > 0 {
+                page_count += 1;
+                let next = doc.add_page(Mm(PAGE_W), Mm(PAGE_H), format!("Sheet {}", page_count));
+                page_ref = next;
+            } else {
+                page_count += 1;
+            }
+            let layer = doc.get_page(page_ref.0).get_layer(page_ref.1);
+
+            // Title band (first chunk's first page only).
+            if row_page == 0 && std::ptr::eq(chunk, &column_chunks[0]) {
+                layer.begin_text_section();
+                layer.set_font(&bold, 12.0);
+                layer.set_text_cursor(Mm(MARGIN), Mm(PAGE_H - MARGIN));
+                layer.write_text(title, &bold);
+                layer.end_text_section();
+            }
+
+            let grid_top = PAGE_H - MARGIN - 6.0;
+            // Header row: column letters.
+            let x = MARGIN + GUTTER_W;
+            layer.set_fill_color(header_fill());
+            layer.add_polygon(Polygon {
+                rings: vec![vec![
+                    (Point::new(Mm(MARGIN), Mm(grid_top)), false),
+                    (
+                        Point::new(
+                            Mm(x + chunk.iter().map(|i| col_widths[*i]).sum::<f32>()),
+                            Mm(grid_top),
+                        ),
+                        false,
+                    ),
+                    (
+                        Point::new(
+                            Mm(x + chunk.iter().map(|i| col_widths[*i]).sum::<f32>()),
+                            Mm(grid_top - ROW_H),
+                        ),
+                        false,
+                    ),
+                    (Point::new(Mm(MARGIN), Mm(grid_top - ROW_H)), false),
+                ]],
+                mode: PaintMode::Fill,
+                winding_order: WindingOrder::NonZero,
+            });
+            let header_text_fn = |layer: &PdfLayerReference| {
+                layer.begin_text_section();
+                layer.set_font(&bold, 8.5);
+                layer.set_fill_color(header_text_color());
+                layer.set_text_cursor(Mm(MARGIN + 3.0), Mm(grid_top - 5.0));
+                layer.write_text("#", &bold);
+                for (i, col_i) in chunk.iter().enumerate() {
+                    let col = cols[*col_i];
+                    layer.set_text_cursor(
+                        Mm(x_offset_for_col(&col_widths, chunk, i) + 2.0),
+                        Mm(grid_top - 5.0),
+                    );
+                    layer.write_text(column_letter(col), &bold);
+                }
+                layer.end_text_section();
+            };
+            header_text_fn(&layer);
+            let _ = x;
+
+            // Rows.
+            for row in row_start..=row_end {
+                let top_y = grid_top - ROW_H * (row - row_start + 1) as f32;
+                // Row-number label + cell text.
+                layer.begin_text_section();
+                layer.set_font(&bold, 8.0);
+                layer.set_fill_color(header_text_color());
+                layer.set_text_cursor(Mm(MARGIN + 3.0), Mm(top_y - 5.0));
+                layer.write_text(format!("{row}"), &bold);
+                layer.set_font(&font, 8.5);
+                layer.set_fill_color(text_color());
+                for (i, col_i) in chunk.iter().enumerate() {
+                    let col = cols[*col_i];
+                    if let Some((_, _, text)) =
+                        cells.iter().find(|(r, c, _)| *r == row && *c == col)
+                    {
+                        layer.set_text_cursor(
+                            Mm(x_offset_for_col(&col_widths, chunk, i) + 2.0),
+                            Mm(top_y - 5.0),
+                        );
+                        layer.write_text(text, &font);
+                    }
+                }
+                layer.end_text_section();
+            }
+
+            // Grid lines: header underline + row lines + column separators.
+            let grid_bottom = grid_top - ROW_H * (row_end - row_start + 1) as f32;
+            layer.set_outline_color(border());
+            layer.set_outline_thickness(0.3);
+            for i in 0..=(row_end - row_start + 1) {
+                let y = grid_top - ROW_H * i as f32;
+                layer.add_line(Line {
+                    points: vec![
+                        (Point::new(Mm(MARGIN), Mm(y)), false),
+                        (
+                            Point::new(
+                                Mm(MARGIN
+                                    + GUTTER_W
+                                    + chunk.iter().map(|i| col_widths[*i]).sum::<f32>()),
+                                Mm(y),
+                            ),
+                            false,
+                        ),
+                    ],
+                    is_closed: false,
+                });
+            }
+            let _ = grid_bottom;
+            let mut sep_x = MARGIN + GUTTER_W;
+            for (i, col_i) in chunk.iter().enumerate() {
+                let _ = i;
+                layer.add_line(Line {
+                    points: vec![
+                        (Point::new(Mm(sep_x), Mm(grid_top)), false),
+                        (
+                            Point::new(
+                                Mm(sep_x),
+                                Mm(grid_top - ROW_H * (row_end - row_start + 1) as f32),
+                            ),
+                            false,
+                        ),
+                    ],
+                    is_closed: false,
+                });
+                sep_x += col_widths[*col_i];
+            }
+            layer.add_line(Line {
+                points: vec![
+                    (Point::new(Mm(MARGIN), Mm(grid_top)), false),
+                    (
+                        Point::new(
+                            Mm(MARGIN),
+                            Mm(grid_top - ROW_H * (row_end - row_start + 1) as f32),
+                        ),
+                        false,
+                    ),
+                ],
+                is_closed: false,
+            });
+        }
+    }
+
     let mut buffer = Vec::new();
     doc.save(&mut BufWriter::new(&mut buffer))
         .map_err(|error| ExportError::Pdf(format!("{:?}", error)))?;
     Ok(buffer)
+}
+
+fn x_offset_for_col(col_widths: &[f32], chunk: &[usize], index: usize) -> f32 {
+    const MARGIN: f32 = 12.0;
+    const GUTTER_W: f32 = 14.0;
+    MARGIN
+        + GUTTER_W
+        + chunk
+            .iter()
+            .take(index)
+            .map(|i| col_widths[*i])
+            .sum::<f32>()
+}
+
+fn column_letter(col: u32) -> String {
+    // 1-based: 1 = A, 26 = Z, 27 = AA.
+    let mut n = col;
+    let mut out = String::new();
+    while n > 0 {
+        let rem = (n - 1) % 26;
+        out.insert(0, (b'A' + rem as u8) as char);
+        n = (n - 1) / 26;
+    }
+    out
+}
+
+fn parse_row_col(key: &str) -> (u32, u32) {
+    // Sheet keys are "row:col"; nonconforming keys land out of view (0, 0).
+    let parts: Vec<&str> = key.split(':').collect();
+    if parts.len() == 2 {
+        if let (Ok(r), Ok(c)) = (parts[0].parse(), parts[1].parse()) {
+            return (r, c);
+        }
+    }
+    (0, 0)
+}
+
+fn truncate_cell_text(text: &str) -> String {
+    const MAX_CHARS: usize = 28;
+    if text.chars().count() > MAX_CHARS {
+        let cut: String = text.chars().take(MAX_CHARS - 1).collect();
+        format!("{cut}â€¦")
+    } else {
+        text.to_string()
+    }
 }
 
 fn slide_color(value: &str, fallback: (f32, f32, f32)) -> Color {
@@ -1128,6 +1397,23 @@ fn slide_color(value: &str, fallback: (f32, f32, f32)) -> Color {
         }
     }
     Color::Rgb(Rgb::new(fallback.0, fallback.1, fallback.2, None))
+}
+
+/// Series colors matching the editor/presenter chart palette (sheet + slide).
+/// Indexed per data point like the frontend's SERIES_COLORS cycling.
+const CHART_PALETTE: [u32; 10] = [
+    0x3b82f6, 0x16a34a, 0x8b5cf6, 0xef4444, 0xf59e0b, 0x0ea5e9, 0xec4899, 0x84cc16, 0xf97316,
+    0x14b8a6,
+];
+
+fn chart_palette_color(index: usize) -> Color {
+    let rgb = CHART_PALETTE[index % CHART_PALETTE.len()];
+    Color::Rgb(Rgb::new(
+        ((rgb >> 16) & 0xff) as f32 / 255.0,
+        ((rgb >> 8) & 0xff) as f32 / 255.0,
+        (rgb & 0xff) as f32 / 255.0,
+        None,
+    ))
 }
 
 fn begin_element_rotation(
@@ -1164,7 +1450,13 @@ fn end_element_rotation(layer: &PdfLayerReference, rotation: f64) {
 }
 
 pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, ExportError> {
-    let (doc, first_page, first_layer) = PdfDocument::new(title, Mm(254.0), Mm(143.0), "Slide");
+    // Derive the page from the deck canvas so non-16:9 decks are not distorted.
+    // Uniform scale keeps 960x540 at the historical 254x143mm.
+    let scale = 254.0 / deck.canvas_width.max(1.0);
+    let page_w = (deck.canvas_width.max(1.0) * scale).max(50.0);
+    let page_h = (deck.canvas_height.max(1.0) * scale).max(50.0);
+    let (doc, first_page, first_layer) =
+        PdfDocument::new(title, Mm(page_w as f32), Mm(page_h as f32), "Slide");
     let font = doc
         .add_builtin_font(BuiltinFont::Helvetica)
         .map_err(|error| ExportError::Pdf(format!("{:?}", error)))?;
@@ -1172,14 +1464,18 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
         let (page, layer) = if index == 0 {
             (first_page, first_layer)
         } else {
-            doc.add_page(Mm(254.0), Mm(143.0), format!("Slide {}", index + 1))
+            doc.add_page(
+                Mm(page_w as f32),
+                Mm(page_h as f32),
+                format!("Slide {}", index + 1),
+            )
         };
         let current = doc.get_page(page).get_layer(layer);
         for element in &slide.elements {
-            let scale_x = 254.0 / deck.canvas_width;
-            let scale_y = 143.0 / deck.canvas_height;
+            let scale_x = page_w / deck.canvas_width;
+            let scale_y = page_h / deck.canvas_height;
             let x = element.x * scale_x;
-            let y = 143.0 - (element.y + element.height) * scale_y;
+            let y = page_h - (element.y + element.height) * scale_y;
             let width = element.width * scale_x;
             let height = element.height * scale_y;
             let rotation = element.rotation;
@@ -1194,7 +1490,7 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
                         begin_element_rotation(&current, x, y, width, height, rotation);
                     current.set_fill_color(slide_color(color, (0.1, 0.1, 0.1)));
                     current.begin_text_section();
-                    current.set_font(&font, (*font_size as f32 / 2.0).max(8.0));
+                    current.set_font(&font, (*font_size as f32 * 0.75).max(8.0));
                     current.set_text_cursor(Mm(draw_x as f32), Mm((draw_y + height) as f32));
                     current.write_text(text, &font);
                     current.end_text_section();
@@ -1449,14 +1745,7 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
                         let r = (width.min(height) / 2.2) as f32;
                         for (i, v) in data.iter().enumerate() {
                             let slice = (*v / total) * 360.0;
-                            let hue = (i * 47) % 360;
-                            let color = Color::Rgb(Rgb::new(
-                                ((hue as f32) / 360.0).max(0.2),
-                                0.55,
-                                0.75,
-                                None,
-                            ));
-                            current.set_fill_color(color);
+                            current.set_fill_color(chart_palette_color(i));
                             let a1 = angle * std::f64::consts::PI / 180.0;
                             let a2 = (angle + slice) * std::f64::consts::PI / 180.0;
                             let x1 = cx + (r as f64) * a1.cos();
@@ -1474,17 +1763,56 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
                             });
                             angle += slice;
                         }
+                    } else if chart_type == "line" {
+                        // Polyline through the per-point centers, matching the
+                        // editor/presenter line-chart rendering.
+                        let step = width / bar_count.max(1) as f64;
+                        let points: Vec<(Point, bool)> = data
+                            .iter()
+                            .enumerate()
+                            .map(|(i, v)| {
+                                let px = draw_x + step / 2.0 + i as f64 * step;
+                                let py = draw_y + height - 6.0 - (v / max) * (height - 12.0);
+                                (Point::new(Mm(px as f32), Mm(py as f32)), false)
+                            })
+                            .collect();
+                        if points.len() >= 2 {
+                            current.add_line(Line {
+                                points,
+                                is_closed: false,
+                            });
+                        }
+                        for (i, v) in data.iter().enumerate() {
+                            let px = draw_x + step / 2.0 + i as f64 * step;
+                            let py = draw_y + height - 6.0 - (v / max) * (height - 12.0);
+                            current.set_fill_color(chart_palette_color(i));
+                            current.add_line(Line {
+                                points: vec![
+                                    (
+                                        Point::new(Mm((px - 1.2) as f32), Mm((py - 1.2) as f32)),
+                                        false,
+                                    ),
+                                    (
+                                        Point::new(Mm((px + 1.2) as f32), Mm((py - 1.2) as f32)),
+                                        false,
+                                    ),
+                                    (
+                                        Point::new(Mm((px + 1.2) as f32), Mm((py + 1.2) as f32)),
+                                        false,
+                                    ),
+                                    (
+                                        Point::new(Mm((px - 1.2) as f32), Mm((py + 1.2) as f32)),
+                                        false,
+                                    ),
+                                ],
+                                is_closed: true,
+                            });
+                        }
                     } else {
                         for (i, v) in data.iter().enumerate() {
                             let bar_h = (*v / max) * (height - 12.0);
                             let bx = draw_x + gap / 2.0 + i as f64 * (bar_width + gap);
-                            let hue = (i * 47) % 360;
-                            current.set_fill_color(Color::Rgb(Rgb::new(
-                                ((hue as f32) / 360.0).max(0.2),
-                                0.55,
-                                0.75,
-                                None,
-                            )));
+                            current.set_fill_color(chart_palette_color(i));
                             current.add_polygon(Polygon {
                                 rings: vec![vec![
                                     (
@@ -1544,7 +1872,7 @@ pub fn export_deck_to_pdf(deck: &DeckModel, title: &str) -> Result<Vec<u8>, Expo
             current.set_font(&font, 8.0);
             current.set_text_cursor(Mm(8.0), Mm(6.0));
             let notes = if slide.notes.chars().count() > 180 {
-                format!("{}…", slide.notes.chars().take(177).collect::<String>())
+                format!("{}â€¦", slide.notes.chars().take(177).collect::<String>())
             } else {
                 slide.notes.clone()
             };
@@ -1840,12 +2168,60 @@ mod tests {
     #[test]
     fn slide_pdf_renders_with_unicode_notes() {
         let mut deck = DeckModel::new_default();
-        let unicode_note = "Héllo wörld 🌍 café résumé naïve ".repeat(10);
+        let unicode_note = "HÃ©llo wÃ¶rld ðŸŒ cafÃ© rÃ©sumÃ© naÃ¯ve ".repeat(10);
         assert!(unicode_note.chars().count() > 180);
         deck.slides[0].notes = unicode_note;
         let bytes = export_deck_to_pdf(&deck, "Unicode notes slide")
             .expect("export pdf with unicode notes");
         assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn slide_pdf_renders_line_charts_as_polyline() {
+        let mut deck = DeckModel::new_default();
+        deck.slides[0].elements.clear();
+        deck.slides[0]
+            .elements
+            .push(redoc_slide_engine::SlideElement {
+                id: "line-chart".to_string(),
+                x: 40.0,
+                y: 60.0,
+                width: 400.0,
+                height: 220.0,
+                rotation: 0.0,
+                z_index: 1,
+                entrance: "none".to_string(),
+                entrance_delay_ms: None,
+                entrance_duration_ms: None,
+                entrance_order: None,
+                exit: "none".to_string(),
+                exit_duration_ms: None,
+                hyperlink: None,
+                kind: ElementKind::Chart {
+                    chart_type: "line".to_string(),
+                    data: vec![1.0, 3.0, 2.0, 5.0],
+                    labels: vec![
+                        "Trend".to_string(),
+                        "Q1".to_string(),
+                        "Q2".to_string(),
+                        "Q3".to_string(),
+                        "Q4".to_string(),
+                    ],
+                    legend: true,
+                    show_labels: true,
+                    show_axes: true,
+                },
+            });
+        let bytes = export_deck_to_pdf(&deck, "Line chart").expect("export line chart pdf");
+        assert!(!bytes.is_empty());
+        // Line charts are drawn with unclosed stroke paths ('S' paint
+        // operator from add_line with is_closed=false), while bars are
+        // always filled polygons.
+        let pdf = String::from_utf8_lossy(&bytes);
+        assert!(
+            pdf.contains("S\n"),
+            "expected stroke operators for the polyline"
+        );
     }
 
     #[test]

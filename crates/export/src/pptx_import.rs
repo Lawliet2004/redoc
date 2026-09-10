@@ -47,9 +47,26 @@ struct ElementBuilder {
     table_data: Vec<Vec<String>>,
     table_row: Option<Vec<String>>,
     table_cell: Option<String>,
+    /// Cell spans + merge markers accumulated while parsing a:tc elements.
+    table_spans: Vec<CellSpan>,
+    table_row_index: usize,
+    table_col_index: usize,
+    table_first_row: bool,
+    table_banded: bool,
     chart_rel: Option<String>,
     hyperlink: Option<String>,
     placeholder_type: Option<String>,
+}
+
+/// A parsed a:tc span/merge marker at (row, col).
+#[derive(Debug, Clone, Copy)]
+struct CellSpan {
+    row: usize,
+    col: usize,
+    row_span: usize,
+    col_span: usize,
+    h_merge: bool,
+    v_merge: bool,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -88,6 +105,48 @@ fn parse_emu(value: Option<&str>) -> f64 {
     parse_f64(value, 0.0) / EMU_PER_CANVAS_UNIT
 }
 
+fn parse_span_attr(event: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<usize> {
+    attribute(event, name)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 1)
+}
+
+/// Reconstruct bounded TableMerge ranges from parsed cell span markers.
+/// Anchors (rowSpan/gridSpan > 1) open a region; overlapping anchors are
+/// dropped so malformed files cannot construct intersecting ranges.
+fn table_merges_from_spans(
+    spans: &[CellSpan],
+    rows: usize,
+    cols: usize,
+) -> Vec<redoc_slide_engine::TableMerge> {
+    let mut merges = Vec::new();
+    for span in spans.iter().take(512) {
+        if span.row_span <= 1 && span.col_span <= 1 {
+            continue;
+        }
+        let rowspan = span.row_span.min(rows.saturating_sub(span.row)).max(1);
+        let colspan = span.col_span.min(cols.saturating_sub(span.col)).max(1);
+        if rowspan <= 1 && colspan <= 1 {
+            continue;
+        }
+        let overlaps = merges.iter().any(|merge: &redoc_slide_engine::TableMerge| {
+            span.row < merge.r + merge.rowspan
+                && span.row + rowspan > merge.r
+                && span.col < merge.c + merge.colspan
+                && span.col + colspan > merge.c
+        });
+        if !overlaps {
+            merges.push(redoc_slide_engine::TableMerge {
+                r: span.row,
+                c: span.col,
+                rowspan,
+                colspan,
+            });
+        }
+    }
+    merges
+}
+
 fn parse_color(value: &str, fallback: &str) -> String {
     let value = value.trim();
     if value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -108,7 +167,8 @@ fn canonical_shape_type(preset: &str) -> Option<&'static str> {
         "triangle" => Some("triangle"),
         "diamond" => Some("diamond"),
         "star" | "star5" => Some("star"),
-        "line" => Some("line"),
+        "line" | "straightconnector1" => Some("line"),
+        "arrow" | "rightarrow" | "leftarrow" | "updownarrow" => Some("arrow"),
         _ => None,
     }
 }
@@ -751,6 +811,17 @@ fn parse_slide(
                         if let Some(element) = current.as_mut() {
                             if element.kind == BuilderKind::Table {
                                 element.table_data.clear();
+                                element.table_spans.clear();
+                            }
+                        }
+                    }
+                    b"tblPr" => {
+                        if let Some(element) = current.as_mut() {
+                            if element.kind == BuilderKind::Table {
+                                element.table_first_row =
+                                    attribute(&event, b"firstRow").as_deref() == Some("1");
+                                element.table_banded =
+                                    attribute(&event, b"bandRow").as_deref() == Some("1");
                             }
                         }
                     }
@@ -758,6 +829,8 @@ fn parse_slide(
                         if let Some(element) = current.as_mut() {
                             if element.kind == BuilderKind::Table {
                                 element.table_row = Some(Vec::new());
+                                element.table_row_index = element.table_data.len();
+                                element.table_col_index = 0;
                             }
                         }
                     }
@@ -765,6 +838,22 @@ fn parse_slide(
                         if let Some(element) = current.as_mut() {
                             if element.kind == BuilderKind::Table {
                                 element.table_cell = Some(String::new());
+                                let span = CellSpan {
+                                    row: element.table_row_index,
+                                    col: element.table_col_index,
+                                    row_span: parse_span_attr(&event, b"rowSpan").unwrap_or(1),
+                                    col_span: parse_span_attr(&event, b"gridSpan").unwrap_or(1),
+                                    h_merge: attribute(&event, b"hMerge").as_deref() == Some("1"),
+                                    v_merge: attribute(&event, b"vMerge").as_deref() == Some("1"),
+                                };
+                                element.table_col_index += 1;
+                                if span.row_span > 1
+                                    || span.col_span > 1
+                                    || span.h_merge
+                                    || span.v_merge
+                                {
+                                    element.table_spans.push(span);
+                                }
                             }
                         }
                     }
@@ -788,7 +877,19 @@ fn parse_slide(
                     b"hlinkClick" => {
                         if let Some(element) = current.as_mut() {
                             if let Some(rel_id) = attribute(&event, b"id") {
-                                element.hyperlink = external_relationships.get(&rel_id).cloned();
+                                element.hyperlink =
+                                    external_relationships.get(&rel_id).cloned().or_else(|| {
+                                        // Internal slide-jump relationship: map the
+                                        // slide part number back to a slide:<id> link.
+                                        relationships
+                                            .get(&rel_id)
+                                            .and_then(|path| {
+                                                path.strip_prefix("ppt/slides/slide")
+                                                    .and_then(|value| value.strip_suffix(".xml"))
+                                                    .and_then(|value| value.parse::<usize>().ok())
+                                            })
+                                            .map(|number| format!("slide:pptx-slide-{number}"))
+                                    });
                             }
                         }
                     }
@@ -802,6 +903,14 @@ fn parse_slide(
                         if let Some(element) = current.as_mut() {
                             element.stroke_width =
                                 parse_f64(attribute(&event, b"w").as_deref(), 12700.0) / 12700.0;
+                        }
+                    }
+                    b"tailEnd" | b"headEnd" => {
+                        if let Some(element) = current.as_mut() {
+                            let end_type = attribute(&event, b"type").unwrap_or_default();
+                            if !end_type.is_empty() && !end_type.eq_ignore_ascii_case("none") {
+                                element.shape_type = "arrow".to_string();
+                            }
                         }
                     }
                     b"xfrm" => {
@@ -885,7 +994,16 @@ fn parse_slide(
             }
             Ok(Event::Empty(event)) => {
                 let name = local_name(event.name().as_ref()).to_vec();
-                if name.as_slice() == b"cNvPr" {
+                if name.as_slice() == b"tblPr" {
+                    if let Some(element) = current.as_mut() {
+                        if element.kind == BuilderKind::Table {
+                            element.table_first_row =
+                                attribute(&event, b"firstRow").as_deref() == Some("1");
+                            element.table_banded =
+                                attribute(&event, b"bandRow").as_deref() == Some("1");
+                        }
+                    }
+                } else if name.as_slice() == b"cNvPr" {
                     if let Some(element) = current.as_mut() {
                         element.shape_id =
                             attribute(&event, b"id").and_then(|value| value.parse::<u32>().ok());
@@ -897,7 +1015,17 @@ fn parse_slide(
                 } else if name.as_slice() == b"hlinkClick" {
                     if let Some(element) = current.as_mut() {
                         if let Some(rel_id) = attribute(&event, b"id") {
-                            element.hyperlink = external_relationships.get(&rel_id).cloned();
+                            element.hyperlink =
+                                external_relationships.get(&rel_id).cloned().or_else(|| {
+                                    relationships
+                                        .get(&rel_id)
+                                        .and_then(|path| {
+                                            path.strip_prefix("ppt/slides/slide")
+                                                .and_then(|value| value.strip_suffix(".xml"))
+                                                .and_then(|value| value.parse::<usize>().ok())
+                                        })
+                                        .map(|number| format!("slide:pptx-slide-{number}"))
+                                });
                         }
                     }
                 } else if name.as_slice() == b"off" {
@@ -1104,10 +1232,10 @@ fn parse_slide(
                                 z_index += 1;
                             }
                         } else if element.kind == BuilderKind::Connector {
-                            let shape_type = if element.shape_type == "line" {
-                                "line"
-                            } else {
+                            let shape_type = if element.shape_type == "arrow" {
                                 "arrow"
+                            } else {
+                                "line"
                             };
                             elements.push(SlideElement {
                                 id: format!("pptx-{slide_number}-{z_index}"),
@@ -1158,6 +1286,14 @@ fn parse_slide(
                             let data = element.table_data;
                             let rows = data.len();
                             let cols = data.iter().map(Vec::len).max().unwrap_or(0);
+                            let merges = table_merges_from_spans(&element.table_spans, rows, cols);
+                            let table_style = if element.table_first_row && element.table_banded {
+                                Some("accent-header".to_string())
+                            } else if element.table_banded {
+                                Some("banded".to_string())
+                            } else {
+                                None
+                            };
                             elements.push(SlideElement {
                                 id: format!("pptx-{slide_number}-{z_index}"),
                                 x: element.x,
@@ -1192,9 +1328,9 @@ fn parse_slide(
                                     rows,
                                     cols,
                                     data,
-                                    merges: Vec::new(),
-                                    header_row: false,
-                                    table_style: None,
+                                    merges,
+                                    header_row: element.table_first_row,
+                                    table_style,
                                 },
                             });
                             z_index += 1;
@@ -1958,8 +2094,11 @@ pub fn import_deck_from_pptx_with_report(path: &Path) -> Result<PptxImportResult
         if let Ok(notes_xml) = read_entry(&mut archive, &notes_path, MAX_XML_BYTES) {
             slide.notes = parse_notes(&notes_xml)?;
         }
-        let comments_path = format!("ppt/comments/comment{slide_number}comment.xml");
-        if let Ok(comments_xml) = read_entry(&mut archive, &comments_path, MAX_XML_BYTES) {
+        let comments_path_std = format!("ppt/comments/comment{slide_number}.xml");
+        let comments_path_legacy = format!("ppt/comments/comment{slide_number}comment.xml");
+        if let Ok(comments_xml) = read_entry(&mut archive, &comments_path_std, MAX_XML_BYTES)
+            .or_else(|_| read_entry(&mut archive, &comments_path_legacy, MAX_XML_BYTES))
+        {
             slide.comments = parse_slide_comments(&comments_xml, &author_names)?;
         }
         slides.push(slide);
@@ -2431,6 +2570,179 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("unsupported table")));
+    }
+
+    #[test]
+    fn round_trips_native_pptx_table_merges_and_style() {
+        let mut source = DeckModel::new_default();
+        source.slides[0].elements.clear();
+        source.slides[0].elements.push(SlideElement {
+            id: "table".to_string(),
+            x: 40.0,
+            y: 80.0,
+            width: 360.0,
+            height: 120.0,
+            rotation: 0.0,
+            z_index: 1,
+            entrance: "none".to_string(),
+            entrance_delay_ms: None,
+            entrance_duration_ms: None,
+            entrance_order: None,
+            exit: "none".to_string(),
+            exit_duration_ms: None,
+            hyperlink: None,
+            kind: ElementKind::Table {
+                rows: 3,
+                cols: 3,
+                data: vec![
+                    vec!["H1".to_string(), "H2".to_string(), "H3".to_string()],
+                    vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                    vec!["d".to_string(), "e".to_string(), "f".to_string()],
+                ],
+                merges: vec![
+                    redoc_slide_engine::TableMerge {
+                        r: 0,
+                        c: 0,
+                        rowspan: 1,
+                        colspan: 2,
+                    },
+                    redoc_slide_engine::TableMerge {
+                        r: 1,
+                        c: 2,
+                        rowspan: 2,
+                        colspan: 1,
+                    },
+                ],
+                header_row: false,
+                table_style: Some("banded".to_string()),
+            },
+        });
+
+        let bytes = crate::pptx::export_deck_to_pptx(&source).expect("export merged table deck");
+        let slide_xml = {
+            let reader = std::io::Cursor::new(bytes.clone());
+            let mut archive = zip::ZipArchive::new(reader).expect("read merged table archive");
+            let mut slide = String::new();
+            archive
+                .by_name("ppt/slides/slide1.xml")
+                .expect("slide part")
+                .read_to_string(&mut slide)
+                .expect("read slide part");
+            slide
+        };
+        assert!(
+            slide_xml.contains(r#"gridSpan="2""#),
+            "expected colspan gridSpan"
+        );
+        assert!(
+            slide_xml.contains(r#"rowSpan="2""#),
+            "expected rowspan rowSpan"
+        );
+        assert!(
+            slide_xml.contains(r#"hMerge="1""#),
+            "expected horizontal merge marker"
+        );
+        assert!(
+            slide_xml.contains(r#"vMerge="1""#),
+            "expected vertical merge marker"
+        );
+        assert!(
+            slide_xml.contains(r#"bandRow="1""#),
+            "expected banded style flag"
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "redoc-pptx-merge-roundtrip-{}.pptx",
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).expect("write merged table deck");
+        let result = import_deck_from_pptx_with_report(&path).expect("import merged table deck");
+        let _ = std::fs::remove_file(&path);
+
+        let table = result.deck.slides[0]
+            .elements
+            .iter()
+            .find_map(|element| match &element.kind {
+                ElementKind::Table {
+                    merges,
+                    header_row,
+                    table_style,
+                    ..
+                } => Some((merges.clone(), *header_row, table_style.clone())),
+                _ => None,
+            })
+            .expect("merged table element");
+        assert_eq!(
+            table.0,
+            vec![
+                redoc_slide_engine::TableMerge {
+                    r: 0,
+                    c: 0,
+                    rowspan: 1,
+                    colspan: 2
+                },
+                redoc_slide_engine::TableMerge {
+                    r: 1,
+                    c: 2,
+                    rowspan: 2,
+                    colspan: 1
+                },
+            ],
+            "merges must round-trip"
+        );
+        assert!(!table.1, "header row flag must round-trip");
+        assert_eq!(
+            table.2.as_deref(),
+            Some("banded"),
+            "table style must round-trip"
+        );
+    }
+    #[test]
+    fn round_trips_internal_slide_jump_hyperlinks() {
+        let mut source = DeckModel::new_default();
+        source.add_slide("blank");
+        source.slides[0].elements[0].hyperlink = Some("slide:target-slide".to_string());
+        source.slides[1].id = "target-slide".to_string();
+
+        let bytes = crate::pptx::export_deck_to_pptx(&source).expect("export jump deck");
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).expect("read jump archive");
+        let mut slide = String::new();
+        archive
+            .by_name("ppt/slides/slide1.xml")
+            .expect("slide1")
+            .read_to_string(&mut slide)
+            .expect("read slide1 xml");
+        assert!(
+            slide.contains(r#"action="ppaction://hlinksldjump""#),
+            "expected ppaction jump action: {slide}"
+        );
+        let mut rels = String::new();
+        archive
+            .by_name("ppt/slides/_rels/slide1.xml.rels")
+            .expect("slide1 rels")
+            .read_to_string(&mut rels)
+            .expect("read slide1 rels");
+        assert!(
+            rels.contains(r#"Target="slide2.xml""#),
+            "expected slide2 jump relationship: {rels}"
+        );
+
+        // Round-trip: the jump imports back as slide:pptx-slide-2.
+        let path = std::env::temp_dir().join(format!(
+            "redoc-pptx-jump-roundtrip-{}.pptx",
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).expect("write jump deck");
+        let result = import_deck_from_pptx_with_report(&path).expect("import jump deck");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            result.deck.slides[0].elements[0]
+                .hyperlink
+                .as_deref()
+                .expect("jump hyperlink survived"),
+            "slide:pptx-slide-2"
+        );
     }
 
     #[test]

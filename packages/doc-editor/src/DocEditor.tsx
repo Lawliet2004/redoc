@@ -20,6 +20,8 @@ import {
   tableNodes,
   toggleHeaderRow as pmToggleHeaderRow,
   deleteTable,
+  goToNextCell,
+  isInTable,
 } from "prosemirror-tables";
 import { Dialog, showToast } from "@redoc/ui";
 import { PrintPreview } from "./PrintPreview";
@@ -72,6 +74,7 @@ import {
   resolveTrackedChange,
   resolveTrackedChanges,
   insertedRangesFromTransaction,
+  deletedRangesFromTransaction,
   TRACK_DELETE_MARK,
   TRACK_INSERT_MARK,
   type TrackedChangeDecision,
@@ -233,12 +236,18 @@ function findPlugin(getQuery: () => string, getMatchCase: () => boolean, getActi
 
 /**
  * Word-style automatic track-changes: while the toggle is on, every inserted
- * range produced by user transactions gets a trackInsert mark (skipping
- * changes the plugin itself appends, marked with the "auto-track" meta).
+ * range produced by user transactions gets a trackInsert mark, and every
+ * deleted text range is restored and marked trackDelete (skipping changes
+ * the plugins themselves append, marked with the "auto-track" meta).
  */
-function autoTrackChangesPlugin(getEnabled: () => boolean, createMark: () => any) {
+function autoTrackChangesPlugin(
+  getEnabled: () => boolean,
+  createMark: () => any,
+  createDeleteMark: () => any,
+  schemaText: (text: string, marks?: readonly any[]) => any,
+) {
   return new Plugin({
-    appendTransaction: (transactions, _oldState, newState) => {
+    appendTransaction: (transactions, oldState, newState) => {
       if (!getEnabled()) return null;
       let tr = newState.tr;
       let marked = false;
@@ -261,6 +270,37 @@ function autoTrackChangesPlugin(getEnabled: () => boolean, createMark: () => any
           if (!hasText || hasBlock) continue;
           tr = tr.addMark(from, to, createMark());
           marked = true;
+        }
+        // Deletions: restore the removed text and mark it trackDelete so it
+        // stays visible (strikethrough) until the change is accepted.
+        for (const range of deletedRangesFromTransaction(transaction, oldState.doc)) {
+          const slice = oldState.doc.slice(range.from, range.to);
+          const transformFragment = (frag: Fragment): Fragment => {
+            const children: Node[] = [];
+            frag.forEach((node) => {
+              if (node.isText) {
+                const existingMarks = node.marks.filter(
+                  (m) => m.type.name !== "trackDelete" && m.type.name !== "trackInsert"
+                );
+                children.push(node.mark([...existingMarks, createDeleteMark()]));
+              } else if (node.content && node.content.size > 0) {
+                children.push(node.copy(transformFragment(node.content)));
+              } else {
+                children.push(node);
+              }
+            });
+            return Fragment.from(children);
+          };
+          const restoredContent = transformFragment(slice.content);
+          if (restoredContent.size > 0) {
+            const insertPos = transaction.mapping.map(range.from, -1);
+            tr = tr.replaceRange(
+              insertPos,
+              insertPos,
+              new Slice(restoredContent, slice.openStart, slice.openEnd),
+            );
+            marked = true;
+          }
         }
       }
       if (!marked) return null;
@@ -319,10 +359,10 @@ export function DocEditor(props: DocEditorProps) {
   const [spacingAfter, setSpacingAfter] = createSignal(0);
   const [tabStops, setTabStops] = createSignal<number[]>([96, 192, 288]);
   const [pageCount, setPageCount] = createSignal(1);
-  // Browsers repeat position:fixed print headers on every page but expose no
-  // page counter to DOM content. For multi-page prints we omit the page
-  // number rather than print a wrong one; DOCX/PDF exports carry real fields.
-  const printPageIndex = () => (pageCount() > 1 ? "" : "1");
+  // CSS counters track printed pages; the header/footer content is rendered
+  // into @page margin boxes via pseudo-elements so each page gets correct
+  // numbering. DOM elements with position:fixed would repeat identical text.
+  const printPageIndex = () => "counter(page)";
   const [headings, setHeadings] = createSignal<{ level: number; text: string; pos: number }[]>([]);
   const [linkDialogOpen, setLinkDialogOpen] = createSignal(false);
   const [linkHref, setLinkHref] = createSignal("https://");
@@ -469,19 +509,15 @@ export function DocEditor(props: DocEditorProps) {
     showToast(`Style "${next.name}" created`, "success");
   };
 
-  const countPageBreaks = (json: DocContent): number => {
+  const countPageBreaksInDoc = (doc: Node): number => {
     let count = 0;
-    const visit = (node: any) => {
-      if (!node || typeof node !== "object") return;
-      const breakType = node.attrs?.pageSetup?.breakType;
-      if (node.type === "page_break" || (node.type === "section_break" && breakType !== "continuous" && breakType !== "nextColumn")) {
+    doc.descendants((node) => {
+      const breakType = (node.attrs?.pageSetup as { breakType?: string } | null)?.breakType;
+      if (node.type.name === "page_break" || (node.type.name === "section_break" && breakType !== "continuous" && breakType !== "nextColumn")) {
         count += 1;
       }
-      if (Array.isArray(node.content)) {
-        for (const child of node.content) visit(child);
-      }
-    };
-    visit(json);
+      return true;
+    });
     return count;
   };
 
@@ -503,22 +539,31 @@ export function DocEditor(props: DocEditorProps) {
   };
 
   const refreshHeadings = (doc: EditorState["doc"]) => {
-    const newHeadings: { level: number; text: string; pos: number }[] = [];
-    doc.descendants((node, pos) => {
-      if (node.type.name === "heading") {
-        newHeadings.push({
-          level: node.attrs.level,
-          text: node.textContent,
-          pos,
-        });
-      }
-    });
-    setHeadings(newHeadings);
+    if (headingsTimer) window.clearTimeout(headingsTimer);
+    headingsTimer = window.setTimeout(() => {
+      headingsTimer = undefined;
+      const newHeadings: { level: number; text: string; pos: number }[] = [];
+      doc.descendants((node, pos) => {
+        if (node.type.name === "heading") {
+          newHeadings.push({
+            level: node.attrs.level,
+            text: node.textContent,
+            pos,
+          });
+        }
+      });
+      setHeadings(newHeadings);
+    }, 300);
   };
 
   let lastWords = 0;
   let lastChars = 0;
   let wordCountTimeout: number | undefined;
+  let headingsTimer: number | undefined;
+  let footnoteSyncTimer: number | undefined;
+  let statusFrame: number | undefined;
+  let compareTimer: number | undefined;
+  let lastStatusJson: DocContent = { type: "doc", content: [] };
   let currentCurPage = 1;
   let currentPages = 1;
   let fieldRefreshScheduled = false;
@@ -576,51 +621,79 @@ export function DocEditor(props: DocEditorProps) {
     }, 0);
   };
 
-  const refreshStatus = (json: DocContent, docChanged = true) => {
-    const paper = paperDimensions();
-    const config = pageSetup();
-    const topMarginPx = (config.margins.top || 1) * 96;
-    const bottomMarginPx = (config.margins.bottom || 1) * 96;
-    const contentPageHeight = Math.max(300, paper.height - topMarginPx - bottomMarginPx);
+  const refreshStatus = (
+    docOrBreaks?: DocContent | number,
+    getJsonOrChanged?: (() => DocContent) | boolean,
+    docChangedParam = true,
+  ) => {
+    if (statusFrame) cancelAnimationFrame(statusFrame);
+    const run = () => {
+      statusFrame = undefined;
+      const paper = paperDimensions();
+      const config = pageSetup();
+      const topMarginPx = (config.margins.top || 1) * 96;
+      const bottomMarginPx = (config.margins.bottom || 1) * 96;
+      const contentPageHeight = Math.max(300, paper.height - topMarginPx - bottomMarginPx);
 
-    const domHeight = editorRef ? editorRef.scrollHeight : 0;
-    const estimatedPages = Math.max(1, Math.ceil(domHeight / contentPageHeight));
-    const explicitPageBreaks = countPageBreaks(json);
-    const pages = Math.max(1, explicitPageBreaks + 1, estimatedPages);
-    setPageCount(pages);
+      let pageBreaks = 0;
+      let getJson: () => DocContent;
+      let docChanged = docChangedParam;
 
-    let curPage = 1;
-    if (view && editorRef) {
-      const { from } = view.state.selection;
-      const coords = view.coordsAtPos(from);
-      const editorBounds = editorRef.getBoundingClientRect();
-      const relativeY = coords.top - editorBounds.top + editorRef.scrollTop;
-      curPage = Math.max(1, Math.min(pages, Math.floor(relativeY / contentPageHeight) + 1));
-    }
+      if (typeof docOrBreaks === "number") {
+        pageBreaks = docOrBreaks;
+        if (typeof getJsonOrChanged === "function") {
+          getJson = getJsonOrChanged;
+        } else {
+          getJson = () => (lastStatusJson || (view ? buildDocJson(view.state.doc, pageSetup(), comments(), customStyles(), footnotes()) : (props.initialContent || {} as DocContent)));
+        }
+      } else {
+        const docJson = docOrBreaks || lastStatusJson;
+        if (typeof getJsonOrChanged === "boolean") {
+          docChanged = getJsonOrChanged;
+        }
+        pageBreaks = view ? countPageBreaksInDoc(view.state.doc) : 0;
+        getJson = () => (docJson || (view ? buildDocJson(view.state.doc, pageSetup(), comments(), customStyles(), footnotes()) : (props.initialContent || {} as DocContent)));
+      }
 
-    currentCurPage = curPage;
-    currentPages = pages;
-    if (documentHasFields) queueDocumentFieldRefresh(pages, contentPageHeight);
+      const domHeight = editorRef ? editorRef.scrollHeight : 0;
+      const estimatedPages = Math.max(1, Math.ceil(domHeight / contentPageHeight));
+      const pages = Math.max(1, pageBreaks + 1, estimatedPages);
+      setPageCount(pages);
 
-    const updateLabel = (w: number, c: number) => {
-      props.onWordCountChange?.(
-        `Page ${currentCurPage} of ${currentPages} · ${w} words, ${c} characters`
-      );
-    };
+      let curPage = 1;
+      if (view && editorRef) {
+        const { from } = view.state.selection;
+        const coords = view.coordsAtPos(from);
+        const editorBounds = editorRef.getBoundingClientRect();
+        const relativeY = coords.top - editorBounds.top + editorRef.scrollTop;
+        curPage = Math.max(1, Math.min(pages, Math.floor(relativeY / contentPageHeight) + 1));
+      }
 
-    if (!docChanged) {
-      updateLabel(lastWords, lastChars);
-      return;
-    }
+      currentCurPage = curPage;
+      currentPages = pages;
+      if (documentHasFields) queueDocumentFieldRefresh(pages, contentPageHeight);
 
-    if (wordCountTimeout) window.clearTimeout(wordCountTimeout);
-    wordCountTimeout = window.setTimeout(() => {
-      commands.computeDocWordCount(json).then((wc) => {
-        lastWords = wc.words;
-        lastChars = wc.characters;
+      const updateLabel = (w: number, c: number) => {
+        props.onWordCountChange?.(
+          `Page ${currentCurPage} of ${currentPages} · ${w} words, ${c} characters`
+        );
+      };
+
+      if (!docChanged) {
         updateLabel(lastWords, lastChars);
-      });
-    }, 2000);
+        return;
+      }
+
+      if (wordCountTimeout) window.clearTimeout(wordCountTimeout);
+      wordCountTimeout = window.setTimeout(() => {
+        commands.computeDocWordCount(getJson()).then((wc) => {
+          lastWords = wc.words;
+          lastChars = wc.characters;
+          updateLabel(lastWords, lastChars);
+        });
+      }, 2000);
+    };
+    statusFrame = window.requestAnimationFrame(run);
   };
 
   const compareSummary = () => {
@@ -680,6 +753,11 @@ export function DocEditor(props: DocEditorProps) {
       clearTimeout(emitTimer);
       // Flush the pending emit so the shell's autosave sees the final doc.
       emitDocChange(view?.state.doc ?? mySchema.node("doc"), pageSetup());
+    }
+    if (statusFrame !== undefined) cancelAnimationFrame(statusFrame);
+    if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame);
+    for (const timer of [wordCountTimeout, headingsTimer, footnoteSyncTimer, compareTimer]) {
+      if (timer !== undefined) window.clearTimeout(timer);
     }
   });
 
@@ -809,12 +887,21 @@ export function DocEditor(props: DocEditorProps) {
         columnResizing({ handleWidth: 5, cellMinWidth: 48 }),
         tableEditing(),
         findPlugin(findQuery, matchCase, matchIndex),
-        autoTrackChangesPlugin(trackChangesOn, () =>
-          mySchema.marks[TRACK_INSERT_MARK].create({
-            author: props.authorName?.trim() || "You",
-            changeId: `change-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            createdAt: new Date().toISOString(),
-          }),
+        autoTrackChangesPlugin(
+          trackChangesOn,
+          () =>
+            mySchema.marks[TRACK_INSERT_MARK].create({
+              author: props.authorName?.trim() || "You",
+              changeId: `change-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              createdAt: new Date().toISOString(),
+            }),
+          () =>
+            mySchema.marks[TRACK_DELETE_MARK].create({
+              author: props.authorName?.trim() || "You",
+              changeId: `change-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              createdAt: new Date().toISOString(),
+            }),
+          (text, marks) => mySchema.text(text, marks),
         ),
         reviewCommentPlugin(comments),
         new Plugin({
@@ -830,6 +917,9 @@ export function DocEditor(props: DocEditorProps) {
         ] }),
         keymap({
           "Tab": (state, dispatch) => {
+            if (isInTable(state)) {
+              return goToNextCell(1)(state, dispatch);
+            }
             const { $from } = state.selection;
             if ($from.parent.type.name === "list_item") {
               return sinkListItem(mySchema.nodes.list_item)(state, dispatch);
@@ -840,7 +930,12 @@ export function DocEditor(props: DocEditorProps) {
             }
             return false;
           },
-          "Shift-Tab": liftListItem(mySchema.nodes.list_item),
+          "Shift-Tab": (state, dispatch) => {
+            if (isInTable(state)) {
+              return goToNextCell(-1)(state, dispatch);
+            }
+            return liftListItem(mySchema.nodes.list_item)(state, dispatch);
+          },
           "Mod-b": toggleMark(mySchema.marks.bold),
           "Mod-i": toggleMark(mySchema.marks.italic),
           "Mod-u": toggleMark(mySchema.marks.underline),
@@ -937,14 +1032,22 @@ export function DocEditor(props: DocEditorProps) {
           ));
         }
 
-        const json = buildDocJson(newState.doc, pageSetup(), comments(), customStyles(), footnotes());
-        refreshStatus(json, transaction.docChanged);
-        // Keep footnote labels in sync with reference order after edits.
         if (transaction.docChanged) {
-          const synced = syncFootnotesWithRefs(footnotes(), newState.doc.toJSON() as DocContent);
-          if (JSON.stringify(synced) !== JSON.stringify(footnotes())) {
-            setFootnotes(synced);
-          }
+          lastStatusJson = buildDocJson(newState.doc, pageSetup(), comments(), customStyles(), footnotes());
+        }
+        refreshStatus(lastStatusJson, transaction.docChanged);
+        // Keep footnote labels in sync with reference order after edits
+        // (debounced; the notes array feeds the next document emit).
+        if (transaction.docChanged && footnotes().length > 0) {
+          if (footnoteSyncTimer) window.clearTimeout(footnoteSyncTimer);
+          footnoteSyncTimer = window.setTimeout(() => {
+            footnoteSyncTimer = undefined;
+            if (!view) return;
+            const synced = syncFootnotesWithRefs(footnotes(), view.state.doc.toJSON() as DocContent);
+            if (JSON.stringify(synced) !== JSON.stringify(footnotes())) {
+              setFootnotes(synced);
+            }
+          }, 300);
         }
         // Track the active paragraph's named style for the Styles sidebar.
         const activeParent = newState.selection.$from.parent;
@@ -957,7 +1060,13 @@ export function DocEditor(props: DocEditorProps) {
         );
 
         if (transaction.docChanged) {
-          setTrackedChangeRevision((revision) => revision + 1);
+          // Debounce the review-panel recompute signal: tracked stats,
+          // change summaries, and compare all diff the whole doc.
+          if (compareTimer) window.clearTimeout(compareTimer);
+          compareTimer = window.setTimeout(() => {
+            compareTimer = undefined;
+            setTrackedChangeRevision((revision) => revision + 1);
+          }, 500);
           refreshHeadings(newState.doc);
           emitDocChangeDebounced(newState.doc, pageSetup());
         }
@@ -1091,19 +1200,31 @@ export function DocEditor(props: DocEditorProps) {
     if (view) view.destroy();
   });
 
+  let resizeFrame: number | undefined;
+  let resizePending: { width: number; height: number } | null = null;
   const resizeSelectedImage = (width: number, height: number) => {
     const img = selectedImage();
     if (!view || !img) return;
-    const node = view.state.doc.nodeAt(img.pos);
-    if (!node || node.type.name !== "image") return;
-    view.dispatch(
-      view.state.tr.setNodeMarkup(img.pos, undefined, {
-        ...node.attrs,
-        width: Math.max(40, width),
-        height: Math.max(40, height),
-      }),
-    );
-    setSelectedImage({ pos: img.pos, width: Math.max(40, width), height: Math.max(40, height) });
+    resizePending = { width, height };
+    if (resizeFrame !== undefined) return;
+    resizeFrame = window.requestAnimationFrame(() => {
+      resizeFrame = undefined;
+      const pending = resizePending;
+      resizePending = null;
+      if (!pending || !view) return;
+      const img = selectedImage();
+      if (!img) return;
+      const node = view.state.doc.nodeAt(img.pos);
+      if (!node || node.type.name !== "image") return;
+      view.dispatch(
+        view.state.tr.setNodeMarkup(img.pos, undefined, {
+          ...node.attrs,
+          width: Math.max(40, pending.width),
+          height: Math.max(40, pending.height),
+        }),
+      );
+      setSelectedImage({ pos: img.pos, width: Math.max(40, pending.width), height: Math.max(40, pending.height) });
+    });
   };
 
   const insertImageFromFile = (file: File, pos?: number) => {
@@ -2330,6 +2451,10 @@ export function DocEditor(props: DocEditorProps) {
               .doc-print-header, .doc-print-footer {
                 display: none;
               }
+              /* CSS counters for accurate page numbering in print */
+              body {
+                counter-reset: page;
+              }
               @media print {
                 .doc-print-header {
                   display: block;
@@ -2351,6 +2476,11 @@ export function DocEditor(props: DocEditorProps) {
                   font-size: 12px;
                   color: #000;
                 }
+                /* Use CSS counters for dynamic page numbers */
+                .doc-print-footer::after {
+                  content: "Page " counter(page) " of " counter(pages);
+                  display: block;
+                }
                 .doc-paginated::before, .doc-paginated::after, .doc-page-break::before, .doc-page-break::after {
                   display: none !important;
                 }
@@ -2362,12 +2492,12 @@ export function DocEditor(props: DocEditorProps) {
 
       <Show when={pageSetup().header}>
         <div class="doc-print-header">
-          {formatPrintHeaderFooter(pageSetup().header, pageCount(), currentCurPage)}
+          {formatPrintHeaderFooter(pageSetup().header, pageCount(), printPageIndex())}
         </div>
       </Show>
       <Show when={pageSetup().footer}>
         <div class="doc-print-footer">
-          {formatPrintHeaderFooter(pageSetup().footer, pageCount(), currentCurPage)}
+          {formatPrintHeaderFooter(pageSetup().footer, pageCount(), printPageIndex())}
         </div>
       </Show>
 
@@ -2487,11 +2617,20 @@ export function DocEditor(props: DocEditorProps) {
                   const node = view!.state.doc.nodeAt(img.pos);
                   const startW = Number(node?.attrs.width) || img.width;
                   const startH = Number(node?.attrs.height) || img.height;
+                  const aspectRatio = startW / Math.max(1, startH);
                   e.preventDefault();
                   const startX = e.clientX;
                   const startY = e.clientY;
                   const onMove = (ev: PointerEvent) => {
-                    resizeSelectedImage(startW + (ev.clientX - startX), startH + (ev.clientY - startY));
+                    const deltaX = ev.clientX - startX;
+                    const deltaY = ev.clientY - startY;
+                    if (ev.shiftKey) {
+                      const newW = Math.max(20, startW + deltaX);
+                      const newH = Math.max(20, Math.round(newW / aspectRatio));
+                      resizeSelectedImage(newW, newH);
+                    } else {
+                      resizeSelectedImage(Math.max(20, startW + deltaX), Math.max(20, startH + deltaY));
+                    }
                   };
                   const onUp = () => {
                     window.removeEventListener("pointermove", onMove);

@@ -16,7 +16,7 @@ import {
 import type { GridCanvasProps } from "./sheetTypes";
 
 export function GridCanvas(props: GridCanvasProps) {
-  const { containerRef, canvasRef, scrollTop, scrollLeft, setScrollTop, setScrollLeft, rowHeight, columnWidth, drawGrid, markGridDirtyFull, activeCell, redo, undo, copySelection, cutSelection, pasteValuesOnly, pasteTsv, selectCell, lastUsedCell, jumpToDataEdge, setEditing, setFormulaValue, formulaInputRef, handleCanvasClick, setContextMenu, emitEditorCommand, isFillHandlePoint, setFillDragStart, setSuppressNextClick, startDimensionDrag, updateDimensionDrag, fillDragStart, finishFillDrag, dimensionDrag, setDimensionDrag, getColName, cellsData, cellHyperlink, onOpenHyperlink, chartType, chartTop, chartLeft, chartData, chartMax, pieSlices } = props;
+  const { containerRef, canvasRef, scrollTop, scrollLeft, setScrollTop, setScrollLeft, rowHeight, columnWidth, drawGrid, markGridDirtyFull, activeCell, redo, undo, copySelection, cutSelection, pasteValuesOnly, pasteTsv, selectCell, lastUsedCell, jumpToDataEdge, setEditing, setFormulaValue, formulaInputRef, handleCanvasClick, setContextMenu, emitEditorCommand, isFillHandlePoint, setFillDragStart, setSuppressNextClick, startDimensionDrag, updateDimensionDrag, commitDimensionDrag, fillDragStart, finishFillDrag, dimensionDrag, setDimensionDrag, getColName, cellsData, cellHyperlink, onOpenHyperlink, toggleHideRows, toggleHideCols, unhideCandidateRows, unhideCandidateCols, hiddenRows, hiddenCols, chartType, chartTop, chartLeft, chartData, chartMax, pieSlices, SERIES_COLORS, conditionalFormatting, clearSelectionContents, switchSheetByOffset } = props;
   let scrollRafId: number | null = null;
   return (
     <>
@@ -113,6 +113,25 @@ export function GridCanvas(props: GridCanvasProps) {
               event.preventDefault();
               return;
             }
+            if ((event.ctrlKey || event.metaKey) && (event.key === "PageUp" || event.key === "PageDown")) {
+              switchSheetByOffset(event.key === "PageDown" ? 1 : -1);
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+            if (event.key === "Delete" || event.key === "Backspace") {
+              void clearSelectionContents();
+              event.preventDefault();
+              return;
+            }
+            if (event.key === "PageUp" || event.key === "PageDown") {
+              const direction = event.key === "PageDown" ? 1 : -1;
+              const viewportRows = Math.max(1, Math.floor(((containerRef?.clientHeight || 400) - 26) / rowHeight()));
+              const target = Math.max(1, Math.min(100000, activeCell().row + direction * viewportRows));
+              selectCell(target, activeCell().col, event.shiftKey);
+              event.preventDefault();
+              return;
+            }
             if (event.key === "ArrowUp") selectCell(cell.row - 1, cell.col, event.shiftKey);
             else if (event.key === "ArrowDown" || event.key === "Enter") selectCell(cell.row + 1, cell.col, event.shiftKey);
             else if (event.key === "ArrowLeft") selectCell(cell.row, cell.col - 1, event.shiftKey);
@@ -137,6 +156,14 @@ export function GridCanvas(props: GridCanvasProps) {
             aria-colcount="1000"
             aria-rowindex={activeCell().row}
             aria-colindex={activeCell().col}
+            tabindex="0"
+            onFocus={() => {
+              // Announce focus to screen readers
+              const liveRegion = containerRef?.querySelector('[aria-live]');
+              if (liveRegion) {
+                liveRegion.textContent = `Spreadsheet grid focused. Use arrow keys to navigate cells.`;
+              }
+            }}
             onClick={(event) => {
               if (event.ctrlKey || event.metaKey) {
                 // Resolve the clicked cell before opening its link; activeCell may still refer
@@ -162,6 +189,9 @@ export function GridCanvas(props: GridCanvasProps) {
             }}
             onContextMenu={(event) => {
               event.preventDefault();
+              const rect = canvasRef.getBoundingClientRect();
+              const localX = event.clientX - rect.left;
+              const localY = event.clientY - rect.top;
               const items: ContextMenuItem[] = [
                 { id: "cut", label: "Cut", action: () => void cutSelection() },
                 { id: "copy", label: "Copy", action: () => void copySelection() },
@@ -178,6 +208,30 @@ export function GridCanvas(props: GridCanvasProps) {
                 { id: "clear-contents", label: "Clear Contents", action: () => emitEditorCommand("clear-contents") },
                 { id: "clear-formatting", label: "Clear Formatting", action: () => emitEditorCommand("clear-formatting") },
               ];
+              // Header zones: row strip (left) / column strip (top).
+              if (localX <= 40 && localY > 26) {
+                const row = activeCell().row;
+                items.push({ id: "sep3", label: "", separator: true });
+                items.push({ id: "hide-rows", label: "Hide Row", action: () => toggleHideRows([row], true) });
+                if (hiddenRows().length > 0) {
+                  items.push({
+                    id: "unhide-rows",
+                    label: "Unhide Rows",
+                    action: () => toggleHideRows(unhideCandidateRows(), false),
+                  });
+                }
+              } else if (localY <= 26 && localX > 40) {
+                const col = activeCell().col;
+                items.push({ id: "sep3", label: "", separator: true });
+                items.push({ id: "hide-cols", label: "Hide Column", action: () => toggleHideCols([col], true) });
+                if (hiddenCols().length > 0) {
+                  items.push({
+                    id: "unhide-cols",
+                    label: "Unhide Columns",
+                    action: () => toggleHideCols(unhideCandidateCols(), false),
+                  });
+                }
+              }
               setContextMenu({ x: event.clientX, y: event.clientY, items });
             }}
             onPointerDown={(event) => {
@@ -200,7 +254,7 @@ export function GridCanvas(props: GridCanvasProps) {
                 event.preventDefault();
               } else if (dimensionDrag()) {
                 event.currentTarget.releasePointerCapture(event.pointerId);
-                setDimensionDrag(null);
+                commitDimensionDrag();
                 event.preventDefault();
               }
             }}
@@ -223,49 +277,70 @@ export function GridCanvas(props: GridCanvasProps) {
           >
             Cell {getColName(activeCell().col)}{activeCell().row}: {cellsData()[`${activeCell().row}:${activeCell().col}`]?.display || "empty"}
           </div>
-          <Show when={chartType() && chartData().length}>
+          <Show when={chartType() && chartData().series.length && chartData().labels.length}>
             <svg
               width="380"
               height="230"
               role="img"
-              aria-label={`${chartType()} chart from selected range`}
+              aria-label={`${chartType()} chart: ${props.chartTitle || "Chart"}`}
+              aria-describedby={`chart-desc-${chartType()}`}
               style={{ position: "absolute", top: `${chartTop()}px`, left: `${chartLeft()}px`, background: "white", border: "1px solid var(--border-color)", "border-radius": "6px", "box-shadow": "var(--shadow-md)" }}
             >
               <Show when={chartType() === "bar"}>
-                <For each={chartData()}>
-                  {(item: any, index: any) => {
-                    const barWidth = 340 / Math.max(1, chartData().length) - 4;
-                    const barHeight = Math.abs(item.value) / chartMax() * 170;
-                    return <rect x={20 + index() * (barWidth + 4)} y={190 - barHeight} width={barWidth} height={barHeight} fill="#3b82f6" />;
-                  }}
+                <For each={chartData().series}>
+                  {(series: any, seriesIndex: () => number) => (
+                    <For each={series.values}>
+                      {(value: any, index: () => number) => {
+                        const groupCount = chartData().series.length;
+                        const slotWidth = 340 / Math.max(1, chartData().labels.length);
+                        const barWidth = Math.max(1, slotWidth / (groupCount + 1) - 2);
+                        const barHeight = Math.abs(value) / chartMax() * 170;
+                        const groupOffset = (seriesIndex() - (groupCount - 1) / 2) * (barWidth + 1);
+                        const x = 20 + index() * slotWidth + slotWidth / 2 + groupOffset - barWidth / 2;
+                        return <rect x={x} y={190 - barHeight} width={barWidth} height={barHeight} fill={SERIES_COLORS[seriesIndex() % SERIES_COLORS.length]} />;
+                      }}
+                    </For>
+                  )}
                 </For>
               </Show>
               <Show when={chartType() === "area"}>
-                <polygon
-                  fill="#8b5cf6"
-                  fill-opacity="0.35"
-                  stroke="#8b5cf6"
-                  stroke-width="2"
-                  points={`20,190 ${chartData().map((item: any, index: any) => `${20 + index * (340 / Math.max(1, chartData().length - 1))},${190 - Math.abs(item.value) / chartMax() * 170}`).join(" ")} 365,190`}
-                />
+                <For each={chartData().series}>
+                  {(series: any, seriesIndex: () => number) => (
+                    <polygon
+                      fill={SERIES_COLORS[seriesIndex() % SERIES_COLORS.length]}
+                      fill-opacity="0.35"
+                      stroke={SERIES_COLORS[seriesIndex() % SERIES_COLORS.length]}
+                      stroke-width="2"
+                      points={`20,190 ${series.values.map((value: any, index: any) => `${20 + index * (340 / Math.max(1, chartData().labels.length - 1))},${190 - Math.abs(value) / chartMax() * 170}`).join(" ")} 365,190`}
+                    />
+                  )}
+                </For>
               </Show>
               <Show when={chartType() === "line"}>
-                <polyline
-                  fill="none"
-                  stroke="#16a34a"
-                  stroke-width="3"
-                  points={chartData().map((item: any, index: any) => `${20 + index * (340 / Math.max(1, chartData().length - 1)), 190 - Math.abs(item.value) / chartMax() * 170}`).join(" ")}
-                />
+                <For each={chartData().series}>
+                  {(series: any, seriesIndex: () => number) => (
+                    <polyline
+                      fill="none"
+                      stroke={SERIES_COLORS[seriesIndex() % SERIES_COLORS.length]}
+                      stroke-width="3"
+                      points={series.values.map((value: any, index: any) => `${20 + index * (340 / Math.max(1, chartData().labels.length - 1))},${190 - Math.abs(value) / chartMax() * 170}`).join(" ")}
+                    />
+                  )}
+                </For>
               </Show>
               <Show when={chartType() === "scatter"}>
-                <For each={chartData()}>
-                  {(item: any, index: any) => (
-                    <circle
-                      cx={20 + index() * (340 / Math.max(1, chartData().length - 1))}
-                      cy={190 - Math.abs(item.value) / chartMax() * 170}
-                      r="4"
-                      fill="#ef4444"
-                    />
+                <For each={chartData().series}>
+                  {(series: any, seriesIndex: () => number) => (
+                    <For each={series.values}>
+                      {(value: any, index: () => number) => (
+                        <circle
+                          cx={20 + index() * (340 / Math.max(1, chartData().labels.length - 1))}
+                          cy={190 - Math.abs(value) / chartMax() * 170}
+                          r="4"
+                          fill={SERIES_COLORS[seriesIndex() % SERIES_COLORS.length]}
+                        />
+                      )}
+                    </For>
                   )}
                 </For>
               </Show>
@@ -301,19 +376,85 @@ export function GridCanvas(props: GridCanvasProps) {
                 <circle cx="190" cy="115" r="62" fill="#ffffff" />
               </Show>
               <line x1="15" y1="190" x2="365" y2="190" stroke="#94a3b8" />
-              <Show when={props.chartTitle && chartType() !== "pie" && chartType() !== "doughnut"}>
+              <Show when={props.chartTitle}>
                 <text x="190" y="14" text-anchor="middle" font-size="12" font-weight="600" fill="#0f172a">{props.chartTitle}</text>
+              </Show>
+              <Show when={chartType() !== "pie" && chartType() !== "doughnut"}>
                 {/* Axis max label for the value scale. */}
                 <text x="12" y="26" font-size="9" fill="#64748b">{Math.round(chartMax())}</text>
                 <text x="12" y="192" font-size="9" fill="#64748b">0</text>
-              </Show>
-              <Show when={props.chartTitle && (chartType() === "pie" || chartType() === "doughnut")}>
-                <text x="190" y="14" text-anchor="middle" font-size="12" font-weight="600" fill="#0f172a">{props.chartTitle}</text>
-              </Show>
-            </svg>
+                <Show when={chartData().labels.length > 0}>
+                  <text x="20" y="202" font-size="9" fill="#64748b" text-anchor="start">
+                    {chartData().labels[0].length > 12 ? `${chartData().labels[0].slice(0, 11)}…` : chartData().labels[0]}
+                  </text>
+                  <text x="360" y="202" font-size="9" fill="#64748b" text-anchor="end">
+                    {(() => {
+                      const last = chartData().labels[chartData().labels.length - 1];
+                      return last.length > 12 ? `${last.slice(0, 11)}…` : last;
+                    })()}
+                  </text>
+                </Show>
+                {/* Legend: one entry per series, top-right. */}
+                <Show when={chartData().series.length > 1}>
+                  <For each={chartData().series.slice(0, 6)}>
+                    {(series: any, index: () => number) => (
+                      <g>
+                        <rect x={300} y={30 + index() * 13} width="8" height="8" fill={SERIES_COLORS[index() % SERIES_COLORS.length]} />
+                        <text x="312" y={37 + index() * 13} font-size="9" fill="#334155">
+                          {series.name.length > 12 ? `${series.name.slice(0, 11)}…` : series.name}
+                        </text>
+                      </g>
+                    )}
+                  </For>
+                </Show>
+               </Show>
+             </svg>
+            {/* Visually hidden data table for screen readers — WCAG 1.1.1 compliance */}
+            <div
+              id={`chart-desc-${chartType()}`}
+              role="region"
+              aria-label={`Data table for ${chartType()} chart`}
+              style={{
+                position: "absolute",
+                width: "1px",
+                height: "1px",
+                padding: 0,
+                margin: "-1px",
+                overflow: "hidden",
+                clip: "rect(0, 0, 0, 0)",
+                "white-space": "nowrap",
+                border: 0,
+              }}
+            >
+              <table aria-label={`${props.chartTitle || "Chart"} data`}>
+                <caption>{props.chartTitle || "Chart Data"}</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Label</th>
+                    <For each={chartData().series}>
+                      {(series: any) => <th scope="col">{series.name || "Series"}</th>}
+                    </For>
+                  </tr>
+                </thead>
+                <tbody>
+                  <For each={chartData().labels}>
+                    {(label: string, labelIndex: () => number) => (
+                      <tr>
+                        <th scope="row">{label}</th>
+                        <For each={chartData().series}>
+                          {(series: any) => (
+                            <td>{series.values[labelIndex()] ?? ""}</td>
+                          )}
+                        </For>
+                      </tr>
+                    )}
+                  </For>
+                </tbody>
+              </table>
+            </div>
           </Show>
-        </div>
+         </div>
 
-    </>
-  );
+     </>
+   );
 }

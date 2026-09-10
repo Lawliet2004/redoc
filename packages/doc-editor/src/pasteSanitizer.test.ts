@@ -36,4 +36,20 @@ describe("transformPastedHTML", () => {
     expect(transformPastedHTML("")).toBe("");
     expect(transformPastedHTML("   ")).toBe("");
   });
+
+  it("strips javascript, vbscript, and data hyperlinks", () => {
+    const html = '<a href="javascript:alert(1)">x</a><a href="vbscript:msgbox(1)">y</a><a href="data:text/html,hi">z</a><a href="https://example.com">ok</a>';
+    const result = transformPastedHTML(html);
+    expect(result).not.toMatch(/javascript:/i);
+    expect(result).not.toMatch(/vbscript:/i);
+    expect(result).not.toMatch(/data:text\/html/i);
+    expect(result).toContain("https://example.com");
+  });
+
+  it("keeps raster data-image sources and drops HTML data URLs", () => {
+    const html = '<img src="data:image/png;base64,AAAA"><img src="data:text/html,<script>alert(1)</script>">';
+    const result = transformPastedHTML(html);
+    expect(result).toContain("data:image/png;base64,AAAA");
+    expect(result).not.toMatch(/data:text\/html/i);
+  });
 });

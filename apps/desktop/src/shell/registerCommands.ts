@@ -415,6 +415,7 @@ export function buildAppCommands(ctx: AppCommandContext): CommandItem[] {
         title: "Start from Beginning",
         mode: "slide" as const,
         menuPath: ["Slide", "Start from Beginning"],
+        shortcut: "Shift+F5",
         action: () => emitEditorCommand("present"),
       },
       {
