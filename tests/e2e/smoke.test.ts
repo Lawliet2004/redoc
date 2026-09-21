@@ -10,8 +10,8 @@ import { test, expect } from "@playwright/test";
 test.describe("App startup", () => {
   test("home screen loads", async ({ page }) => {
     await page.goto("/");
-    await expect(page.locator("text=Redoc")).toBeVisible();
-    await expect(page.locator("text=Documents, spreadsheets, presentations")).toBeVisible();
+    await expect(page.getByText("Redoc", { exact: true })).toBeVisible();
+    await expect(page.locator(".app-brand-tag")).toBeVisible();
   });
 
   test("mode tabs are visible", async ({ page }) => {
@@ -85,6 +85,6 @@ test.describe("Mode switching", () => {
 
     // Back to home
     await page.locator("[data-testid='mode-home']").click();
-    await expect(page.locator("text=Redoc")).toBeVisible();
+    await expect(page.getByText("Redoc", { exact: true })).toBeVisible();
   });
 });

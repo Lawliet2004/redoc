@@ -22,7 +22,7 @@ const output = [
 ].join("\n");
 if (process.argv.includes("--check")) {
   const current = readFileSync(outputPath, "utf8");
-  if (current !== output) {
+  if (current.replace(/\r\n/g, "\n") !== output) {
     throw new Error(`Generated formula catalog is stale; run node scripts/generate-formula-catalog.mjs`);
   }
   console.log(`Formula catalog is current: ${names.length} names.`);

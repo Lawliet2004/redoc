@@ -156,7 +156,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("redoc-logging-{nonce}"));
+        // ponytail: nanos alone collide on Windows' ~15ms clock; pid disambiguates parallel tests.
+        let path = std::env::temp_dir().join(format!("redoc-logging-{}-{nonce}", std::process::id()));
         fs::create_dir_all(&path).expect("create logging test directory");
         path
     }
