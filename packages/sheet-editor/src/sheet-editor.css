@@ -1,0 +1,298 @@
+/* —— Sheet editor scoped chrome (prefix: sheet-) ————————————————————————
+   Premium spreadsheet chrome layered on top of the shared .g-* tokens and
+   theme.css variables. Everything is scoped under .sheet-root so other
+   editors and shared chrome are unaffected. */
+
+.sheet-root {
+  /* Canvas paint palette lives in SheetEditor.tsx (drawGrid); these vars
+     cover the DOM chrome only. */
+  --sheet-tab-radius: var(--radius-md, 6px);
+}
+
+/* —— Toolbar rows ——————————————————————————————————————————————— */
+/* Dual-class selectors beat .g-toolbar-row regardless of stylesheet order. */
+.g-toolbar-row.sheet-toolbar {
+  height: 30px;
+  min-height: 30px;
+  padding: 2px 8px;
+  gap: 2px;
+  scrollbar-width: none;
+}
+.g-toolbar-row.sheet-toolbar::-webkit-scrollbar {
+  display: none;
+}
+.sheet-toolbar .g-toolbar-btn {
+  height: 24px;
+  min-width: 24px;
+  border-radius: var(--radius-sm);
+}
+.sheet-toolbar .g-toolbar-sep {
+  height: 16px;
+  margin: 0 5px;
+}
+.sheet-toolbar .g-toolbar-select,
+.sheet-toolbar .g-toolbar-input {
+  height: 24px;
+}
+
+/* —— Formula bar ———————————————————————————————————————————————— */
+.g-formula-bar.sheet-formula-bar {
+  height: 28px;
+  min-height: 28px;
+  background: var(--bg-surface);
+}
+.sheet-name-box {
+  min-width: 84px;
+  padding: 0 10px;
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+  background: var(--bg-toolbar);
+  flex-shrink: 0;
+  user-select: none;
+}
+.sheet-fx {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.sheet-fx .g-toolbar-btn {
+  font-family: var(--font-doc);
+  font-style: italic;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 0 8px;
+}
+.sheet-fx .g-toolbar-btn:hover {
+  color: var(--text-primary);
+}
+.sheet-formula-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 0 10px;
+  outline: none;
+  min-width: 0;
+}
+.sheet-formula-input:focus {
+  background: var(--bg-input);
+}
+.sheet-validation-picker {
+  height: 24px;
+  margin-left: 4px;
+  max-width: 150px;
+}
+
+/* —— Sheet tab bar —————————————————————————————————————————————— */
+.g-sheet-tabs.sheet-tabs {
+  height: 30px;
+  padding: 0 8px;
+  gap: 2px;
+  align-items: flex-end;
+}
+.sheet-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--sheet-tab-radius) var(--sheet-tab-radius) 0 0;
+  cursor: grab;
+  white-space: nowrap;
+  user-select: none;
+}
+.sheet-tab:active {
+  cursor: grabbing;
+}
+.sheet-tab:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+.sheet-tab:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+.sheet-tab.active {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border-color: var(--border-color);
+  font-weight: 600;
+}
+/* Accent underline: uses the per-tab color when the sheet has one. */
+.sheet-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 7px;
+  right: 7px;
+  bottom: 1px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--sheet-tab-color, var(--sheet-accent));
+}
+/* Colored tabs keep a small swatch when inactive so the color is visible. */
+.sheet-tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+/* The "+" add-sheet affordance stays vertically centered in the bar. */
+.sheet-tabs .g-toolbar-btn {
+  align-self: center;
+  margin-bottom: 1px;
+  border-radius: var(--radius-full);
+}
+
+/* —— AutoFilter value picker popover ———————————————————————————— */
+.sheet-filter-popover {
+  position: absolute;
+  top: 96px;
+  left: 56px;
+  z-index: var(--z-modal, 400);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 10px;
+  width: 232px;
+  max-height: 300px;
+  overflow: auto;
+}
+.sheet-filter-actions {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.sheet-filter-search {
+  width: 100%;
+  height: 26px;
+  margin-bottom: 8px;
+  padding: 0 8px;
+  box-sizing: border-box;
+}
+.sheet-filter-option {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 3px 4px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  cursor: default;
+}
+.sheet-filter-option:hover {
+  background: var(--bg-tertiary);
+}
+
+/* —— Dialogs ———————————————————————————————————————————————————— */
+.sheet-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 300px;
+}
+.sheet-dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+/* Premium dialog buttons: padded pills instead of toolbar-sized chips.
+   Safe alongside .g-toolbar-btn (these override its compact sizing). */
+.sheet-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  height: auto;
+  padding: 6px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  transition: background var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.sheet-btn:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--border-hover);
+}
+.sheet-btn-primary {
+  background: var(--accent-color);
+  border-color: var(--accent-color);
+  color: var(--accent-text, #ffffff);
+}
+.sheet-btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* —— Sidebar panel sections ————————————————————————————————————— */
+.sheet-panel-heading {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.sheet-panel-section {
+  border-top: 1px solid var(--border-color);
+  padding-top: 8px;
+  margin-top: 8px;
+}
+.sheet-panel-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.sheet-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  margin-top: 5px;
+}
+
+/* —— Context menu polish (scoped: only inside the sheet editor) —— */
+.sheet-root .g-context-menu button[role="menuitem"] {
+  border-radius: var(--radius-sm);
+}
+.sheet-root .g-context-menu button[role="menuitem"]:hover:not(:disabled),
+.sheet-root .g-context-menu button[role="menuitem"]:focus-visible {
+  background: var(--bg-tertiary) !important; /* item background is inline-styled */
+}
+
+/* —— In-grid cell editor overlay ———————————————————————————————— */
+.sheet-cell-editor {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+}
+
+/* High-contrast mode: keep the tab underline and selection affordances
+   visible by hardening the accent edge. */
+@media (prefers-contrast: more) {
+  .sheet-tab.active {
+    border-color: currentColor;
+  }
+  .sheet-tab.active::after {
+    height: 3px;
+  }
+}

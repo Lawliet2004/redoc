@@ -47,7 +47,7 @@ export function IconSidebar(props: IconSidebarProps) {
           {(panel) => (
             <button
               type="button"
-              class={`g-sidebar-rail-btn${currentPanel() === panel.id ? " active" : ""}`}
+              class={`g-sidebar-rail-btn ec-rail-btn${currentPanel() === panel.id ? " active" : ""}`}
               title={panel.title}
               aria-label={panel.title}
               aria-pressed={currentPanel() === panel.id}

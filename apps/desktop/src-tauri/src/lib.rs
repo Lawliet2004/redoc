@@ -175,23 +175,6 @@ fn update_settings(
 
 #[tauri::command]
 #[specta::specta]
-fn record_telemetry_event(
-    state: tauri::State<'_, Arc<AppState>>,
-    event: String,
-) -> Result<(), String> {
-    handle_panic!({
-        #[cfg(feature = "telemetry")]
-        if state.settings.read().telemetry_enabled {
-            tracing::info!(target: "redoc::telemetry", event = %event, "local telemetry event");
-        }
-        #[cfg(not(feature = "telemetry"))]
-        let _ = (state, event);
-        Ok(())
-    })
-}
-
-#[tauri::command]
-#[specta::specta]
 fn get_recents(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<RecentEntry>, String> {
     handle_panic!({
         let res = (|| state.recents.read().entries.clone())();
@@ -1081,7 +1064,6 @@ fn specta_builder() -> SpectaBuilder<tauri::Wry> {
         take_pending_open_paths,
         get_settings,
         update_settings,
-        record_telemetry_event,
         get_recents,
         toggle_pin_recent,
         check_recovery,

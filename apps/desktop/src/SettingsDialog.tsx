@@ -15,7 +15,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const [zoomLevel, setZoomLevel] = createSignal(props.settings.zoomLevel ?? 100);
   const [autosaveInterval, setAutosaveInterval] = createSignal(props.settings.autosaveIntervalMs || 2000);
   const [spellcheckEnabled, setSpellcheckEnabled] = createSignal(props.settings.spellcheckEnabled ?? true);
-  const [telemetryEnabled, setTelemetryEnabled] = createSignal(props.settings.telemetryEnabled ?? false);
   const [checkForUpdates, setCheckForUpdates] = createSignal(props.settings.checkForUpdates !== false);
   const [authorName, setAuthorName] = createSignal(props.settings.author?.displayName || "You");
   const [authorEmail, setAuthorEmail] = createSignal(props.settings.author?.email || "");
@@ -28,7 +27,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
       setZoomLevel(props.settings.zoomLevel ?? 100);
       setAutosaveInterval(props.settings.autosaveIntervalMs || 2000);
       setSpellcheckEnabled(props.settings.spellcheckEnabled ?? true);
-      setTelemetryEnabled(props.settings.telemetryEnabled ?? false);
       setCheckForUpdates(props.settings.checkForUpdates !== false);
       setAuthorName(props.settings.author?.displayName || "You");
       setAuthorEmail(props.settings.author?.email || "");
@@ -44,7 +42,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
       zoomLevel: zoomLevel(),
       autosaveIntervalMs: autosaveInterval(),
       spellcheckEnabled: spellcheckEnabled(),
-      telemetryEnabled: telemetryEnabled(),
       checkForUpdates: checkForUpdates(),
       author: {
         displayName: authorName().trim() || "You",
@@ -55,28 +52,16 @@ export function SettingsDialog(props: SettingsDialogProps) {
     props.onClose();
   };
 
-  const inputStyle = {
-    width: "100%",
-    "margin-top": "4px",
-    padding: "8px",
-    "border-radius": "var(--radius-md)",
-    border: "1px solid var(--border-color)",
-    background: "var(--bg-surface)",
-    color: "var(--text-primary)",
-  };
-
-  const labelStyle = { "font-size": "13px", "font-weight": "500", color: "var(--text-secondary)" };
-  const checkboxLabelStyle = { display: "flex", gap: "8px", "align-items": "center", "font-size": "13px", color: "var(--text-primary)" };
-
   return (
     <Dialog open={props.open} title="Redoc Settings" onClose={props.onClose}>
-      <div style={{ display: "flex", "flex-direction": "column", gap: "16px" }}>
+      <div style={{ display: "flex", "flex-direction": "column", gap: "18px" }}>
         <div>
-          <label style={labelStyle}>Theme</label>
+          <label class="app-field-label" for="settings-theme">Theme</label>
           <select
+            id="settings-theme"
+            class="app-field-input"
             value={theme()}
             onChange={(e) => setTheme(e.currentTarget.value as any)}
-            style={inputStyle}
           >
             <option value="system">System Default</option>
             <option value="light">Light Mode</option>
@@ -86,8 +71,10 @@ export function SettingsDialog(props: SettingsDialogProps) {
 
         <div style={{ display: "flex", gap: "16px" }}>
           <div style={{ flex: 1 }}>
-            <label style={labelStyle}>Default Font Size (8-72)</label>
+            <label class="app-field-label" for="settings-font-size">Default Font Size (8-72)</label>
             <input
+              id="settings-font-size"
+              class="app-field-input"
               type="number"
               min="8"
               max="72"
@@ -98,12 +85,13 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 if (val > 72) val = 72;
                 setFontSizeDefault(val);
               }}
-              style={inputStyle}
             />
           </div>
           <div style={{ flex: 1 }}>
-            <label style={labelStyle}>Default Zoom Level (50-200)</label>
+            <label class="app-field-label" for="settings-zoom">Default Zoom Level (50-200)</label>
             <input
+              id="settings-zoom"
+              class="app-field-input"
               type="number"
               min="50"
               max="200"
@@ -114,58 +102,62 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 if (val > 200) val = 200;
                 setZoomLevel(val);
               }}
-              style={inputStyle}
             />
           </div>
         </div>
 
         <div>
-          <label style={labelStyle}>Autosave Interval (ms)</label>
+          <label class="app-field-label" for="settings-autosave">Autosave Interval (ms)</label>
           <input
+            id="settings-autosave"
+            class="app-field-input"
             type="number"
             min="500"
             value={autosaveInterval()}
             onInput={(e) => setAutosaveInterval(Number(e.currentTarget.value))}
-            style={inputStyle}
           />
         </div>
 
         <div>
-          <label style={labelStyle}>Display Name (used for comments and tracked changes)</label>
+          <label class="app-field-label" for="settings-author-name">Display Name (used for comments and tracked changes)</label>
           <input
+            id="settings-author-name"
+            class="app-field-input"
             type="text"
             maxlength="80"
             value={authorName()}
             onInput={(e) => setAuthorName(e.currentTarget.value)}
-            style={inputStyle}
           />
         </div>
 
         <div style={{ display: "flex", gap: "16px" }}>
           <div style={{ flex: 1 }}>
-            <label style={labelStyle}>Email (optional)</label>
+            <label class="app-field-label" for="settings-author-email">Email (optional)</label>
             <input
+              id="settings-author-email"
+              class="app-field-input"
               type="email"
               maxlength="254"
               value={authorEmail()}
               onInput={(e) => setAuthorEmail(e.currentTarget.value)}
-              style={inputStyle}
             />
           </div>
           <div>
-            <label style={labelStyle}>Author Color</label>
+            <label class="app-field-label" for="settings-author-color">Author Color</label>
             <input
+              id="settings-author-color"
+              class="app-field-input"
               type="color"
               value={authorColor()}
               onInput={(e) => setAuthorColor(e.currentTarget.value)}
               aria-label="Author color"
-              style={{ ...inputStyle, width: "64px", height: "36px", padding: "2px", "margin-top": "4px", cursor: "pointer" }}
+              style={{ width: "64px", height: "38px", padding: "2px", cursor: "pointer" }}
             />
           </div>
         </div>
 
-        <div style={{ display: "flex", "flex-direction": "column", gap: "8px", "margin-top": "4px" }}>
-          <label style={checkboxLabelStyle}>
+        <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+          <label class="app-field-check">
             <input
               type="checkbox"
               checked={spellcheckEnabled()}
@@ -173,17 +165,8 @@ export function SettingsDialog(props: SettingsDialogProps) {
             />
             Enable Spellcheck
           </label>
-          
-          <label style={checkboxLabelStyle}>
-            <input
-              type="checkbox"
-              checked={telemetryEnabled()}
-              onChange={(e) => setTelemetryEnabled(e.currentTarget.checked)}
-            />
-            Enable Anonymous Telemetry
-          </label>
-          
-          <label style={checkboxLabelStyle}>
+
+          <label class="app-field-check">
             <input
               type="checkbox"
               checked={checkForUpdates()}
@@ -193,13 +176,13 @@ export function SettingsDialog(props: SettingsDialogProps) {
           </label>
         </div>
 
-        <div style={{ "margin-top": "4px" }}>
+        <div>
           <Button variant="secondary" onClick={() => void commands.openLogsFolder()}>
             Open logs folder
           </Button>
         </div>
 
-        <div style={{ display: "flex", "justify-content": "flex-end", gap: "8px", "margin-top": "8px" }}>
+        <div class="app-dialog-actions">
           <Button variant="secondary" onClick={props.onClose}>Cancel</Button>
           <Button variant="primary" onClick={handleSave}>Save Settings</Button>
         </div>

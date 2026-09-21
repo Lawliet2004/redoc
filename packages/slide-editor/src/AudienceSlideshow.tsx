@@ -186,17 +186,7 @@ export function AudienceSlideshow(props: {
           slideIndex={index()}
         />
       </Show>
-      <div
-        style={{
-          position: "absolute",
-          bottom: "8px",
-          right: "12px",
-          color: "#94a3b8",
-          "font-size": "12px",
-          "font-family": "Inter, sans-serif",
-          "pointer-events": "none",
-        }}
-      >
+      <div class="slide-show-counter">
         {index() + 1} / {slides().length}
       </div>
     </div>

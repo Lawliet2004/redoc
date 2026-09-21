@@ -65,7 +65,6 @@ pub struct AppSettings {
     pub autosave_interval_ms: u64,
     pub spellcheck_enabled: bool,
     pub font_size_default: u32,
-    pub telemetry_enabled: bool,
     #[serde(default = "default_zoom_level")]
     pub zoom_level: u32,
     #[serde(default = "default_check_for_updates")]
@@ -89,7 +88,6 @@ impl Default for AppSettings {
             autosave_interval_ms: 2000,
             spellcheck_enabled: true,
             font_size_default: 12,
-            telemetry_enabled: false,
             zoom_level: 100,
             check_for_updates: true,
             author: default_author(),
@@ -119,7 +117,7 @@ mod tests {
     #[test]
     fn deserializes_legacy_settings_without_author() {
         let settings: AppSettings =
-            serde_json::from_str(r#"{"theme":"dark","autosaveIntervalMs":1000,"spellcheckEnabled":true,"fontSizeDefault":12,"telemetryEnabled":false}"#)
+            serde_json::from_str(r#"{"theme":"dark","autosaveIntervalMs":1000,"spellcheckEnabled":true,"fontSizeDefault":12}"#)
                 .expect("settings");
         assert!(settings.check_for_updates);
         assert_eq!(settings.zoom_level, 100);

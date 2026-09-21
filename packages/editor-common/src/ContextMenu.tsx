@@ -18,9 +18,35 @@ interface ContextMenuProps {
 export function ContextMenu(props: ContextMenuProps) {
   let menuRef!: HTMLDivElement;
 
+  const focusableItems = () =>
+    Array.from(
+      menuRef?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])') ?? [],
+    );
+
   onMount(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") props.onClose();
+      if (event.key === "Escape") {
+        props.onClose();
+        return;
+      }
+      if (
+        event.key !== "ArrowDown" &&
+        event.key !== "ArrowUp" &&
+        event.key !== "Home" &&
+        event.key !== "End"
+      ) {
+        return;
+      }
+      const items = focusableItems();
+      if (!items.length) return;
+      event.preventDefault();
+      const idx = items.findIndex((n) => n === document.activeElement);
+      let next = idx;
+      if (event.key === "ArrowDown") next = idx + 1;
+      else if (event.key === "ArrowUp") next = idx < 0 ? items.length - 1 : idx - 1;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = items.length - 1;
+      items[((next % items.length) + items.length) % items.length].focus();
     };
     const onPointer = (event: MouseEvent) => {
       if (!menuRef?.contains(event.target as Node)) props.onClose();
@@ -32,9 +58,8 @@ export function ContextMenu(props: ContextMenuProps) {
       document.removeEventListener("mousedown", onPointer);
     });
     queueMicrotask(() => {
-      const first = menuRef?.querySelector<HTMLElement>('button:not([disabled])');
-      first?.focus();
-      
+      focusableItems()[0]?.focus();
+
       if (menuRef) {
         const rect = menuRef.getBoundingClientRect();
         let newX = props.x;
@@ -52,44 +77,27 @@ export function ContextMenu(props: ContextMenuProps) {
       ref={menuRef}
       role="menu"
       aria-label="Context menu"
-      class="g-context-menu g-no-print"
+      class="g-context-menu ec-context-menu ec-menu-pop g-no-print"
       style={{
         position: "fixed",
         left: `${props.x}px`,
         top: `${props.y}px`,
-        "min-width": "180px",
-        background: "var(--bg-surface)",
-        border: "1px solid var(--border-color)",
-        "border-radius": "4px",
-        "box-shadow": "var(--shadow-md)",
-        padding: "4px 0",
-        "z-index": "1000",
       }}
     >
       <For each={props.items}>
         {(item) =>
           item.separator ? (
-            <div role="separator" style={{ height: "1px", background: "var(--border-color)", margin: "4px 0" }} />
+            <div role="separator" class="ec-menu-sep" />
           ) : (
             <button
               type="button"
               role="menuitem"
               disabled={item.disabled}
+              class="g-menu-item ec-menu-item"
               onClick={() => {
                 if (item.disabled) return;
                 item.action?.();
                 props.onClose();
-              }}
-              style={{
-                display: "block",
-                width: "100%",
-                "text-align": "left",
-                padding: "6px 12px",
-                border: "none",
-                background: "transparent",
-                color: item.disabled ? "var(--text-muted)" : "var(--text-primary)",
-                cursor: item.disabled ? "default" : "pointer",
-                "font-size": "12px",
               }}
             >
               {item.label}
@@ -98,7 +106,7 @@ export function ContextMenu(props: ContextMenuProps) {
         }
       </For>
       <Show when={props.items.length === 0}>
-        <div style={{ padding: "8px 12px", "font-size": "12px", color: "var(--text-muted)" }}>No actions</div>
+        <div class="ec-menu-empty">No actions</div>
       </Show>
     </div>
   );

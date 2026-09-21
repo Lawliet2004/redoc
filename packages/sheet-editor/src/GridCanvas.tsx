@@ -16,13 +16,18 @@ import {
 import type { GridCanvasProps } from "./sheetTypes";
 
 export function GridCanvas(props: GridCanvasProps) {
-  const { containerRef, canvasRef, scrollTop, scrollLeft, setScrollTop, setScrollLeft, rowHeight, columnWidth, drawGrid, markGridDirtyFull, activeCell, redo, undo, copySelection, cutSelection, pasteValuesOnly, pasteTsv, selectCell, lastUsedCell, jumpToDataEdge, setEditing, setFormulaValue, formulaInputRef, handleCanvasClick, setContextMenu, emitEditorCommand, isFillHandlePoint, setFillDragStart, setSuppressNextClick, startDimensionDrag, updateDimensionDrag, commitDimensionDrag, fillDragStart, finishFillDrag, dimensionDrag, setDimensionDrag, getColName, cellsData, cellHyperlink, onOpenHyperlink, toggleHideRows, toggleHideCols, unhideCandidateRows, unhideCandidateCols, hiddenRows, hiddenCols, chartType, chartTop, chartLeft, chartData, chartMax, pieSlices, SERIES_COLORS, conditionalFormatting, clearSelectionContents, switchSheetByOffset } = props;
+  const { containerRef, canvasRef, scrollTop, scrollLeft, setScrollTop, setScrollLeft, rowHeight, columnWidth, drawGrid, markGridDirtyFull, activeCell, redo, undo, copySelection, cutSelection, pasteValuesOnly, pasteTsv, selectCell, selectedBounds, cursorForPoint, lastUsedCell, jumpToDataEdge, setEditing, setFormulaValue, formulaInputRef, handleCanvasClick, setContextMenu, emitEditorCommand, isFillHandlePoint, setFillDragStart, setSuppressNextClick, startDimensionDrag, updateDimensionDrag, commitDimensionDrag, fillDragStart, finishFillDrag, dimensionDrag, setDimensionDrag, getColName, cellsData, cellHyperlink, onOpenHyperlink, toggleHideRows, toggleHideCols, unhideCandidateRows, unhideCandidateCols, hiddenRows, hiddenCols, chartType, chartTop, chartLeft, chartData, chartMax, pieSlices, SERIES_COLORS, conditionalFormatting, clearSelectionContents, switchSheetByOffset } = props;
+  let containerEl: HTMLDivElement | undefined;
+  let canvasEl: HTMLCanvasElement | undefined;
   let scrollRafId: number | null = null;
   return (
     <>
       {/* Grid Container */}
         <div
-          ref={containerRef}
+          ref={(el) => {
+            containerEl = el;
+            containerRef(el);
+          }}
           tabindex="0"
           onWheel={(event) => {
             event.preventDefault();
@@ -108,8 +113,8 @@ export function GridCanvas(props: GridCanvasProps) {
             }
             if (event.key === "F2" || event.key === "Enter") {
               setEditing(true);
-              formulaInputRef?.focus();
-              formulaInputRef?.select();
+              formulaInputRef?.()?.focus();
+              formulaInputRef?.()?.select();
               event.preventDefault();
               return;
             }
@@ -126,7 +131,7 @@ export function GridCanvas(props: GridCanvasProps) {
             }
             if (event.key === "PageUp" || event.key === "PageDown") {
               const direction = event.key === "PageDown" ? 1 : -1;
-              const viewportRows = Math.max(1, Math.floor(((containerRef?.clientHeight || 400) - 26) / rowHeight()));
+              const viewportRows = Math.max(1, Math.floor(((containerEl?.clientHeight || 400) - 26) / rowHeight()));
               const target = Math.max(1, Math.min(100000, activeCell().row + direction * viewportRows));
               selectCell(target, activeCell().col, event.shiftKey);
               event.preventDefault();
@@ -139,8 +144,8 @@ export function GridCanvas(props: GridCanvasProps) {
             else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
               setEditing(true);
               setFormulaValue(event.key);
-              formulaInputRef?.focus();
-              formulaInputRef?.select();
+              formulaInputRef?.()?.focus();
+              formulaInputRef?.()?.select();
               return;
             }
             else return;
@@ -149,7 +154,10 @@ export function GridCanvas(props: GridCanvasProps) {
           style={{ flex: 1, position: "relative", overflow: "hidden", background: "#ffffff" }}
         >
           <canvas
-            ref={canvasRef}
+            ref={(el) => {
+              canvasEl = el;
+              canvasRef(el);
+            }}
             role="grid"
             aria-label="Spreadsheet grid"
             aria-rowcount="100000"
@@ -159,7 +167,7 @@ export function GridCanvas(props: GridCanvasProps) {
             tabindex="0"
             onFocus={() => {
               // Announce focus to screen readers
-              const liveRegion = containerRef?.querySelector('[aria-live]');
+              const liveRegion = containerEl?.querySelector('[aria-live]');
               if (liveRegion) {
                 liveRegion.textContent = `Spreadsheet grid focused. Use arrow keys to navigate cells.`;
               }
@@ -184,29 +192,35 @@ export function GridCanvas(props: GridCanvasProps) {
               const cell = activeCell();
               setFormulaValue(cellsData()[`${cell.row}:${cell.col}`]?.raw || "");
               setEditing(true);
-              formulaInputRef?.focus();
-              formulaInputRef?.select();
+              formulaInputRef?.()?.focus();
+              formulaInputRef?.()?.select();
             }}
             onContextMenu={(event) => {
               event.preventDefault();
-              const rect = canvasRef.getBoundingClientRect();
+              const rect = canvasEl!.getBoundingClientRect();
               const localX = event.clientX - rect.left;
               const localY = event.clientY - rect.top;
+              // Google Sheets-style labels: the count reflects the selection span.
+              const menuBounds = selectedBounds();
+              const rowCount = menuBounds.endRow - menuBounds.startRow + 1;
+              const colCount = menuBounds.endCol - menuBounds.startCol + 1;
+              const rowWord = rowCount === 1 ? "row" : "rows";
+              const colWord = colCount === 1 ? "column" : "columns";
               const items: ContextMenuItem[] = [
                 { id: "cut", label: "Cut", action: () => void cutSelection() },
                 { id: "copy", label: "Copy", action: () => void copySelection() },
                 { id: "paste", label: "Paste", action: () => void pasteTsv() },
                 { id: "sep1", label: "", separator: true },
-                { id: "insert-row-above", label: "Insert Row Above", action: () => emitEditorCommand("insert-row-above") },
-                { id: "insert-row-below", label: "Insert Row Below", action: () => emitEditorCommand("insert-row-below") },
-                { id: "insert-col-left", label: "Insert Column Left", action: () => emitEditorCommand("insert-col-left") },
-                { id: "insert-col-right", label: "Insert Column Right", action: () => emitEditorCommand("insert-col-right") },
-                { id: "delete-row", label: "Delete Row", action: () => emitEditorCommand("delete-rows") },
-                { id: "delete-col", label: "Delete Column", action: () => emitEditorCommand("delete-cols") },
+                { id: "insert-row-above", label: `Insert ${rowCount} ${rowWord} above`, action: () => emitEditorCommand("insert-row-above") },
+                { id: "insert-row-below", label: `Insert ${rowCount} ${rowWord} below`, action: () => emitEditorCommand("insert-row-below") },
+                { id: "insert-col-left", label: `Insert ${colCount} ${colWord} left`, action: () => emitEditorCommand("insert-col-left") },
+                { id: "insert-col-right", label: `Insert ${colCount} ${colWord} right`, action: () => emitEditorCommand("insert-col-right") },
+                { id: "delete-row", label: `Delete ${rowCount} ${rowWord}`, action: () => emitEditorCommand("delete-rows") },
+                { id: "delete-col", label: `Delete ${colCount} ${colWord}`, action: () => emitEditorCommand("delete-cols") },
                 { id: "sep2", label: "", separator: true },
-                { id: "format-cells", label: "Format Cells...", action: () => emitEditorCommand("format-cells") },
-                { id: "clear-contents", label: "Clear Contents", action: () => emitEditorCommand("clear-contents") },
-                { id: "clear-formatting", label: "Clear Formatting", action: () => emitEditorCommand("clear-formatting") },
+                { id: "format-cells", label: "Format cells…", action: () => emitEditorCommand("format-cells") },
+                { id: "clear-contents", label: "Clear contents", action: () => emitEditorCommand("clear-contents") },
+                { id: "clear-formatting", label: "Clear formatting", action: () => emitEditorCommand("clear-formatting") },
               ];
               // Header zones: row strip (left) / column strip (top).
               if (localX <= 40 && localY > 26) {
@@ -246,7 +260,15 @@ export function GridCanvas(props: GridCanvasProps) {
                 event.preventDefault();
               }
             }}
-            onPointerMove={updateDimensionDrag}
+            onPointerMove={(event) => {
+              updateDimensionDrag(event);
+              // Hover cursor affordances: crosshair on the fill handle,
+              // resize cursors on header edges, "cell" cursor in the grid.
+              const target = event.currentTarget;
+              if (fillDragStart()) target.style.cursor = "crosshair";
+              else if (dimensionDrag()) target.style.cursor = dimensionDrag()!.axis === "column" ? "col-resize" : "row-resize";
+              else target.style.cursor = cursorForPoint?.(event) || "cell";
+            }}
             onPointerUp={(event) => {
               if (fillDragStart()) {
                 event.currentTarget.releasePointerCapture(event.pointerId);
@@ -258,7 +280,7 @@ export function GridCanvas(props: GridCanvasProps) {
                 event.preventDefault();
               }
             }}
-            style={{ display: "block" }}
+            style={{ display: "block", cursor: "cell" }}
           />
           <div
             aria-live="polite"

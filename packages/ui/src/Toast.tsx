@@ -35,6 +35,7 @@ export function ToastContainer() {
         right: "20px",
         display: "flex",
         "flex-direction": "column",
+        "align-items": "flex-end",
         gap: "8px",
         "z-index": "var(--z-toast, 2000)",
       }}
@@ -78,19 +79,21 @@ function ToastItem(props: { toast: ToastMessage }) {
         startTimer();
       }}
       style={{
-        padding: "10px 16px",
-        "border-radius": "var(--radius-md, 6px)",
-        background: props.toast.type === "error" ? "var(--color-error, #ef4444)" : props.toast.type === "success" ? "var(--color-success, #10b981)" : props.toast.type === "warning" ? "var(--color-warning, #f59e0b)" : "var(--bg-tertiary, #404040)",
-        color: props.toast.type === "info" ? "var(--text-primary)" : "#0b1420",
-        "box-shadow": "var(--shadow-md)",
+        padding: "10px 14px",
+        "border-radius": "var(--radius-lg, 12px)",
+        background: props.toast.type === "error" ? "var(--color-error, #ef4444)" : props.toast.type === "success" ? "var(--color-success, #10b981)" : props.toast.type === "warning" ? "var(--color-warning, #f59e0b)" : "var(--bg-popover, #404040)",
+        color: props.toast.type === "info" ? "var(--text-primary)" : "var(--text-on-accent, #0b1420)",
+        border: props.toast.type === "info" ? "1px solid var(--border-color)" : "1px solid rgba(0, 0, 0, 0.14)",
+        "box-shadow": "var(--shadow-lg)",
         "font-size": "var(--font-base, 13px)",
         "font-weight": "500",
         display: "flex",
         "align-items": "center",
         "justify-content": "space-between",
         gap: "12px",
-        animation: isExiting() ? "fadeOutRight 0.2s ease-out forwards" : "slideInRight 0.3s ease-out",
-        "min-width": "200px",
+        animation: isExiting() ? "fadeOutRight 0.18s ease-out forwards" : "slideInRight 0.24s ease-out",
+        "min-width": "220px",
+        "max-width": "380px",
       }}
     >
       <div style={{ display: "flex", "align-items": "center", gap: "8px", "min-width": 0 }}>
@@ -111,8 +114,8 @@ function ToastItem(props: { toast: ToastMessage }) {
               color: "inherit",
               "font-size": "12px",
               "font-weight": "600",
-              padding: "2px 10px",
-              "border-radius": "var(--radius-sm, 4px)",
+              padding: "3px 10px",
+              "border-radius": "var(--radius-sm, 6px)",
               cursor: "pointer",
               "white-space": "nowrap",
             }}

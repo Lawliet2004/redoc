@@ -1,0 +1,645 @@
+/* ============================================================================
+   app.css — shell-scoped styles owned by the app shell (App.tsx, HomeScreen,
+   dialogs). Global g-/home- primitives live in packages/ui/src/theme.css;
+   everything here is additive and consumes theme tokens only, so dark, light,
+   and high-contrast themes all work.
+   ============================================================================ */
+
+/* —— Slim shell titlebar ———————————————————————————————————————————————— */
+
+.app-titlebar {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-menubar);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.app-titlebar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--titlebar-h);
+  padding: 0 10px;
+  gap: 10px;
+}
+
+.app-titlebar-left,
+.app-titlebar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.app-titlebar-left {
+  flex: 1;
+}
+
+/* Brand/home button: accent-tinted tile that follows the active mode accent. */
+.app-home-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 13%, transparent);
+  transition: background var(--transition-fast);
+}
+
+.app-home-btn:hover {
+  background: color-mix(in srgb, var(--accent-color) 24%, transparent);
+}
+
+/* Segmented editor-mode switcher — soft pill, accent-tinted active segment. */
+.app-mode-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-full);
+}
+
+.app-mode-pill button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: var(--radius-full);
+  font-size: var(--font-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.app-mode-pill button:hover {
+  color: var(--text-primary);
+}
+
+.app-mode-pill button.active {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow:
+    var(--shadow-sm),
+    inset 0 0 0 1px color-mix(in srgb, var(--accent-color) 45%, transparent);
+}
+
+/* Save-state readout next to the title input. */
+.app-savestate {
+  font-size: var(--font-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* —— Open-document session tabs ————————————————————————————————————————— */
+
+.app-session-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 8px 0;
+  overflow: auto;
+  border-top: 1px solid var(--border-color);
+}
+
+.app-session-tab {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  max-width: 240px;
+}
+
+.app-session-tab-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  font-size: var(--font-sm);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  max-width: 210px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.app-session-tab-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.app-session-tab-btn[aria-selected="true"] {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border-bottom-color: var(--tab-accent, var(--accent-color));
+}
+
+.app-session-close,
+.app-session-add {
+  padding: 3px 5px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: transparent;
+}
+
+.app-session-add {
+  padding: 3px 8px;
+}
+
+.app-session-close:hover,
+.app-session-add:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+/* —— Home surface ——————————————————————————————————————————————————————— */
+
+/* Scroll region below the (persistent) home topbar. .home-root keeps its
+   theme.css layout; these wrappers add the centered max-width column. */
+.app-home-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.app-home-inner {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-8) 56px;
+}
+
+/* Slim top bar: brand left / search centered / actions right. */
+.app-topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-5);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.app-topbar .home-brand {
+  flex: 1;
+  min-width: 0;
+}
+
+.app-topbar .home-search {
+  flex: 0 1 560px;
+  height: 38px;
+  padding: 6px var(--space-4);
+  border-radius: var(--radius-full);
+}
+
+.app-topbar .home-search input {
+  font-size: var(--font-md);
+}
+
+.app-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 1;
+  justify-content: flex-end;
+}
+
+/* Tri-accent brand mark — reads as a suite logo in either theme. */
+.app-brand-badge {
+  background: linear-gradient(
+    135deg,
+    var(--doc-accent) 0%,
+    var(--sheet-accent) 55%,
+    var(--slide-accent) 100%
+  );
+  color: #ffffff;
+  border-radius: var(--radius-lg);
+}
+
+.app-brand-tag {
+  font-size: var(--font-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Section switcher — segmented pill nav replacing the vertical rail. */
+.app-home-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-full);
+  margin-bottom: var(--space-6);
+}
+
+.app-nav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  border-radius: var(--radius-full);
+  font-size: var(--font-base);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.app-nav-tab:hover {
+  color: var(--text-primary);
+}
+
+.app-nav-tab[aria-pressed="true"] {
+  background: var(--accent-light);
+  color: var(--accent-color);
+}
+
+/* Content grid: main column + contextual aside (preview/activity). */
+.app-home-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: var(--space-8);
+  align-items: start;
+}
+
+.app-main {
+  padding: 0;
+  overflow: visible;
+  min-width: 0;
+}
+
+.app-aside {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  border-left: none;
+  overflow: visible;
+}
+
+@media (max-width: 1100px) {
+  .app-home-content {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .app-aside {
+    display: none;
+  }
+}
+
+/* —— "Create new" hero cards ———————————————————————————————————————————— */
+
+.app-hero-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin: var(--space-3) 0 var(--space-6);
+}
+
+@media (max-width: 720px) {
+  .app-hero-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.app-hero-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-xl);
+  text-align: left;
+  transition:
+    border-color var(--transition-base),
+    box-shadow var(--transition-base),
+    transform var(--transition-base);
+}
+
+.app-hero-card:hover {
+  border-color: color-mix(in srgb, var(--card-accent) 55%, var(--border-color));
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+.app-hero-icon {
+  width: 46px;
+  height: 46px;
+  flex-shrink: 0;
+  border-radius: var(--radius-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--card-accent) 15%, transparent);
+  color: var(--card-accent);
+}
+
+.app-hero-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.app-hero-label {
+  font-size: var(--font-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.app-hero-sub {
+  font-size: var(--font-sm);
+  color: var(--text-muted);
+}
+
+/* Compact secondary chips (template shortcuts / quick-new row). */
+.app-quick-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 var(--space-6);
+}
+
+.app-quick-tile {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px var(--space-4);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface);
+  font-size: var(--font-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+  transition:
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.app-quick-tile:hover {
+  border-color: color-mix(in srgb, var(--tile-accent) 55%, var(--border-color));
+  color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.app-quick-tile svg {
+  color: var(--tile-accent);
+}
+
+/* —— Recent file list polish ———————————————————————————————————————————— */
+
+/* File-type chip wrapping the mode icon inside .home-file-name. */
+.app-file-chip {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--chip-accent) 14%, transparent);
+}
+
+.app-file-chip svg {
+  color: var(--chip-accent);
+}
+
+/* "Missing" badge on rows whose file no longer exists on disk. */
+.app-missing-chip {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 40%, transparent);
+}
+
+/* —— Preview / activity aside ——————————————————————————————————————————— */
+
+.app-preview-card {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.app-preview-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.app-preview-title {
+  font-size: var(--font-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-preview-path {
+  font-size: var(--font-sm);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-activity-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-sm);
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.app-activity-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.app-activity-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-section-sub {
+  font-size: var(--font-sm);
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.app-drop-hint {
+  margin-top: var(--space-10);
+  padding-top: var(--space-4);
+  border-top: 1px dashed var(--border-color);
+  text-align: center;
+  font-size: var(--font-sm);
+  color: var(--text-muted);
+}
+
+/* —— Welcome card ——————————————————————————————————————————————————————— */
+
+.app-welcome {
+  margin: 0 0 var(--space-6);
+  align-items: flex-start;
+  background:
+    linear-gradient(
+      120deg,
+      color-mix(in srgb, var(--doc-accent) 10%, transparent) 0%,
+      color-mix(in srgb, var(--sheet-accent) 8%, transparent) 55%,
+      color-mix(in srgb, var(--slide-accent) 10%, transparent) 100%
+    ),
+    var(--bg-secondary);
+}
+
+.app-welcome-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.app-welcome-title {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-xl);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.app-welcome-body {
+  margin: 0;
+  font-size: var(--font-base);
+  color: var(--text-secondary);
+  max-width: 62ch;
+}
+
+.app-welcome-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+/* —— Dialog polish (App/Settings/About/CSV dialogs) —————————————————————— */
+
+.app-dialog-text {
+  font-size: var(--font-base);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.app-dialog-list {
+  margin: 0;
+  padding: 0 0 0 var(--space-5);
+  color: var(--text-primary);
+  font-size: var(--font-base);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.app-kbd {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-xs);
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.app-shortcut-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: var(--font-base);
+}
+
+.app-field-label {
+  display: block;
+  font-size: var(--font-base);
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 5px;
+}
+
+.app-field-input {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: var(--font-base);
+  transition: border-color var(--transition-fast);
+}
+
+.app-field-input:focus {
+  border-color: var(--accent-color);
+}
+
+.app-field-check {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  font-size: var(--font-base);
+  color: var(--text-primary);
+  padding: 2px 0;
+}
+
+.app-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.app-about-badge {
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-xl);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-size: 30px;
+  font-weight: 700;
+  margin: 0 auto;
+  background: linear-gradient(
+    135deg,
+    var(--doc-accent) 0%,
+    var(--sheet-accent) 55%,
+    var(--slide-accent) 100%
+  );
+  box-shadow: var(--shadow-md);
+}

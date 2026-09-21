@@ -24,6 +24,7 @@ import { HomeScreen } from "./HomeScreen";
 import { SettingsDialog } from "./SettingsDialog";
 import { AboutDialog } from "./AboutDialog";
 import "@redoc/ui/theme.css";
+import "./app.css";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { CSVImportDialog } from "./CSVImportDialog";
 import { getTemplateBody } from "./shell/templates";
@@ -152,7 +153,6 @@ export function App() {
     autosaveIntervalMs: 2000,
     spellcheckEnabled: true,
     fontSizeDefault: 12,
-    telemetryEnabled: false,
     zoomLevel: 100,
     checkForUpdates: true,
   });
@@ -212,9 +212,14 @@ export function App() {
   };
 
   const updateWindowTitle = async () => {
-    if (activeMode() === "home") return;
     try {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      // Home has no active document — reset to the bare app name so a stale
+      // document title doesn't linger after returning home.
+      if (activeMode() === "home") {
+        await getCurrentWindow().setTitle("Redoc");
+        return;
+      }
       const path = currentFilePath();
       const base = path ? path.split(/[\\/]/).pop()! : docTitle();
       const prefix = saveState() === "Dirty" ? "• " : "";
@@ -241,13 +246,6 @@ export function App() {
     const t = settings().theme === "system" ? systemTheme() : settings().theme;
     document.documentElement.setAttribute("data-theme", t);
   });
-
-  const telemetryBuildEnabled = import.meta.env.VITE_TELEMETRY === "1";
-  const recordTelemetry = (event: string) => {
-    if (telemetryBuildEnabled && settings().telemetryEnabled) {
-      void commands.recordTelemetryEvent(event).catch(() => undefined);
-    }
-  };
 
   const maybeCheckForUpdates = async (enabled: boolean) => {
     if (!enabled) return;
@@ -737,7 +735,8 @@ export function App() {
               }
             }
           }
-        }).then((fn) => { unlistenDragDrop = fn; });
+        }).then((fn) => { unlistenDragDrop = fn; })
+          .catch(() => undefined);
       }).catch(() => undefined);
     } catch {
       // outside Tauri
@@ -896,7 +895,6 @@ export function App() {
         const imported = await commands.importPptxFile(path);
         const title = path.split(/[\\/]/).pop()?.replace(/\.pptx$/i, "") || "Imported presentation";
         await openImportedDocument("slide", title, imported.deck, imported.warnings);
-        recordTelemetry("pptx_imported");
         showToast("Imported PPTX file; save as .redoc to continue editing", "success");
         return;
       }
@@ -906,14 +904,12 @@ export function App() {
           if (!workbook) return;
           const title = path.split(/[\\/]/).pop()?.replace(/\.csv$/i, "") || "Imported spreadsheet";
           await openImportedDocument("sheet", title, workbook);
-          recordTelemetry("csv_imported");
           showToast("Imported CSV file", "success");
           return;
         }
         const imported = await commands.importXlsxFile(path);
         const title = path.split(/[\\/]/).pop()?.replace(/\.xlsx$/i, "") || "Imported spreadsheet";
         await openImportedDocument("sheet", title, imported.workbook, imported.warnings);
-        recordTelemetry("xlsx_imported");
         showToast("Imported XLSX file", "success");
         return;
       }
@@ -921,7 +917,6 @@ export function App() {
         const imported = await commands.importDocxFile(path);
         const title = path.split(/[\\/]/).pop()?.replace(/\.docx$/i, "") || "Imported document";
         await openImportedDocument("doc", title, imported.document, imported.warnings);
-        recordTelemetry("docx_imported");
         showToast("Imported DOCX file", "success");
         return;
       }
@@ -1119,6 +1114,203 @@ export function App() {
               : "var(--g-blue-light)",
       } as import("solid-js").JSX.CSSProperties}
     >
+      {/* Slim shell titlebar — always mounted so the mode switcher also works
+          as a launcher from the Home surface. */}
+      <header class="app-titlebar g-no-print">
+        <div class="app-titlebar-row">
+          <div class="app-titlebar-left">
+            <button
+              type="button"
+              class="app-home-btn"
+              data-testid="mode-home"
+              title={t("shell.titlebar.home")}
+              aria-label={t("shell.titlebar.home")}
+              onClick={() => void goHome()}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 10.5 12 3l9 7.5" />
+                <path d="M5 9.5V21h14V9.5" />
+              </svg>
+            </button>
+            <Show when={activeMode() !== "home"}>
+              <input
+                class="g-title-input"
+                type="text"
+                value={docTitle()}
+                onInput={(e) => {
+                  setDocTitle(e.currentTarget.value);
+                  setSaveState("Dirty");
+                  syncCurrentSession();
+                }}
+                aria-label={t("shell.titlebar.documentTitle")}
+              />
+              <span
+                role="status"
+                class="app-savestate"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                {saveState() === "Saved"
+                  ? t("shell.titlebar.saveStateSaved")
+                  : saveState() === "Saving"
+                    ? t("shell.titlebar.saveStateSaving")
+                    : saveState() === "Error"
+                      ? t("shell.titlebar.saveStateError")
+                      : t("shell.titlebar.saveStateModified")}
+              </span>
+            </Show>
+          </div>
+
+          <div class="app-titlebar-right">
+            <div class="app-mode-pill" role="tablist" aria-label={t("shell.titlebar.modeSwitcher")}>
+              <button
+                type="button"
+                role="tab"
+                id="mode-tab-doc"
+                data-testid="mode-tab-doc"
+                aria-controls="editor-pane-doc"
+                class={activeMode() === "doc" ? "active" : ""}
+                aria-selected={activeMode() === "doc"}
+                onClick={() => {
+                  void handleSwitchMode("doc");
+                }}
+                title={`${t("shell.titlebar.modeWriter")} (Ctrl+Alt+1)`}
+              >
+                <IconDoc width="14" height="14" color="var(--doc-accent)" /> {t("shell.titlebar.modeWriter")}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id="mode-tab-sheet"
+                data-testid="mode-tab-sheet"
+                aria-controls="editor-pane-sheet"
+                class={activeMode() === "sheet" ? "active" : ""}
+                aria-selected={activeMode() === "sheet"}
+                onClick={() => {
+                  void handleSwitchMode("sheet");
+                }}
+                title={`${t("shell.titlebar.modeCalc")} (Ctrl+Alt+2)`}
+              >
+                <IconSheet width="14" height="14" color="var(--sheet-accent)" /> {t("shell.titlebar.modeCalc")}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id="mode-tab-slide"
+                data-testid="mode-tab-slide"
+                aria-controls="editor-pane-slide"
+                class={activeMode() === "slide" ? "active" : ""}
+                aria-selected={activeMode() === "slide"}
+                onClick={() => {
+                  void handleSwitchMode("slide");
+                }}
+                title={`${t("shell.titlebar.modeImpress")} (Ctrl+Alt+3)`}
+              >
+                <IconSlide width="14" height="14" color="var(--slide-accent)" /> {t("shell.titlebar.modeImpress")}
+              </button>
+            </div>
+            <span
+              class="g-offline-badge"
+              title={t("shell.titlebar.shareDisabledTooltip")}
+              aria-label={t("shell.titlebar.shareDisabledTooltip")}
+            >
+              <span class="g-offline-dot" aria-hidden="true" />
+              {t("shell.titlebar.offline")}
+            </span>
+            <Button variant="ghost" size="sm" onClick={() => setSettingsOpen(true)} title={t("shell.titlebar.settings")} aria-label={t("shell.titlebar.settings")}>
+              <IconSettings />
+            </Button>
+            <Show when={activeMode() !== "home"}>
+              <Button variant="share" onClick={() => void handleSave()} title={t("shell.titlebar.save")}>
+                <IconSave /> {t("common.save")}
+              </Button>
+            </Show>
+          </div>
+        </div>
+        <Show when={activeMode() !== "home"}>
+          {/* Phase 3: ONE compact command bar (menus preserve MENU_ORDER) + session tabs */}
+          <CommandBar
+            menus={menus()}
+            onOpenPalette={() => setPaletteOpen(true)}
+            inspectorOpen={inspectorOpen()}
+            onToggleInspector={() => setInspectorOpen(!inspectorOpen())}
+            actions={[
+              { id: "cmd-new", label: "New", action: () => void handleNewDoc(activeMode() as EditorMode) },
+              { id: "cmd-open", label: "Open", action: () => void handleOpenFile() },
+              { id: "cmd-save", label: "Save", shortcut: "Ctrl+S", action: () => void handleSave() },
+              { id: "cmd-undo", label: "Undo", shortcut: "Ctrl+Z", action: () => emitEditorCommand("undo") },
+              { id: "cmd-redo", label: "Redo", shortcut: "Ctrl+Y", action: () => emitEditorCommand("redo") },
+              { id: "cmd-find", label: "Find", shortcut: "Ctrl+F", action: () => emitEditorCommand("find") },
+            ]}
+            overflowActions={shortcutRegistry
+              .getAll()
+              .filter((c) => c.menuPath && !["cmd-new", "cmd-open", "cmd-save", "cmd-undo", "cmd-redo", "cmd-find"].includes(c.id))
+              .slice(0, 24)
+              .map((c) => ({ id: c.id, label: c.title, shortcut: c.shortcut, action: c.action }))}
+          />
+          <Show when={openSessions().length > 0}>
+            <div
+              role="tablist"
+              aria-label="Open documents"
+              class="app-session-tabs"
+            >
+              <For each={openSessions()}>
+                {(session) => (
+                  <div
+                    role="presentation"
+                    class="app-session-tab"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      class="app-session-tab-btn"
+                      aria-selected={activeSessionId() === session.id}
+                      title={session.filePath || session.title}
+                      onClick={() => void activateSession(session.id)}
+                      style={{
+                        "--tab-accent":
+                          session.mode === "sheet"
+                            ? "var(--sheet-accent)"
+                            : session.mode === "slide"
+                              ? "var(--slide-accent)"
+                              : "var(--doc-accent)",
+                      }}
+                    >
+                      <ModeIcon mode={session.mode} size={14} />
+                      <span style={{ overflow: "hidden", "text-overflow": "ellipsis" }}>{session.title || "Untitled"}</span>
+                      <Show when={session.saveState === "Dirty" || session.saveState === "Error"}>
+                        <span aria-label={session.saveState === "Error" ? "Save error" : "Unsaved changes"}>•</span>
+                      </Show>
+                    </button>
+                    <button
+                      type="button"
+                      class="app-session-close"
+                      aria-label={`Close ${session.title || "document"}`}
+                      title="Close document"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void closeSession(session.id);
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
+              </For>
+              <button
+                type="button"
+                class="app-session-add"
+                aria-label="New document"
+                title="New document"
+                onClick={() => void handleNewDoc(activeMode() as EditorMode)}
+              >
+                +
+              </button>
+            </div>
+          </Show>
+        </Show>
+      </header>
+
       <Show when={activeMode() === "home"}>
         <HomeScreen
           recents={recents()}
@@ -1145,15 +1337,6 @@ export function App() {
             }
           }}
         />
-        <button
-          type="button"
-          class="g-icon-btn g-no-print"
-          title="Settings"
-          onClick={() => setSettingsOpen(true)}
-          style={{ position: "fixed", top: "16px", right: "16px", "z-index": "40", background: "var(--bg-surface)", "box-shadow": "var(--shadow-sm)" }}
-        >
-          <IconSettings />
-        </button>
       </Show>
 
       <Show when={activeMode() !== "home"}>
@@ -1183,233 +1366,6 @@ export function App() {
             </Button>
           </div>
         </Show>
-        {/* Phase 3 compact titlebar: title + save state + mode switch + share/avatar stubs */}
-        <header
-          class="g-no-print"
-          style={{
-            display: "flex",
-            "flex-direction": "column",
-            background: "var(--bg-menubar)",
-            "border-bottom": "1px solid var(--border-color)",
-            "flex-shrink": "0",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              "align-items": "center",
-              "justify-content": "space-between",
-              padding: "2px 8px",
-              height: "var(--titlebar-h)",
-              gap: "8px",
-            }}
-          >
-            <div style={{ display: "flex", "align-items": "center", gap: "6px", "min-width": "0", flex: 1 }}>
-              <button
-                type="button"
-                title={t("shell.titlebar.home")}
-                aria-label={t("shell.titlebar.home")}
-                onClick={() => void goHome()}
-                style={{
-                  width: "28px",
-                  height: "28px",
-                  "border-radius": "var(--radius-sm)",
-                  display: "flex",
-                  "align-items": "center",
-                  "justify-content": "center",
-                  "flex-shrink": 0,
-                }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-tertiary)")}
-                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-              >
-                <ModeIcon mode={activeMode() as "doc" | "sheet" | "slide"} size={20} />
-              </button>
-              <input
-                class="g-title-input"
-                type="text"
-                value={docTitle()}
-                onInput={(e) => {
-                  setDocTitle(e.currentTarget.value);
-                  setSaveState("Dirty");
-                  syncCurrentSession();
-                }}
-                aria-label={t("shell.titlebar.documentTitle")}
-              />
-              <span
-                role="status"
-                style={{ "font-size": "11px", color: "var(--text-muted)" }}
-                aria-live="polite"
-                aria-atomic="true"
-              >
-                {saveState() === "Saved"
-                  ? t("shell.titlebar.saveStateSaved")
-                  : saveState() === "Saving"
-                    ? t("shell.titlebar.saveStateSaving")
-                    : saveState() === "Error"
-                      ? t("shell.titlebar.saveStateError")
-                      : t("shell.titlebar.saveStateModified")}
-              </span>
-            </div>
-
-            <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
-              <div class="g-mode-pill" role="tablist" aria-label={t("shell.titlebar.modeSwitcher")}>
-                <button
-                  type="button"
-                  role="tab"
-                  id="mode-tab-doc"
-                  aria-controls="editor-pane-doc"
-                  class={activeMode() === "doc" ? "active" : ""}
-                  aria-selected={activeMode() === "doc"}
-                  onClick={() => {
-                    void handleSwitchMode("doc");
-                  }}
-                  title={`${t("shell.titlebar.modeWriter")} (Ctrl+Alt+1)`}
-                >
-                  <IconDoc width="14" height="14" color="var(--doc-accent)" /> {t("shell.titlebar.modeWriter")}
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  id="mode-tab-sheet"
-                  aria-controls="editor-pane-sheet"
-                  class={activeMode() === "sheet" ? "active" : ""}
-                  aria-selected={activeMode() === "sheet"}
-                  onClick={() => {
-                    void handleSwitchMode("sheet");
-                  }}
-                  title={`${t("shell.titlebar.modeCalc")} (Ctrl+Alt+2)`}
-                >
-                  <IconSheet width="14" height="14" color="var(--sheet-accent)" /> {t("shell.titlebar.modeCalc")}
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  id="mode-tab-slide"
-                  aria-controls="editor-pane-slide"
-                  class={activeMode() === "slide" ? "active" : ""}
-                  aria-selected={activeMode() === "slide"}
-                  onClick={() => {
-                    void handleSwitchMode("slide");
-                  }}
-                  title={`${t("shell.titlebar.modeImpress")} (Ctrl+Alt+3)`}
-                >
-                  <IconSlide width="14" height="14" color="var(--slide-accent)" /> {t("shell.titlebar.modeImpress")}
-                </button>
-              </div>
-              <span
-                class="g-offline-badge"
-                title={t("shell.titlebar.shareDisabledTooltip")}
-                aria-label={t("shell.titlebar.shareDisabledTooltip")}
-              >
-                <span class="g-offline-dot" aria-hidden="true" />
-                {t("shell.titlebar.offline")}
-              </span>
-              <Button variant="ghost" size="sm" onClick={() => setSettingsOpen(true)} title={t("shell.titlebar.settings")} aria-label={t("shell.titlebar.settings")}>
-                <IconSettings />
-              </Button>
-              <Button variant="share" onClick={() => void handleSave()} title={t("shell.titlebar.save")}>
-                <IconSave /> {t("common.save")}
-              </Button>
-            </div>
-          </div>
-          {/* Phase 3: ONE compact command bar (menus preserve MENU_ORDER) + session tabs */}
-          <CommandBar
-            menus={menus()}
-            onOpenPalette={() => setPaletteOpen(true)}
-            inspectorOpen={inspectorOpen()}
-            onToggleInspector={() => setInspectorOpen(!inspectorOpen())}
-            actions={[
-              { id: "cmd-new", label: "New", action: () => void handleNewDoc(activeMode() as EditorMode) },
-              { id: "cmd-open", label: "Open", action: () => void handleOpenFile() },
-              { id: "cmd-save", label: "Save", shortcut: "Ctrl+S", action: () => void handleSave() },
-              { id: "cmd-undo", label: "Undo", shortcut: "Ctrl+Z", action: () => emitEditorCommand("undo") },
-              { id: "cmd-redo", label: "Redo", shortcut: "Ctrl+Y", action: () => emitEditorCommand("redo") },
-              { id: "cmd-find", label: "Find", shortcut: "Ctrl+F", action: () => emitEditorCommand("find") },
-            ]}
-            overflowActions={shortcutRegistry
-              .getAll()
-              .filter((c) => c.menuPath && !["cmd-new", "cmd-open", "cmd-save", "cmd-undo", "cmd-redo", "cmd-find"].includes(c.id))
-              .slice(0, 24)
-              .map((c) => ({ id: c.id, label: c.title, shortcut: c.shortcut, action: c.action }))}
-          />
-          <Show when={openSessions().length > 0}>
-            <div
-              role="tablist"
-              aria-label="Open documents"
-              style={{
-                display: "flex",
-                "align-items": "center",
-                gap: "3px",
-                padding: "3px 8px 0",
-                overflow: "auto",
-                "border-top": "1px solid var(--border-color)",
-              }}
-            >
-              <For each={openSessions()}>
-                {(session) => (
-                  <div
-                    role="presentation"
-                    style={{ display: "flex", "align-items": "center", "flex-shrink": 0, "max-width": "240px" }}
-                  >
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={activeSessionId() === session.id}
-                      title={session.filePath || session.title}
-                      onClick={() => void activateSession(session.id)}
-                      style={{
-                        display: "flex",
-                        "align-items": "center",
-                        gap: "5px",
-                        padding: "4px 7px",
-                        "border-radius": "5px 5px 0 0",
-                        background: activeSessionId() === session.id ? "var(--bg-primary)" : "transparent",
-                        color: activeSessionId() === session.id ? "var(--text-primary)" : "var(--text-muted)",
-                        "border-bottom": activeSessionId() === session.id ? `2px solid ${session.mode === "sheet" ? "var(--sheet-accent)" : session.mode === "slide" ? "var(--slide-accent)" : "var(--doc-accent)"}` : "2px solid transparent",
-                        "max-width": "210px",
-                        overflow: "hidden",
-                        "white-space": "nowrap",
-                        "text-overflow": "ellipsis",
-                      }}
-                    >
-                      <ModeIcon mode={session.mode} size={14} />
-                      <span style={{ overflow: "hidden", "text-overflow": "ellipsis" }}>{session.title || "Untitled"}</span>
-                      <Show when={session.saveState === "Dirty" || session.saveState === "Error"}>
-                        <span aria-label={session.saveState === "Error" ? "Save error" : "Unsaved changes"}>•</span>
-                      </Show>
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={`Close ${session.title || "document"}`}
-                      title="Close document"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void closeSession(session.id);
-                      }}
-                      style={{
-                        padding: "3px 5px",
-                        "border-radius": "4px",
-                        color: "var(--text-muted)",
-                        background: "transparent",
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                )}
-              </For>
-              <button
-                type="button"
-                aria-label="New document"
-                title="New document"
-                onClick={() => void handleNewDoc(activeMode() as EditorMode)}
-                style={{ padding: "3px 8px", "border-radius": "4px", color: "var(--text-muted)", background: "transparent" }}
-              >
-                +
-              </button>
-            </div>
-          </Show>
-        </header>
 
         <div style={{ flex: 1, display: "flex", "min-height": "0", overflow: "hidden" }}>
         <main id="canvas-pane" data-pane="canvas" aria-label={t("shell.panes.canvas")} style={{ flex: 1, position: "relative", overflow: "hidden", "min-height": "0", "min-width": "0" }}>
@@ -1426,7 +1382,7 @@ export function App() {
           >
             <Show keyed when={docMounted() && activeMode() === "doc" ? activeSessionId() : null}>
               {(sessionId) => (
-                <div id="editor-pane-doc" role="tabpanel" aria-labelledby="mode-tab-doc" aria-label={t("canvas.docLabel")} style={{ height: "100%", width: "100%" }}>
+                <div id="editor-pane-doc" data-testid="editor-pane-doc" role="tabpanel" aria-labelledby="mode-tab-doc" aria-label={t("canvas.docLabel")} style={{ height: "100%", width: "100%" }}>
                   <ErrorBoundary
                     onError={(err) => {
                       showToast(`Document editor error: ${err.message}`, "error", 5000);
@@ -1456,7 +1412,7 @@ export function App() {
             </Show>
             <Show keyed when={sheetMounted() && activeMode() === "sheet" ? activeSessionId() : null}>
               {(sessionId) => (
-                <div id="editor-pane-sheet" role="tabpanel" aria-labelledby="mode-tab-sheet" aria-label={t("canvas.gridLabel")} style={{ height: "100%", width: "100%" }}>
+                <div id="editor-pane-sheet" data-testid="editor-pane-sheet" role="tabpanel" aria-labelledby="mode-tab-sheet" aria-label={t("canvas.gridLabel")} style={{ height: "100%", width: "100%" }}>
                   <ErrorBoundary
                     onError={(err) => {
                       showToast(`Spreadsheet editor error: ${err.message}`, "error", 5000);
@@ -1485,7 +1441,7 @@ export function App() {
             </Show>
             <Show keyed when={slideMounted() && activeMode() === "slide" ? activeSessionId() : null}>
               {(sessionId) => (
-                <div id="editor-pane-slide" role="tabpanel" aria-labelledby="mode-tab-slide" aria-label={t("canvas.slideLabel")} style={{ height: "100%", width: "100%" }}>
+                <div id="editor-pane-slide" data-testid="editor-pane-slide" role="tabpanel" aria-labelledby="mode-tab-slide" aria-label={t("canvas.slideLabel")} style={{ height: "100%", width: "100%" }}>
                   <ErrorBoundary
                     onError={(err) => {
                       showToast(`Presentation editor error: ${err.message}`, "error", 5000);
@@ -1573,27 +1529,9 @@ export function App() {
         >
           <For each={shortcutRegistry.getAll().filter((c) => c.shortcut).slice().sort((a, b) => a.title.localeCompare(b.title))}>
             {(cmd) => (
-              <div
-                style={{
-                  display: "flex",
-                  "justify-content": "space-between",
-                  gap: "16px",
-                  padding: "6px 4px",
-                  "border-bottom": "1px solid var(--border-color)",
-                  "font-size": "13px",
-                }}
-              >
+              <div class="app-shortcut-row">
                 <span>{cmd.title}</span>
-                <kbd
-                  style={{
-                    "font-family": "var(--font-mono, monospace)",
-                    "font-size": "12px",
-                    color: "var(--text-muted)",
-                    "white-space": "nowrap",
-                  }}
-                >
-                  {cmd.shortcut}
-                </kbd>
+                <kbd class="app-kbd">{cmd.shortcut}</kbd>
               </div>
             )}
           </For>
@@ -1621,7 +1559,7 @@ export function App() {
 
       <Dialog open={exportOpen()} title="Download" onClose={() => setExportOpen(false)}>
         <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
-          <p style={{ "font-size": "13px", color: "var(--text-secondary)" }}>
+          <p class="app-dialog-text">
             Choose a format to download your file:
           </p>
           <div style={{ display: "flex", gap: "8px", "flex-wrap": "wrap" }}>
@@ -1676,10 +1614,10 @@ export function App() {
       </Dialog>
 
       <Dialog open={importWarnings().length > 0} title="Compatibility report" onClose={() => setImportWarnings([])}>        <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
-          <p style={{ "font-size": "13px", color: "var(--text-secondary)" }}>
+          <p class="app-dialog-text">
             Some Office constructs were simplified or may not round-trip natively:
           </p>
-          <ul style={{ margin: 0, padding: "0 0 0 20px", color: "var(--text-primary)" }}>
+          <ul class="app-dialog-list">
             <For each={importWarnings()}>{(warning) => <li>{warning}</li>}</For>
           </ul>
           <div style={{ display: "flex", "justify-content": "flex-end" }}>
@@ -1706,11 +1644,11 @@ export function App() {
         }}
       >
         <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
-          <p style={{ "font-size": "13px", color: "var(--text-secondary)" }}>
+          <p class="app-dialog-text">
             The following content will be simplified or may not round-trip natively in{" "}
             {pendingExport()?.format?.toUpperCase()}:
           </p>
-          <ul style={{ margin: 0, padding: "0 0 0 20px", color: "var(--text-primary)", "max-height": "40vh", overflow: "auto" }}>
+          <ul class="app-dialog-list" style={{ "max-height": "40vh", overflow: "auto" }}>
             <For each={exportWarnings()}>{(warning) => <li>{warning}</li>}</For>
           </ul>
           <div style={{ display: "flex", "justify-content": "flex-end", gap: "8px" }}>
@@ -1740,7 +1678,7 @@ export function App() {
 
       <Dialog open={recoveryOpen()} title="Recover unsaved work" onClose={() => setRecoveryOpen(false)}>
         <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
-          <p style={{ "font-size": "13px", color: "var(--text-secondary)" }}>
+          <p class="app-dialog-text">
             Redoc found unsaved work from a previous session:
           </p>
           <For each={recoveredDocs()}>

@@ -69,28 +69,20 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
     props.onClose();
   };
 
-  const tabStyle = (active: boolean) => ({
-    padding: "8px 16px",
-    cursor: "pointer",
-    "border-bottom": active ? "2px solid var(--accent-color, #1a73e8)" : "2px solid transparent",
-    color: active ? "var(--accent-color, #1a73e8)" : "inherit",
-    "font-weight": active ? "bold" : "normal"
-  });
-
   return (
     <Dialog open={props.open} title="Page Setup" onClose={props.onClose}>
-      <div style={{ display: "flex", "flex-direction": "column", gap: "16px", "min-width": "420px" }}>
-        
-        <div style={{ display: "flex", "border-bottom": "1px solid var(--border-color, #dadce0)", "margin-bottom": "8px" }}>
-          <div style={tabStyle(tab() === "margins")} onClick={() => setTab("margins")}>Margins</div>
-          <div style={tabStyle(tab() === "paper")} onClick={() => setTab("paper")}>Paper</div>
-          <div style={tabStyle(tab() === "header_footer")} onClick={() => setTab("header_footer")}>Header & Footer</div>
+      <div class="doc-dialog" style={{ "min-width": "420px" }}>
+
+        <div class="doc-tabs" role="tablist" aria-label="Page setup sections">
+          <button type="button" role="tab" class="doc-tab" aria-selected={tab() === "margins"} onClick={() => setTab("margins")}>Margins</button>
+          <button type="button" role="tab" class="doc-tab" aria-selected={tab() === "paper"} onClick={() => setTab("paper")}>Paper</button>
+          <button type="button" role="tab" class="doc-tab" aria-selected={tab() === "header_footer"} onClick={() => setTab("header_footer")}>Header &amp; Footer</button>
         </div>
 
         {tab() === "margins" && (
-          <div style={{ display: "flex", "flex-direction": "column", gap: "16px" }}>
-            <div style={{ display: "grid", "grid-template-columns": "1fr 1fr", gap: "16px" }}>
-              <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+          <div class="doc-panel">
+            <div class="doc-field-grid">
+              <label class="doc-dialog-field">
                 Top (inches)
                 <input
                   type="number"
@@ -98,10 +90,9 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
                   class="g-toolbar-input"
                   value={top()}
                   onInput={(e) => setTop(Number(e.currentTarget.value) || 0)}
-                  style={{ height: "28px", padding: "0 8px" }}
                 />
               </label>
-              <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+              <label class="doc-dialog-field">
                 Bottom (inches)
                 <input
                   type="number"
@@ -109,10 +100,9 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
                   class="g-toolbar-input"
                   value={bottom()}
                   onInput={(e) => setBottom(Number(e.currentTarget.value) || 0)}
-                  style={{ height: "28px", padding: "0 8px" }}
                 />
               </label>
-              <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+              <label class="doc-dialog-field">
                 Left (inches)
                 <input
                   type="number"
@@ -120,10 +110,9 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
                   class="g-toolbar-input"
                   value={left()}
                   onInput={(e) => setLeft(Number(e.currentTarget.value) || 0)}
-                  style={{ height: "28px", padding: "0 8px" }}
                 />
               </label>
-              <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+              <label class="doc-dialog-field">
                 Right (inches)
                 <input
                   type="number"
@@ -131,13 +120,12 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
                   class="g-toolbar-input"
                   value={right()}
                   onInput={(e) => setRight(Number(e.currentTarget.value) || 0)}
-                  style={{ height: "28px", padding: "0 8px" }}
                 />
               </label>
             </div>
-            
-            <div style={{ "font-size": "13px" }}>Presets</div>
-            <div style={{ display: "flex", gap: "8px" }}>
+
+            <div class="doc-panel-title">Presets</div>
+            <div class="doc-panel-actions">
               <button type="button" class="g-toolbar-btn" onClick={() => applyPreset("normal")}>Normal</button>
               <button type="button" class="g-toolbar-btn" onClick={() => applyPreset("narrow")}>Narrow</button>
               <button type="button" class="g-toolbar-btn" onClick={() => applyPreset("moderate")}>Moderate</button>
@@ -147,8 +135,8 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
         )}
 
         {tab() === "paper" && (
-          <div style={{ display: "flex", "flex-direction": "column", gap: "16px" }}>
-            <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+          <div class="doc-panel">
+            <label class="doc-dialog-field">
               Orientation
               <select
                 class="g-toolbar-select"
@@ -161,7 +149,7 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
               </select>
             </label>
 
-            <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+            <label class="doc-dialog-field">
               Paper Size
               <select
                 class="g-toolbar-select"
@@ -176,7 +164,7 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
               </select>
             </label>
 
-            <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+            <label class="doc-dialog-field">
               Text Columns
               <select
                 class="g-toolbar-select"
@@ -195,32 +183,33 @@ export function PageSetupDialog(props: PageSetupDialogProps) {
 
 
         {tab() === "header_footer" && (
-          <div style={{ display: "flex", "flex-direction": "column", gap: "16px" }}>
-            <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+          <div class="doc-panel">
+            <label class="doc-dialog-field">
               Header
               <input
                 type="text"
                 class="g-toolbar-input"
                 value={header()}
                 onInput={(e) => setHeader(e.currentTarget.value)}
-                style={{ height: "28px", padding: "0 8px" }}
-            placeholder="e.g. Document Title — Page {page} of {pages}"
+                placeholder="e.g. Document Title — Page {page} of {pages}"
               />
             </label>
-            <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+            <label class="doc-dialog-field">
               Footer
               <input
                 type="text"
                 class="g-toolbar-input"
                 value={footer()}
                 onInput={(e) => setFooter(e.currentTarget.value)}
-                style={{ height: "28px", padding: "0 8px" }}
-            placeholder="e.g. Document Title — Page {page} of {pages}"
+                placeholder="e.g. Document Title — Page {page} of {pages}"
               />
             </label>
+            <div class="doc-dialog-hint">
+              Use <code>{"{page}"}</code> and <code>{"{pages}"}</code> (or <code>{"{total}"}</code>) for live page numbering.
+            </div>
           </div>
         )}
-        <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end", "margin-top": "8px" }}>
+        <div class="doc-dialog-actions">
           <button type="button" class="g-toolbar-btn" onClick={props.onClose}>Cancel</button>
           <button type="button" class="g-toolbar-btn active" onClick={handleApply}>OK</button>
         </div>

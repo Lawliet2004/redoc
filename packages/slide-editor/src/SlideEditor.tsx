@@ -20,6 +20,7 @@ import { snapElementPosition, alignElements, assignGroupId, clearGroupIds, visib
 import {
   PLACEHOLDER_TITLE, PLACEHOLDER_BODY, defaultTheme, normalizeDeck, normalizeTransition, toDeck,
   normalizeCanvasSize, normalizeMasters, slideChromeOverlays, generateSlideId, CHART_TYPES,
+  SLIDE_THEME_PRESETS, type SlideTheme,
   type Slide, type SlideElement, type SlideTransition, type ElementEntrance, type ElementExit, type ChartType,
 } from "./deckNormalize";
 import { stashPresenterDeck, stashPresenterDeckNow } from "./presenterSession";
@@ -58,19 +59,14 @@ function SlideThumb(props: {
   canvasWidth: number;
   canvasHeight: number;
 }) {
-  const thumbScale = () => 112 / props.canvasWidth;
+  const thumbScale = () => 128 / props.canvasWidth;
   return (
     <div
+      class={`slide-thumb${props.active ? " slide-thumb--active" : ""}`}
       style={{
-        width: "112px",
+        width: "128px",
         height: `${Math.round(props.canvasHeight * thumbScale())}px`,
         background: props.slide.bgOverride || props.theme.bgColor || "white",
-        border: props.active ? "2px solid var(--slide-accent)" : "1px solid var(--border-color)",
-        padding: "0",
-        overflow: "hidden",
-        "box-shadow": props.active ? "0 0 0 1px var(--slide-accent)" : "0 1px 3px rgba(0,0,0,.35)",
-        position: "relative",
-        "flex-shrink": "0",
       }}
     >
       {/* Live miniature render of the slide scaled into the thumb. */}
@@ -198,7 +194,8 @@ export function SlideEditor(props: SlideEditorProps) {
   const [filmstripDragIndex, setFilmstripDragIndex] = createSignal<number | null>(null);
   let filmstripEl: HTMLDivElement | undefined;
   const [filmstripScroll, setFilmstripScroll] = createSignal({ top: 0, height: 0 });
-  const FILMSTRIP_ROW_HEIGHT = () => Math.round((canvasH() / canvasW()) * 112) + 4;
+  // Row height = 128px-wide thumb (16:9-ish via canvas ratio) + vertical gap.
+  const FILMSTRIP_ROW_HEIGHT = () => Math.round((canvasH() / canvasW()) * 128) + 14;
   const visibleRange = () => visibleThumbRange(
     filmstripScroll().top,
     filmstripScroll().height,
@@ -222,8 +219,8 @@ export function SlideEditor(props: SlideEditorProps) {
   });
   const [alignmentGuides, setAlignmentGuides] = createSignal<AlignmentGuide[]>([]);
   const [drawTool, setDrawTool] = createSignal<DrawTool>("select");
-  const [fillColor, setFillColor] = createSignal("#3b82f6");
-  const [lineColor, setLineColor] = createSignal("#1e293b");
+  const [fillColor, setFillColor] = createSignal(theme().accentColor);
+  const [lineColor, setLineColor] = createSignal(theme().textColor);
   const [slideAnimClass, setSlideAnimClass] = createSignal("");
   const [contextMenu, setContextMenu] = createSignal<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
   const [printDialogOpen, setPrintDialogOpen] = createSignal(false);
@@ -675,16 +672,21 @@ export function SlideEditor(props: SlideEditorProps) {
     emitChange(next);
   };
 
-  const patchSelected = (patch: Partial<SlideElement>) => {
-    pushSlideHistory();
-    const id = selectedElementId();
-    if (!id) return;
+  /** Patch one element by id (no history push — callers choose the boundary). */
+  const patchElementById = (id: string, patch: Partial<SlideElement>) => {
     const list = [...slides()];
     const slide = { ...list[activeSlideIndex()] };
     slide.elements = slide.elements.map((el) => (el.id === id ? { ...el, ...patch } : el));
     list[activeSlideIndex()] = slide;
     setSlides(list);
-    emitChange(list);
+  };
+
+  const patchSelected = (patch: Partial<SlideElement>) => {
+    pushSlideHistory();
+    const id = selectedElementId();
+    if (!id) return;
+    patchElementById(id, patch);
+    emitChange();
   };
 
   /** Move an element's entrance order within the slide's animated sequence. */
@@ -725,21 +727,34 @@ export function SlideEditor(props: SlideEditorProps) {
 
   const updateSelectedColor = (color: string) => {
     setFillColor(color);
-    setLineColor(color);
     patchSelected({ color });
+  };
+
+  /** Line/stroke color is an independent channel (`el.lineColor`) rendered as
+   * the shape border (closed shapes) or the stroke itself (lines/arrows). */
+  const updateSelectedLineColor = (color: string) => {
+    setLineColor(color);
+    const el = selectedElement();
+    if (!el) return;
+    if (el.type === "line" || el.type === "arrow") {
+      patchSelected({ lineColor: color });
+    } else {
+      // A border only renders with a width — default a hairline so picking a
+      // line color on a fresh shape is immediately visible.
+      patchSelected({ lineColor: color, lineWidth: Math.max(1.5, el.lineWidth ?? 0) });
+    }
+  };
+
+  const currentLineColor = () => {
+    const el = selectedElement();
+    if (!el) return lineColor();
+    if (el.type === "line" || el.type === "arrow") return el.lineColor || el.color || lineColor();
+    return el.lineColor || lineColor();
   };
 
   const setThemePreset = (preset: string) => {
     pushSlideHistory();
-    const presets: Record<string, typeof defaultTheme> = {
-      light: defaultTheme,
-      midnight: { id: "midnight", name: "Midnight", bgColor: "#0f172a", textColor: "#f8fafc", accentColor: "#38bdf8", fontFamily: "Inter, sans-serif" },
-      coral: { id: "coral", name: "Coral", bgColor: "#fff7ed", textColor: "#431407", accentColor: "#f97316", fontFamily: "Inter, sans-serif" },
-      forest: { id: "forest", name: "Forest", bgColor: "#f0fdf4", textColor: "#14532d", accentColor: "#16a34a", fontFamily: "Inter, sans-serif" },
-      lavender: { id: "lavender", name: "Lavender", bgColor: "#faf5ff", textColor: "#581c87", accentColor: "#a855f7", fontFamily: "Inter, sans-serif" },
-      sunset: { id: "sunset", name: "Sunset", bgColor: "#fff1f2", textColor: "#881337", accentColor: "#e11d48", fontFamily: "Inter, sans-serif" },
-    };
-    const nextTheme = presets[preset] || defaultTheme;
+    const nextTheme: SlideTheme = SLIDE_THEME_PRESETS[preset] || defaultTheme;
     const previous = theme();
     setTheme(nextTheme);
     // Restyle existing content: elements carry explicit colors from the old
@@ -750,7 +765,11 @@ export function SlideEditor(props: SlideEditorProps) {
       [previous.bgColor.toLowerCase(), nextTheme.bgColor],
       [previous.textColor.toLowerCase(), nextTheme.textColor],
       [previous.accentColor.toLowerCase(), nextTheme.accentColor],
+      // Legacy palette colors from earlier theme versions.
       ["#3b82f6", nextTheme.accentColor],
+      ["#1e293b", nextTheme.textColor],
+      ["#0f172a", nextTheme.textColor],
+      ["#64748b", nextTheme.textColor],
       ["#ffffff", nextTheme.textColor],
       ["#000000", nextTheme.textColor],
     ]);
@@ -840,7 +859,7 @@ export function SlideEditor(props: SlideEditorProps) {
           height: 60,
           content: PLACEHOLDER_TITLE,
           fontSize: 32,
-          color: "#1e293b",
+          color: theme().textColor,
           rotation: 0,
           align: "center",
         },
@@ -975,10 +994,10 @@ export function SlideEditor(props: SlideEditorProps) {
     }
   };
 
-  const duplicateSlide = () => {
-    pushSlideHistory();
-    const source = activeSlide();
+  const duplicateSlideAt = (index: number) => {
+    const source = slides()[index];
     if (!source) return;
+    pushSlideHistory();
     const copy: Slide = {
       ...source,
       id: generateSlideId("slide"),
@@ -986,11 +1005,13 @@ export function SlideEditor(props: SlideEditorProps) {
       elements: JSON.parse(JSON.stringify(source.elements)).map((element: any) => ({ ...element, id: generateSlideId("el") })),
     };
     const next = [...slides()];
-    next.splice(activeSlideIndex() + 1, 0, copy);
+    next.splice(index + 1, 0, copy);
     setSlides(next);
-    setActiveSlideIndex(activeSlideIndex() + 1);
+    setActiveSlideIndex(index + 1);
     emitChange(next);
   };
+
+  const duplicateSlide = () => duplicateSlideAt(activeSlideIndex());
 
   const moveSlide = (direction: -1 | 1) => {
     const from = activeSlideIndex();
@@ -1004,14 +1025,18 @@ export function SlideEditor(props: SlideEditorProps) {
     emitChange(next);
   };
 
-  const deleteSlide = () => {
-    if (slides().length <= 1) return;
+  const deleteSlideAt = (index: number) => {
+    if (slides().length <= 1 || index < 0 || index >= slides().length) return;
     pushSlideHistory();
-    const next = slides().filter((_, index) => index !== activeSlideIndex());
+    const next = slides().filter((_, i) => i !== index);
     setSlides(next);
-    setActiveSlideIndex(Math.min(activeSlideIndex(), next.length - 1));
+    const active = activeSlideIndex();
+    if (index === active) setActiveSlideIndex(Math.min(index, next.length - 1));
+    else if (index < active) setActiveSlideIndex(active - 1);
     emitChange(next);
   };
+
+  const deleteSlide = () => deleteSlideAt(activeSlideIndex());
 
   const deleteSelectedElement = () => {
     const ids = selectedElementIds();
@@ -1166,7 +1191,7 @@ export function SlideEditor(props: SlideEditorProps) {
         const fw = element.bold ? "bold" : "normal";
         const fs = element.italic ? "italic" : "normal";
         const td = element.underline ? "underline" : "none";
-        const ff = element.fontFamily || "Inter, sans-serif";
+        const ff = element.fontFamily || theme().fontFamily;
         return `<div style="${base}font-family:${ff};font-weight:${fw};font-style:${fs};text-decoration:${td};font-size:${element.fontSize || 20}px;color:${element.color || "#111827"};display:flex;align-items:center;justify-content:${align === "left" ? "flex-start" : align === "right" ? "flex-end" : "center"};text-align:${align}">${text}</div>`;
       }
       if (element.type === "image") return `<img src="${escape(element.content)}" alt="" style="${base}object-fit:contain"/>`;
@@ -1179,7 +1204,7 @@ export function SlideEditor(props: SlideEditorProps) {
       const clip = shapeClipPath(element.type);
       const radius = shapeBorderRadius(element.type);
       const styleExt = (clip ? `clip-path:${clip};` : "") + (radius ? `border-radius:${radius};` : "");
-      const textOverlay = element.content ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;font-family:${element.fontFamily || 'Inter, sans-serif'};font-weight:${element.bold?'bold':'normal'};font-style:${element.italic?'italic':'normal'};text-decoration:${element.underline?'underline':'none'};font-size:${element.fontSize || 20}px;color:${element.color && element.color.toLowerCase() === '#ffffff' ? '#000' : '#fff'};white-space:pre-wrap;padding:8px">${escape(element.content)}</div>` : "";
+      const textOverlay = element.content ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;font-family:${element.fontFamily || theme().fontFamily};font-weight:${element.bold?'bold':'normal'};font-style:${element.italic?'italic':'normal'};text-decoration:${element.underline?'underline':'none'};font-size:${element.fontSize || 20}px;color:${element.color && element.color.toLowerCase() === '#ffffff' ? '#000' : '#fff'};white-space:pre-wrap;padding:8px">${escape(element.content)}</div>` : "";
       return `<div style="${base}background:${element.color || "#3b82f6"};${styleExt}">${textOverlay}</div>`;
     }).join("");
 
@@ -1357,7 +1382,8 @@ export function SlideEditor(props: SlideEditorProps) {
         if (typeof idx !== "number" || idx < 0 || idx >= slides().length) return;
         if (idx === activeSlideIndex()) return;
         selectSlide(idx);
-      }).then((fn: () => void) => { unlistenSlide = fn; });
+      }).then((fn: () => void) => { unlistenSlide = fn; })
+        .catch(() => undefined);
     }).catch(() => undefined);
 
     onCleanup(() => {
@@ -1370,22 +1396,28 @@ export function SlideEditor(props: SlideEditorProps) {
   });
 
   const fieldLabel = (label: string, children: JSX.Element) => (
-    <label style={{ display: "flex", "flex-direction": "column", gap: "2px", "font-size": "11px" }}>
-      <span>{label}</span>
+    <label class="slide-field">
+      <span class="slide-field-label">{label}</span>
       {children}
     </label>
   );
 
-  const numInput = (value: number, onCommit: (n: number) => void) => (
+  // `value` is an accessor so the input reflects external model changes (drag,
+  // nudge, undo) without the panel DOM ever being rebuilt.
+  const numInput = (value: () => number, onCommit: (n: number) => void) => (
     <input
       type="number"
-      value={Math.round(value)}
-      style={{ width: "100%", background: "var(--bg-input, #2a2a2a)", border: "1px solid var(--border-color)", color: "var(--text-primary)", padding: "2px 4px", "font-size": "12px" }}
+      class="slide-input"
+      value={Math.round(value())}
       onChange={(e) => onCommit(Number(e.currentTarget.value) || 0)}
     />
   );
 
-  const sidebarPanels = (): SidebarPanel[] => [
+  // Panel definitions are built ONCE: passing `sidebarPanels()` as a live
+  // getter rebuilt every panel's JSX on each keystroke (any signal read
+  // during creation re-ran the builder), which destroyed input focus.
+  // The JSX inside stays reactive through its own Show/For bindings.
+  const sidebarPanelDefs: SidebarPanel[] = [
     {
       id: "properties",
       title: "Properties",
@@ -1393,27 +1425,30 @@ export function SlideEditor(props: SlideEditorProps) {
       content: (
         <Show
           when={selectedElement()}
-          fallback={<div>Select an element on the slide.</div>}
+          fallback={<div class="slide-panel-empty">Select an element on the slide.</div>}
         >
           {(el) => (
-            <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
-              <div><strong>Type</strong>: {el().type}</div>
-              {fieldLabel("X", numInput(el().x, (n) => patchSelected({ x: Math.max(0, Math.min(canvasW() - el().width, n)) })))}
-              {fieldLabel("Y", numInput(el().y, (n) => patchSelected({ y: Math.max(0, Math.min(canvasH() - el().height, n)) })))}
-              {fieldLabel("Width", numInput(el().width, (n) => patchSelected({ width: Math.max(40, Math.min(canvasW() - el().x, n)) })))}
-              {fieldLabel("Height", numInput(el().height, (n) => patchSelected({ height: Math.max(30, Math.min(canvasH() - el().y, n)) })))}
+            <div class="slide-panel-stack">
+              <div class="slide-chip-row"><span class="slide-chip">{el().type}</span></div>
+              <div class="slide-field-grid">
+                {fieldLabel("X", numInput(() => el().x, (n) => patchSelected({ x: Math.max(0, Math.min(canvasW() - el().width, n)) })))}
+                {fieldLabel("Y", numInput(() => el().y, (n) => patchSelected({ y: Math.max(0, Math.min(canvasH() - el().height, n)) })))}
+                {fieldLabel("W", numInput(() => el().width, (n) => patchSelected({ width: Math.max(40, Math.min(canvasW() - el().x, n)) })))}
+                {fieldLabel("H", numInput(() => el().height, (n) => patchSelected({ height: Math.max(30, Math.min(canvasH() - el().y, n)) })))}
+              </div>
               {fieldLabel(
                 "Rotation",
-                <div style={{ display: "flex", gap: "4px", "align-items": "center" }}>
+                <div class="slide-stepper">
                   <button type="button" class="g-toolbar-btn" title="Rotate -15°" onClick={() => rotateSelected(-15)}>−</button>
-                  {numInput(el().rotation || 0, (n) => patchSelected({ rotation: ((n % 360) + 360) % 360 }))}
+                  {numInput(() => el().rotation || 0, (n) => patchSelected({ rotation: ((n % 360) + 360) % 360 }))}
                   <button type="button" class="g-toolbar-btn" title="Rotate +15°" onClick={() => rotateSelected(15)}>+</button>
                 </div>,
               )}
               {fieldLabel(
                 "Hyperlink",
-                <div style={{ display: "flex", "flex-direction": "column", gap: "4px" }}>
+                <div class="slide-panel-stack" style={{ gap: "6px" }}>
                   <input
+                    class="slide-input"
                     aria-label="Element hyperlink"
                     placeholder="https://example.com"
                     value={hyperlinkDraft()}
@@ -1427,27 +1462,27 @@ export function SlideEditor(props: SlideEditorProps) {
                         applySelectedHyperlink();
                       }
                     }}
-                    style={{ width: "100%", background: "var(--bg-input, #2a2a2a)", border: "1px solid var(--border-color)", color: "var(--text-primary)", padding: "3px 4px", "font-size": "11px" }}
                   />
-                  <div style={{ display: "flex", gap: "4px" }}>
+                  <div class="slide-btn-row">
                     <button type="button" class="g-toolbar-btn" onClick={() => applySelectedHyperlink()}>Apply</button>
                     <button type="button" class="g-toolbar-btn" onClick={() => applySelectedHyperlink("")}>Clear</button>
                   </div>
                   <Show when={hyperlinkError()}>
-                    <span role="alert" style={{ color: "var(--text-danger, #ef4444)", "font-size": "10px" }}>{hyperlinkError()}</span>
+                    <span role="alert" class="slide-error">{hyperlinkError()}</span>
                   </Show>
-                  <span style={{ color: "var(--text-muted)", "font-size": "10px" }}>{SLIDE_HYPERLINK_HINT}. Ctrl/Cmd-click opens it.</span>
+                  <span class="slide-hint">{SLIDE_HYPERLINK_HINT}. Ctrl/Cmd-click opens it.</span>
                 </div>,
               )}
               <Show when={el().type === "text"}>
                 {fieldLabel(
                   "Font Family",
                   <select
+                    class="slide-select"
                     aria-label="Font family"
-                    value={el().fontFamily || "Inter, sans-serif"}
+                    value={el().fontFamily || theme().fontFamily}
                     onChange={(e) => patchSelected({ fontFamily: e.currentTarget.value })}
-                    style={{ width: "100%", background: "var(--bg-input, #2a2a2a)", border: "1px solid var(--border-color)", color: "var(--text-primary)", padding: "2px 4px" }}
                   >
+                    <option value={theme().fontFamily}>Theme font</option>
                     <option value="Inter, sans-serif">Inter</option>
                     <option value="Arial, sans-serif">Arial</option>
                     <option value="'Courier New', monospace">Courier New</option>
@@ -1456,26 +1491,26 @@ export function SlideEditor(props: SlideEditorProps) {
                     <option value="Verdana, sans-serif">Verdana</option>
                   </select>
                 )}
-                {fieldLabel("Font size", numInput(el().fontSize || 20, (n) => patchSelected({ fontSize: Math.max(8, Math.min(96, n)) })))}
-                <div style={{ display: "flex", gap: "4px" }}>
-                  <button type="button" class={`g-toolbar-btn ${el().bold ? 'active' : ''}`} title="Bold" onClick={() => patchSelected({ bold: !el().bold })} style={el().bold ? { "background-color": "var(--bg-active, #3a3a3a)" } : {}}><IconBold /></button>
-                  <button type="button" class={`g-toolbar-btn ${el().italic ? 'active' : ''}`} title="Italic" onClick={() => patchSelected({ italic: !el().italic })} style={el().italic ? { "background-color": "var(--bg-active, #3a3a3a)" } : {}}><IconItalic /></button>
-                  <button type="button" class={`g-toolbar-btn ${el().underline ? 'active' : ''}`} title="Underline" onClick={() => patchSelected({ underline: !el().underline })} style={el().underline ? { "background-color": "var(--bg-active, #3a3a3a)" } : {}}><IconUnderline /></button>
+                {fieldLabel("Font size", numInput(() => el().fontSize || 20, (n) => patchSelected({ fontSize: Math.max(8, Math.min(96, n)) })))}
+                <div class="slide-btn-row">
+                  <button type="button" class={`g-toolbar-btn ${el().bold ? 'active' : ''}`} title="Bold" aria-pressed={el().bold ? true : undefined} onClick={() => patchSelected({ bold: !el().bold })}><IconBold /></button>
+                  <button type="button" class={`g-toolbar-btn ${el().italic ? 'active' : ''}`} title="Italic" aria-pressed={el().italic ? true : undefined} onClick={() => patchSelected({ italic: !el().italic })}><IconItalic /></button>
+                  <button type="button" class={`g-toolbar-btn ${el().underline ? 'active' : ''}`} title="Underline" aria-pressed={el().underline ? true : undefined} onClick={() => patchSelected({ underline: !el().underline })}><IconUnderline /></button>
                 </div>
                 {fieldLabel(
                   "Align",
                   <select
+                    class="slide-select"
                     aria-label="Text align"
                     value={el().align || "center"}
                     onChange={(e) => patchSelected({ align: e.currentTarget.value as "left" | "center" | "right" })}
-                    style={{ width: "100%", background: "var(--bg-input, #2a2a2a)", border: "1px solid var(--border-color)", color: "var(--text-primary)", padding: "2px 4px" }}
                   >
                     <option value="left">Left</option>
                     <option value="center">Center</option>
                     <option value="right">Right</option>
                   </select>,
                 )}
-                <label style={{ display: "flex", "align-items": "center", gap: "8px", cursor: "pointer", "font-size": "11px" }}>
+                <label class="slide-check">
                   <input
                     type="checkbox"
                     checked={Boolean(el().bullets)}
@@ -1485,9 +1520,9 @@ export function SlideEditor(props: SlideEditorProps) {
                 </label>
               </Show>
               <Show when={el().type === "table"}>
-                <div style={{ display: "flex", "flex-direction": "column", gap: "4px", "margin-top": "8px", "margin-bottom": "8px" }}>
-                  <div style={{ "font-size": "11px", color: "var(--text-secondary)" }}>Table Controls</div>
-                  <div style={{ display: "flex", gap: "4px" }}>
+                <div class="slide-panel-section">
+                  <div class="slide-field-label">Table Controls</div>
+                  <div class="slide-btn-row">
                     <button type="button" class="g-toolbar-btn" onClick={() => {
                       const td = el().tableData;
                       if (!td) return;
@@ -1503,7 +1538,7 @@ export function SlideEditor(props: SlideEditorProps) {
                       patchSelected({ tableData: newData, tableRows: newData.length });
                     }}>Remove Row</button>
                   </div>
-                  <div style={{ display: "flex", gap: "4px" }}>
+                  <div class="slide-btn-row">
                     <button type="button" class="g-toolbar-btn" onClick={() => {
                       const td = el().tableData;
                       if (!td) return;
@@ -1523,10 +1558,10 @@ export function SlideEditor(props: SlideEditorProps) {
                 {fieldLabel(
                   "Chart type",
                   <select
+                    class="slide-select"
                     aria-label="Chart type"
                     value={el().chartType || "bar"}
                     onChange={(e) => patchSelected({ chartType: e.currentTarget.value as ChartType })}
-                    style={{ width: "100%", background: "var(--bg-input, #2a2a2a)", border: "1px solid var(--border-color)", color: "var(--text-primary)", padding: "2px 4px" }}
                   >
                     <For each={CHART_TYPES}>
                       {(type) => <option value={type}>{type}</option>}
@@ -1534,14 +1569,31 @@ export function SlideEditor(props: SlideEditorProps) {
                   </select>,
                 )}
               </Show>
+              <div class="slide-color-grid">
+                {fieldLabel(
+                  "Fill",
+                  <input
+                    type="color"
+                    class="slide-color-input"
+                    aria-label="Fill color"
+                    value={el().color || theme().accentColor}
+                    onInput={(e) => updateSelectedColor(e.currentTarget.value)}
+                  />,
+                )}
+                {fieldLabel(
+                  "Line",
+                  <input
+                    type="color"
+                    class="slide-color-input"
+                    aria-label="Line color"
+                    value={currentLineColor()}
+                    onInput={(e) => updateSelectedLineColor(e.currentTarget.value)}
+                  />,
+                )}
+              </div>
               {fieldLabel(
-                "Fill color",
-                <input
-                  type="color"
-                  value={el().color || "#3b82f6"}
-                  onInput={(e) => updateSelectedColor(e.currentTarget.value)}
-                  style={{ width: "100%", height: "28px", border: "none", background: "transparent", cursor: "pointer" }}
-                />,
+                "Line width",
+                numInput(() => el().lineWidth ?? 0, (n) => patchSelected({ lineWidth: Math.max(0, Math.min(24, n)) })),
               )}
             </div>
           )}
@@ -1553,14 +1605,14 @@ export function SlideEditor(props: SlideEditorProps) {
       title: "Transition",
       icon: <IconTransition />,
       content: (
-        <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
-          <label style={{ "font-size": "11px" }}>
-            Slide transition
+        <div class="slide-panel-stack">
+          {fieldLabel(
+            "Slide transition",
             <select
+              class="slide-select"
               aria-label="Slide transition"
               value={activeSlide()?.transition || "none"}
               onChange={(e) => setSlideTransition(normalizeTransition(e.currentTarget.value))}
-              style={{ display: "block", width: "100%", "margin-top": "4px", background: "var(--bg-input, #2a2a2a)", border: "1px solid var(--border-color)", color: "var(--text-primary)", padding: "4px" }}
             >
               <option value="none">None</option>
               <option value="fade">Fade</option>
@@ -1571,22 +1623,22 @@ export function SlideEditor(props: SlideEditorProps) {
               <option value="zoom">Zoom</option>
               <option value="dissolve">Dissolve</option>
               <option value="morph">Morph</option>
-            </select>
-          </label>
-          <label style={{ "font-size": "11px" }}>
-            Background override
-            <div style={{ display: "flex", gap: "6px", "margin-top": "4px", "align-items": "center" }}>
+            </select>,
+          )}
+          {fieldLabel(
+            "Background override",
+            <div class="slide-btn-row" style={{ "align-items": "center" }}>
               <input
                 type="color"
+                class="slide-color-input slide-color-input--sm"
                 aria-label="Slide background override"
                 value={activeSlide()?.bgOverride || theme().bgColor}
                 onInput={(e) => setSlideBgOverride(e.currentTarget.value)}
-                style={{ width: "36px", height: "28px", border: "none", background: "transparent", cursor: "pointer" }}
               />
               <button type="button" class="g-toolbar-btn" onClick={() => setSlideBgOverride(null)}>Use theme</button>
-            </div>
-          </label>
-          <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
+            </div>,
+          )}
+          <div class="slide-hint">
             Applied when changing to this slide in the editor and presenter.
           </div>
         </div>
@@ -1597,11 +1649,11 @@ export function SlideEditor(props: SlideEditorProps) {
       title: "Animation",
       icon: <IconAnimation />,
       content: (
-        <div style={{ display: "flex", "flex-direction": "column", gap: "10px" }}>
-          <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
+        <div class="slide-panel-stack" style={{ gap: "10px" }}>
+          <div class="slide-hint">
             Animated elements on this slide reveal in the listed order in presenter view.
           </div>
-          <div style={{ display: "flex", "flex-direction": "column", gap: "4px" }}>
+          <div class="slide-panel-stack" style={{ gap: "4px" }}>
             <For each={activeSlide()?.elements
               .filter((e) => e.entrance !== "none" || e.exit !== "none")
               .slice()
@@ -1609,17 +1661,10 @@ export function SlideEditor(props: SlideEditorProps) {
             >
               {(el, index) => (
                 <div
-                  style={{
-                    display: "flex",
-                    "align-items": "center",
-                    gap: "4px",
-                    padding: "3px 4px",
-                    "border-radius": "4px",
-                    background: selectedElementIds().includes(el.id) ? "var(--bg-selected, #505050)" : "var(--bg-tertiary)",
-                  }}
+                  class={`slide-list-row${selectedElementIds().includes(el.id) ? " slide-list-row--active" : ""}`}
                 >
                   <span
-                    style={{ "font-size": "11px", flex: 1, overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap", cursor: "pointer" }}
+                    class="slide-list-row-label"
                     title={`${el.entrance !== "none" ? `Entrance: ${el.entrance}` : ""}${el.entrance !== "none" && el.exit !== "none" ? " · " : ""}${el.exit !== "none" ? `Exit: ${el.exit}` : ""}`}
                     onClick={() => setSelectedElementId(el.id)}
                   >
@@ -1627,22 +1672,20 @@ export function SlideEditor(props: SlideEditorProps) {
                   </span>
                   <button
                     type="button"
-                    class="g-toolbar-btn"
+                    class="g-toolbar-btn slide-mini-btn"
                     aria-label={`Move ${el.type} animation earlier`}
                     title="Play earlier"
                     disabled={index() === 0}
-                    style={{ width: "22px", height: "20px", padding: 0, "font-size": "10px" }}
                     onClick={() => reorderAnimation(el.id, -1)}
                   >
                     ↑
                   </button>
                   <button
                     type="button"
-                    class="g-toolbar-btn"
+                    class="g-toolbar-btn slide-mini-btn"
                     aria-label={`Move ${el.type} animation later`}
                     title="Play later"
                     disabled={index() === (activeSlide()?.elements.filter((e) => e.entrance !== "none" || e.exit !== "none").length ?? 0) - 1}
-                    style={{ width: "22px", height: "20px", padding: 0, "font-size": "10px" }}
                     onClick={() => reorderAnimation(el.id, 1)}
                   >
                     ↓
@@ -1651,86 +1694,86 @@ export function SlideEditor(props: SlideEditorProps) {
               )}
             </For>
             <Show when={(activeSlide()?.elements.filter((e) => e.entrance !== "none" || e.exit !== "none").length ?? 0) === 0}>
-              <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
+              <div class="slide-hint">
                 No animated elements yet. Select an element to add an entrance or exit effect.
               </div>
             </Show>
           </div>
           <Show
             when={selectedElement()}
-            fallback={<div style={{ "font-size": "11px", color: "var(--text-muted)" }}>Select an element to set its animation.</div>}
+            fallback={<div class="slide-hint">Select an element to set its animation.</div>}
           >
             {(el) => (
-              <div style={{ display: "flex", "flex-direction": "column", gap: "8px", "border-top": "1px solid var(--border-color)", "padding-top": "8px" }}>
+              <div class="slide-panel-stack slide-panel-section">
                 <div style={{ "font-size": "12px" }}>
                   <strong>{el().type}</strong>
-                  <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-top": "2px" }}>{el().id}</div>
+                  <div class="slide-hint" style={{ "margin-top": "2px" }}>{el().id}</div>
                 </div>
-                <label style={{ "font-size": "11px" }}>
-                  Entrance effect
+                {fieldLabel(
+                  "Entrance effect",
                   <select
+                    class="slide-select"
                     aria-label="Entrance animation effect"
                     value={el().entrance || "none"}
                     onChange={(e) => patchSelected({ entrance: e.currentTarget.value as ElementEntrance })}
-                    style={{ display: "block", width: "100%", "margin-top": "3px" }}
                   >
                     <option value="none">None</option>
                     <option value="fade">Fade</option>
                     <option value="zoom">Zoom</option>
-                  </select>
-                </label>
-                <label style={{ "font-size": "11px" }}>
-                  Exit effect
+                  </select>,
+                )}
+                {fieldLabel(
+                  "Exit effect",
                   <select
+                    class="slide-select"
                     aria-label="Exit animation effect"
                     value={el().exit || "none"}
                     onChange={(e) => patchSelected({ exit: e.currentTarget.value as ElementExit })}
-                    style={{ display: "block", width: "100%", "margin-top": "3px" }}
                   >
                     <option value="none">None</option>
                     <option value="fade">Fade out on slide exit</option>
-                  </select>
-                </label>
-                <label style={{ "font-size": "11px" }}>
-                  Entrance delay (ms)
+                  </select>,
+                )}
+                {fieldLabel(
+                  "Entrance delay (ms)",
                   <input
                     type="number"
+                    class="slide-input"
                     min="0"
                     max="60000"
                     step="50"
                     aria-label="Animation delay milliseconds"
                     value={el().entranceDelayMs ?? 0}
                     onInput={(e) => patchSelected({ entranceDelayMs: Math.max(0, Math.min(60000, Number(e.currentTarget.value) || 0)) })}
-                    style={{ display: "block", width: "100%", "margin-top": "3px" }}
-                  />
-                </label>
-                <label style={{ "font-size": "11px" }}>
-                  Entrance duration (ms)
+                  />,
+                )}
+                {fieldLabel(
+                  "Entrance duration (ms)",
                   <input
                     type="number"
+                    class="slide-input"
                     min="50"
                     max="60000"
                     step="50"
                     aria-label="Animation duration milliseconds"
                     value={el().entranceDurationMs ?? 350}
                     onInput={(e) => patchSelected({ entranceDurationMs: Math.max(50, Math.min(60000, Number(e.currentTarget.value) || 350)) })}
-                    style={{ display: "block", width: "100%", "margin-top": "3px" }}
-                  />
-                </label>
-                <label style={{ "font-size": "11px" }}>
-                  Exit duration (ms)
+                  />,
+                )}
+                {fieldLabel(
+                  "Exit duration (ms)",
                   <input
                     type="number"
+                    class="slide-input"
                     min="50"
                     max="60000"
                     step="50"
                     aria-label="Exit duration milliseconds"
                     value={el().exitDurationMs ?? 350}
                     onInput={(e) => patchSelected({ exitDurationMs: Math.max(50, Math.min(60000, Number(e.currentTarget.value) || 350)) })}
-                    style={{ display: "block", width: "100%", "margin-top": "3px" }}
-                  />
-                </label>
-                <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
+                  />,
+                )}
+                <div class="slide-hint">
                   In presenter view, entrance-animated elements start hidden and reveal in the listed order with Space or click. Exit effects play when leaving the slide.
                 </div>
               </div>
@@ -1744,9 +1787,9 @@ export function SlideEditor(props: SlideEditorProps) {
       title: "Master",
       icon: <IconMaster />,
       content: (
-        <div style={{ display: "flex", "flex-direction": "column", gap: "4px" }}>
-          <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "4px" }}>
-            Apply a layout master to the current slide.
+        <div class="slide-panel-stack" style={{ gap: "4px" }}>
+          <div class="slide-hint" style={{ "margin-bottom": "4px" }}>
+            Apply a layout to the current slide.
           </div>
           {(
             [
@@ -1760,14 +1803,8 @@ export function SlideEditor(props: SlideEditorProps) {
           ).map(([id, label]) => (
             <button
               type="button"
-              class="g-toolbar-btn"
-              style={{
-                "justify-content": "flex-start",
-                width: "100%",
-                height: "auto",
-                padding: "4px 6px",
-                background: activeSlide()?.layout === id ? "var(--bg-selected, #505050)" : "transparent",
-              }}
+              class={`slide-list-btn${activeSlide()?.layout === id ? " slide-list-btn--active" : ""}`}
+              aria-pressed={activeSlide()?.layout === id}
               onClick={() => applyLayout(id)}
             >
               {label}
@@ -1781,30 +1818,22 @@ export function SlideEditor(props: SlideEditorProps) {
       title: "Styles",
       icon: <IconStyles />,
       content: (
-        <div style={{ display: "flex", "flex-direction": "column", gap: "4px" }}>
-          {(
-            [
-              ["light", "Modern Light"],
-              ["midnight", "Midnight"],
-              ["coral", "Coral"],
-              ["forest", "Forest"],
-              ["lavender", "Lavender"],
-              ["sunset", "Sunset"],
-            ] as const
-          ).map(([id, label]) => (
+        <div class="slide-panel-stack" style={{ gap: "6px" }}>
+          <div class="slide-hint" style={{ "margin-bottom": "2px" }}>
+            Deck theme — restyles existing colors to the new palette.
+          </div>
+          {Object.entries(SLIDE_THEME_PRESETS).map(([id, preset]) => (
             <button
               type="button"
-              class="g-toolbar-btn"
-              style={{
-                "justify-content": "flex-start",
-                width: "100%",
-                height: "auto",
-                padding: "4px 6px",
-                background: theme().id === id || (id === "light" && theme().id === "default-light") ? "var(--bg-selected, #505050)" : "transparent",
-              }}
+              class={`slide-theme-card${theme().id === preset.id || (id === "light" && theme().id === "default-light") ? " slide-theme-card--active" : ""}`}
+              aria-pressed={theme().id === preset.id || (id === "light" && theme().id === "default-light")}
               onClick={() => setThemePreset(id)}
             >
-              {label}
+              <span class="slide-theme-preview" style={{ background: preset.bgColor }} aria-hidden="true">
+                <span class="slide-theme-preview-title" style={{ background: preset.textColor }} />
+                <span class="slide-theme-preview-bar" style={{ background: preset.accentColor }} />
+              </span>
+              <span class="slide-theme-name">{preset.name}</span>
             </button>
           ))}
         </div>
@@ -1814,26 +1843,20 @@ export function SlideEditor(props: SlideEditorProps) {
       id: "gallery",
       title: "Gallery",
       icon: <IconGallery />,
-      content: <div>Insert images via the Standard toolbar. Gallery media packs are not bundled offline.</div>,
+      content: <div class="slide-panel-empty">Insert images via the Standard toolbar. Gallery media packs are not bundled offline.</div>,
     },
     {
       id: "navigator",
       title: "Navigator",
       icon: <IconNavigator />,
       content: (
-        <div style={{ display: "flex", "flex-direction": "column", gap: "2px" }}>
+        <div class="slide-panel-stack" style={{ gap: "2px" }}>
           <For each={slides()}>
             {(slide, idx) => (
               <button
                 type="button"
-                class="g-toolbar-btn"
-                style={{
-                  "justify-content": "flex-start",
-                  width: "100%",
-                  height: "auto",
-                  padding: "4px 6px",
-                  background: idx() === activeSlideIndex() ? "var(--bg-selected, #505050)" : "transparent",
-                }}
+                class={`slide-list-btn${idx() === activeSlideIndex() ? " slide-list-btn--active" : ""}`}
+                aria-pressed={idx() === activeSlideIndex()}
                 onClick={() => selectSlide(idx())}
               >
                 {idx() + 1}. {slide.elements.find((e) => e.type === "text")?.content || slide.title}
@@ -1848,7 +1871,7 @@ export function SlideEditor(props: SlideEditorProps) {
   return (
     <div style={{ display: "flex", "flex-direction": "column", height: "100%", background: "var(--bg-canvas)", overflow: "hidden" }}>
       {/* Standard toolbar */}
-      <ToolbarRow>
+      <ToolbarRow class="slide-toolbar-main">
         <ToolbarButton title="New" onClick={() => props.onRequestNew?.()}><IconNew /></ToolbarButton>
         <ToolbarButton title="Open" onClick={() => props.onRequestOpen?.()}><IconFolderOpen /></ToolbarButton>
         <ToolbarButton title="Save" onClick={() => props.onRequestSave?.()}><IconSave /></ToolbarButton>
@@ -1898,7 +1921,7 @@ export function SlideEditor(props: SlideEditorProps) {
       </ToolbarRow>
 
       {/* Drawing toolbar */}
-      <ToolbarRow>
+      <ToolbarRow class="slide-toolbar-draw">
         <ToolbarButton title="Select" active={drawTool() === "select"} onClick={() => setDrawTool("select")}><IconSelect /></ToolbarButton>
         <ToolbarButton
           title="Line"
@@ -1960,11 +1983,11 @@ export function SlideEditor(props: SlideEditorProps) {
         </ToolbarColor>
         <ToolbarColor
           title="Line Color"
-          value={selectedElement()?.color || lineColor()}
-          onChange={(c) => updateSelectedColor(c)}
+          value={currentLineColor()}
+          onChange={(c) => updateSelectedLineColor(c)}
         >
           <IconTextColor />
-          <span style={{ width: "14px", height: "3px", background: selectedElement()?.color || lineColor(), display: "block", "margin-top": "-2px" }} />
+          <span style={{ width: "14px", height: "3px", background: currentLineColor(), display: "block", "margin-top": "-2px" }} />
         </ToolbarColor>
         <ToolbarSep />
         <ToolbarButton title="Align left" onClick={() => alignSelected("left")}>⫷</ToolbarButton>
@@ -2005,21 +2028,14 @@ export function SlideEditor(props: SlideEditorProps) {
       <div style={{ flex: 1, display: "flex", "min-height": "0", overflow: "hidden" }}>
         {/* Left filmstrip (virtualized: only a window around the scroll
             viewport plus the active slide renders live thumbnails). */}
-        <aside class="g-filmstrip" aria-label="Slides">
-          <div style={{
-            padding: "6px 8px",
-            "font-size": "11px",
-            "font-weight": "600",
-            color: "var(--text-secondary)",
-            "border-bottom": "1px solid var(--border-color)",
-            "flex-shrink": "0",
-            "letter-spacing": "0.02em",
-          }}>
-            Slides
+        <aside class="g-filmstrip slide-filmstrip" aria-label="Slides">
+          <div class="slide-filmstrip-head">
+            <span>Slides</span>
+            <span class="slide-filmstrip-count">{slides().length}</span>
           </div>
           <div
             ref={(el) => { filmstripEl = el; }}
-            style={{ flex: 1, "overflow-y": "auto", padding: "8px 6px", display: "flex", "flex-direction": "column", gap: "8px" }}
+            class="slide-filmstrip-scroll"
             onScroll={(e) => {
               const el = e.currentTarget;
               setFilmstripScroll({ top: el.scrollTop, height: el.clientHeight });
@@ -2034,6 +2050,10 @@ export function SlideEditor(props: SlideEditorProps) {
                 const active = () => index() === activeSlideIndex();
                 return (
                   <div
+                    class={`slide-thumb-row${filmstripDragIndex() === index() ? " slide-thumb-row--drag" : ""}`}
+                    role="button"
+                    aria-label={`Slide ${index() + 1}`}
+                    aria-current={active() ? "true" : undefined}
                     onClick={() => selectSlide(index())}
                     draggable
                     onDragStart={(e) => {
@@ -2051,20 +2071,36 @@ export function SlideEditor(props: SlideEditorProps) {
                       setFilmstripDragIndex(null);
                     }}
                     onDragEnd={() => setFilmstripDragIndex(null)}
-                    style={{
-                      display: "flex",
-                      "align-items": "flex-start",
-                      gap: "6px",
-                      cursor: "grab",
-                      padding: "2px",
-                      "flex-shrink": "0",
-                      opacity: filmstripDragIndex() === index() ? 0.65 : 1,
-                    }}
                   >
-                    <span style={{ "font-size": "11px", color: "var(--text-muted)", width: "14px", "padding-top": "2px", "text-align": "right" }}>
+                    <span class={`slide-thumb-badge${active() ? " slide-thumb-badge--active" : ""}`} aria-hidden="true">
                       {index() + 1}
                     </span>
-                    <SlideThumb slide={slide} active={active()} theme={theme()} canvasWidth={canvasW()} canvasHeight={canvasH()} />
+                    <div class="slide-thumb-wrap">
+                      <SlideThumb slide={slide} active={active()} theme={theme()} canvasWidth={canvasW()} canvasHeight={canvasH()} />
+                      <div class="slide-thumb-actions" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          class="slide-thumb-action"
+                          title={`Duplicate slide ${index() + 1}`}
+                          aria-label={`Duplicate slide ${index() + 1}`}
+                          draggable={false}
+                          onClick={(e) => { e.stopPropagation(); duplicateSlideAt(index()); }}
+                        >
+                          ⧉
+                        </button>
+                        <button
+                          type="button"
+                          class="slide-thumb-action slide-thumb-action--danger"
+                          title={`Delete slide ${index() + 1}`}
+                          aria-label={`Delete slide ${index() + 1}`}
+                          draggable={false}
+                          disabled={slides().length <= 1}
+                          onClick={(e) => { e.stopPropagation(); deleteSlideAt(index()); }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 );
               }}
@@ -2073,23 +2109,28 @@ export function SlideEditor(props: SlideEditorProps) {
               <div aria-hidden="true" style={{ height: `${(slides().length - 1 - visibleRange().last) * FILMSTRIP_ROW_HEIGHT()}px`, "flex-shrink": "0" }} />
             </Show>
           </div>
+          <button type="button" class="slide-filmstrip-add" title="New slide" onClick={addSlide}>
+            <IconPlus /> <span>New slide</span>
+          </button>
         </aside>
 
         {/* Center canvas + notes */}
+        <div class="slide-stage-area">
         <main
+          class="slide-stage-scroll"
           style={{
             flex: 1,
             display: "flex",
             "flex-direction": "column",
             "align-items": "center",
             "justify-content": "flex-start",
-            padding: "20px 16px 12px",
+            padding: "28px 24px 20px",
             overflow: "auto",
-            background: "var(--bg-canvas)",
             "min-width": "0",
           }}
         >
           <div
+            class="slide-stage-zoom"
             style={{
               transform: `scale(${zoom() / 100})`,
               "transform-origin": "top center",
@@ -2098,13 +2139,11 @@ export function SlideEditor(props: SlideEditorProps) {
           >
           <div
             ref={(el) => { canvasEl = el; }}
-            class={`g-slide-canvas g-print-slide ${slideAnimClass() === "fade" ? "g-slide-anim-fade" : ""} ${slideAnimClass() === "slide-left" ? "g-slide-anim-left" : ""} ${slideAnimClass() === "slide-right" ? "g-slide-anim-right" : ""} ${slideAnimClass() === "wipe-left" ? "g-slide-anim-wipe-left" : ""} ${slideAnimClass() === "wipe-right" ? "g-slide-anim-wipe-right" : ""} ${slideAnimClass() === "zoom" ? "g-slide-anim-zoom" : ""} ${slideAnimClass() === "dissolve" ? "g-slide-anim-dissolve" : ""} ${slideAnimClass() === "morph" ? "g-slide-anim-morph" : ""}`}
+            class={`slide-stage g-slide-canvas g-print-slide ${slideAnimClass() === "fade" ? "g-slide-anim-fade" : ""} ${slideAnimClass() === "slide-left" ? "g-slide-anim-left" : ""} ${slideAnimClass() === "slide-right" ? "g-slide-anim-right" : ""} ${slideAnimClass() === "wipe-left" ? "g-slide-anim-wipe-left" : ""} ${slideAnimClass() === "wipe-right" ? "g-slide-anim-wipe-right" : ""} ${slideAnimClass() === "zoom" ? "g-slide-anim-zoom" : ""} ${slideAnimClass() === "dissolve" ? "g-slide-anim-dissolve" : ""} ${slideAnimClass() === "morph" ? "g-slide-anim-morph" : ""}`}
             style={{
               width: `${canvasW()}px`,
               height: `${canvasH()}px`,
               background: slideBackground(),
-              "box-shadow": "0 2px 12px rgba(0,0,0,.45)",
-              "border-radius": "0",
               position: "relative",
               overflow: "hidden",
               "flex-shrink": "0",
@@ -2233,27 +2272,39 @@ export function SlideEditor(props: SlideEditorProps) {
                 </div>
               )}
             </For>
-            <For each={activeSlide()?.elements || []}>
-              {(el) => {
-                const isSelected = () => selectedElementIds().includes(el.id);
-                const placeholder = () => el.type === "text" && isPlaceholder(el.content);
+            {/* Elements keyed by STABLE ID — patching an element produces a new
+                object but keeps this row's DOM subtree, so text/table/chart
+                inputs keep focus across per-keystroke model updates. `el()`
+                re-reads the current object so inner bindings stay reactive. */}
+            <For each={activeSlide()?.elements.map((element) => element.id) || []}>
+              {(id) => {
+                let lastSeen = activeSlide()?.elements.find((e) => e.id === id) as SlideElement;
+                const el = () => {
+                  const found = activeSlide()?.elements.find((e) => e.id === id);
+                  if (found) lastSeen = found;
+                  return lastSeen;
+                };
+                const isSelected = () => selectedElementIds().includes(id);
+                const placeholder = () => el().type === "text" && isPlaceholder(el().content);
                 const elementLabel = () => {
-                  if (el.type === "text") return `Text: ${(el.content || "empty").slice(0, 50)}`;
-                  if (el.type === "image") return "Image";
-                  if (el.type === "chart") return `Chart: ${el.chartTitle || "Untitled"}`;
-                  if (el.type === "table") return `Table${el.tableRows && el.tableCols ? ` ${el.tableRows}x${el.tableCols}` : ""}`;
-                  if (el.type === "line") return "Line";
-                  if (el.type === "arrow") return "Arrow";
-                  return `${el.type.charAt(0).toUpperCase() + el.type.slice(1)} shape`;
+                  const cur = el();
+                  if (cur.type === "text") return `Text: ${(cur.content || "empty").slice(0, 50)}`;
+                  if (cur.type === "image") return "Image";
+                  if (cur.type === "chart") return `Chart: ${cur.chartTitle || "Untitled"}`;
+                  if (cur.type === "table") return `Table${cur.tableRows && cur.tableCols ? ` ${cur.tableRows}x${cur.tableCols}` : ""}`;
+                  if (cur.type === "line") return "Line";
+                  if (cur.type === "arrow") return "Arrow";
+                  return `${cur.type.charAt(0).toUpperCase() + cur.type.slice(1)} shape`;
                 };
                 return (
                   <div
                     role="img"
                     aria-label={elementLabel()}
                     aria-selected={isSelected()}
+                    class={isSelected() ? "slide-el slide-el--selected" : "slide-el"}
                     onClick={(event) => {
-                      if ((event.ctrlKey || event.metaKey) && el.hyperlink) {
-                        const internalId = parseInternalSlideId(el.hyperlink);
+                      if ((event.ctrlKey || event.metaKey) && el().hyperlink) {
+                        const internalId = parseInternalSlideId(el().hyperlink!);
                         if (internalId) {
                           event.preventDefault();
                           event.stopPropagation();
@@ -2262,7 +2313,7 @@ export function SlideEditor(props: SlideEditorProps) {
                           else showToast("Linked slide was not found in this deck.", "error");
                           return;
                         }
-                        const target = normalizeSlideHyperlink(el.hyperlink);
+                        const target = normalizeSlideHyperlink(el().hyperlink!);
                         if (target) {
                           event.preventDefault();
                           event.stopPropagation();
@@ -2271,10 +2322,10 @@ export function SlideEditor(props: SlideEditorProps) {
                         }
                         showToast("This hyperlink is invalid or unsafe.", "error");
                       }
-                      selectElement(el.id, event.shiftKey);
+                      selectElement(id, event.shiftKey);
                     }}
                     onPointerDown={(event) => {
-                      if ((el.type === "text" || isFilledShape(el.type)) && document.activeElement === event.currentTarget.querySelector("[contenteditable]")) {
+                      if ((el().type === "text" || isFilledShape(el().type)) && document.activeElement === event.currentTarget.querySelector("[contenteditable]")) {
                         return;
                       }
                       event.stopPropagation();
@@ -2282,22 +2333,22 @@ export function SlideEditor(props: SlideEditorProps) {
                       dragStartClient = { x: event.clientX, y: event.clientY };
                       dragMoved = false;
                       dragAltDuplicate = event.altKey;
-                      if (!event.shiftKey && !selectedElementIds().includes(el.id)) {
-                        selectElement(el.id, false);
+                      if (!event.shiftKey && !selectedElementIds().includes(id)) {
+                        selectElement(id, false);
                       } else if (event.shiftKey) {
-                        selectElement(el.id, true);
+                        selectElement(id, true);
                       }
                       setAlignmentGuides([]);
                       const local = canvasToLocal(event.clientX, event.clientY);
-                      setDragOffset({ x: local.x - el.x, y: local.y - el.y });
+                      setDragOffset({ x: local.x - el().x, y: local.y - el().y });
                     }}
                     onPointerMove={(event) => {
                       const currentResize = resizing();
-                      if (currentResize && currentResize.id === el.id) {
+                      if (currentResize && currentResize.id === id) {
                         const local = canvasToLocal(event.clientX, event.clientY);
-                        const updatedEl = applyResize(el, currentResize.handle, local.x, local.y, currentResize, event.shiftKey);
+                        const updatedEl = applyResize(el(), currentResize.handle, local.x, local.y, currentResize, event.shiftKey);
                         setAlignmentGuides([]);
-                        setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(e => e.id === el.id ? updatedEl : e) } : s));
+                        setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(e => e.id === id ? updatedEl : e) } : s));
                         return;
                       }
                       if (dragPointerId !== event.pointerId) return;
@@ -2313,9 +2364,9 @@ export function SlideEditor(props: SlideEditorProps) {
                         // itself keeps moving the grabbed element.
                         if (dragAltDuplicate) {
                           dragAltDuplicate = false;
-                          const sourceIds = selectedElementIds().includes(el.id) && selectedElementIds().length > 0
+                          const sourceIds = selectedElementIds().includes(id) && selectedElementIds().length > 0
                             ? selectedElementIds()
-                            : elementsToMoveWith(el).map((peer) => peer.id);
+                            : elementsToMoveWith(el()).map((peer) => peer.id);
                           setSlides(prev => prev.map((s, i) => {
                             if (i !== activeSlideIndex()) return s;
                             return {
@@ -2332,7 +2383,7 @@ export function SlideEditor(props: SlideEditorProps) {
                         }
                       }
                       const local = canvasToLocal(event.clientX, event.clientY);
-                      const dragEl = () => activeSlide()?.elements.find((e) => e.id === el.id) || el;
+                      const dragEl = () => activeSlide()?.elements.find((e) => e.id === id) || el();
                       const prevX = dragEl().x;
                       const prevY = dragEl().y;
                       const snapped = snapElementPosition(
@@ -2345,7 +2396,7 @@ export function SlideEditor(props: SlideEditorProps) {
                       );
                       const moveDx = snapped.x - prevX;
                       const moveDy = snapped.y - prevY;
-                      const peersToMove = elementsToMoveWith(el).map(p => p.id);
+                      const peersToMove = elementsToMoveWith(el()).map(p => p.id);
                       dragMoved = true;
                       setAlignmentGuides(snapped.guides);
                       setSlides(prev => prev.map((s, i) => {
@@ -2353,7 +2404,7 @@ export function SlideEditor(props: SlideEditorProps) {
                         return {
                           ...s,
                           elements: s.elements.map(e => {
-                            if (e.id === el.id) {
+                            if (e.id === id) {
                               return { ...e, x: snapped.x, y: snapped.y };
                             } else if (peersToMove.includes(e.id)) {
                               return { ...e, x: e.x + moveDx, y: e.y + moveDy };
@@ -2364,7 +2415,7 @@ export function SlideEditor(props: SlideEditorProps) {
                       }));
                     }}
                     onPointerUp={(event) => {
-                      if (resizing()?.id === el.id) {
+                      if (resizing()?.id === id) {
                         setResizing(null);
                         setAlignmentGuides([]);
                         commitChange();
@@ -2381,54 +2432,60 @@ export function SlideEditor(props: SlideEditorProps) {
                     }}
                     style={{
                       position: "absolute",
-                      left: `${el.x}px`,
-                      top: `${el.y}px`,
-                      width: `${el.width}px`,
-                      height: `${el.height}px`,
-                      border: isSelected() ? "2px dashed var(--slide-accent)" : "none",
+                      left: `${el().x}px`,
+                      top: `${el().y}px`,
+                      width: `${el().width}px`,
+                      height: `${el().height}px`,
+                      // Non-shape elements paint their line color as a box
+                      // border (shapes paint it inside ShapeBody instead).
+                      border: el().lineColor && (el().lineWidth ?? 0) > 0 && !isShapeType(el().type)
+                        ? `${el().lineWidth}px solid ${el().lineColor}`
+                        : undefined,
+                      "box-sizing": "border-box",
                       cursor: "move",
                       display: "flex",
                       "align-items": "center",
-                      "justify-content": el.align === "left" ? "flex-start" : el.align === "right" ? "flex-end" : "center",
-                      transform: `rotate(${el.rotation || 0}deg)`,
+                      "justify-content": el().align === "left" ? "flex-start" : el().align === "right" ? "flex-end" : "center",
+                      transform: `rotate(${el().rotation || 0}deg)`,
                       "transform-origin": "center center",
                     }}
                   >
-                    {el.type === "text" && (
+                    {el().type === "text" && (
                       <div
                         contentEditable
+                        class="slide-el-text"
                         onFocus={(e) => {
                           pushSlideHistory();
                           // Use the placeholder flag for reliable detection — content
                           // that matches placeholder text but was typed by the user
                           // (without the flag) is preserved.
-                          if (el.placeholder) {
+                          if (el().placeholder) {
                             e.currentTarget.innerText = "";
-                            setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === el.id ? { ...eItem, content: "", placeholder: false } : eItem) } : s));
+                            setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === id ? { ...eItem, content: "", placeholder: false } : eItem) } : s));
                           }
                         }}
                         onBlur={(e) => {
                           const text = e.currentTarget.innerText.trim();
                           const isNowPlaceholder = !text;
-                          const newContent = text || (el.fontSize && el.fontSize >= 28 ? PLACEHOLDER_TITLE : PLACEHOLDER_BODY);
+                          const newContent = text || (el().fontSize && el().fontSize! >= 28 ? PLACEHOLDER_TITLE : PLACEHOLDER_BODY);
                           e.currentTarget.innerText = newContent;
-                          setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === el.id ? { ...eItem, content: newContent, placeholder: isNowPlaceholder } : eItem) } : s));
+                          setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === id ? { ...eItem, content: newContent, placeholder: isNowPlaceholder } : eItem) } : s));
                           commitChange();
                         }}
                         style={{
                           width: "100%",
                           height: "100%",
-                          "font-family": el.fontFamily || "Inter, sans-serif",
-                          "font-weight": el.bold ? "bold" : "normal",
-                          "font-size": `${el.fontSize || 20}px`,
-                          color: placeholder() ? "#999" : (el.color || "#0f172a"),
-                          "font-style": el.italic || placeholder() ? "italic" : "normal",
-                          "text-decoration": el.underline ? "underline" : "none",
-                          "text-align": el.align || "center",
+                          "font-family": el().fontFamily || theme().fontFamily,
+                          "font-weight": el().bold ? "bold" : "normal",
+                          "font-size": `${el().fontSize || 20}px`,
+                          color: placeholder() ? "#999" : (el().color || "#0f172a"),
+                          "font-style": el().italic || placeholder() ? "italic" : "normal",
+                          "text-decoration": el().underline ? "underline" : "none",
+                          "text-align": el().align || "center",
                           "white-space": "pre-wrap",
-                          "padding-left": el.bullets ? "18px" : "0",
+                          "padding-left": el().bullets ? "18px" : "0",
                           outline: "none",
-                          "background-image": el.bullets && !placeholder()
+                          "background-image": el().bullets && !placeholder()
                             ? "radial-gradient(circle, currentColor 1.5px, transparent 1.6px)"
                             : "none",
                           "background-size": "6px 1.4em",
@@ -2436,7 +2493,7 @@ export function SlideEditor(props: SlideEditorProps) {
                           "background-repeat": "repeat-y",
                         }}
                       >
-                        {el.content}
+                        {el().content}
                       </div>
                     )}
                     <Show when={isSelected()}>
@@ -2444,16 +2501,17 @@ export function SlideEditor(props: SlideEditorProps) {
                         role="button"
                         aria-label="Rotate element"
                         title="Drag vertically to rotate"
+                        class="slide-el-rotate"
                         onPointerDown={(event) => {
                           event.stopPropagation();
                           pushSlideHistory();
                           event.currentTarget.setPointerCapture(event.pointerId);
                           const startY = event.clientY;
-                          const startRot = el.rotation || 0;
+                          const startRot = el().rotation || 0;
                           const onMove = (moveEvent: PointerEvent) => {
                             const delta = Math.round((moveEvent.clientY - startY) / 2);
                             const newRotation = ((startRot + delta) % 360 + 360) % 360;
-                            setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === el.id ? { ...eItem, rotation: newRotation } : eItem) } : s));
+                            setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === id ? { ...eItem, rotation: newRotation } : eItem) } : s));
                           };
                           const onUp = (upEvent: PointerEvent) => {
                             window.removeEventListener("pointermove", onMove);
@@ -2464,60 +2522,68 @@ export function SlideEditor(props: SlideEditorProps) {
                           window.addEventListener("pointermove", onMove);
                           window.addEventListener("pointerup", onUp);
                         }}
-                        style={{ position: "absolute", left: "50%", top: "-18px", width: "12px", height: "12px", background: "var(--slide-accent)", border: "2px solid white", "border-radius": "50%", cursor: "grab", transform: "translateX(-50%)", "z-index": 3 }}
                       />
                     </Show>
-                    {isFilledShape(el.type) && (
+                    {isShapeType(el().type) && isFilledShape(el().type) && (
                       <>
-                        <ShapeBody type={el.type} color={el.color || "#3b82f6"} id={el.id} />
+                        <ShapeBody
+                          type={el().type}
+                          color={el().color || theme().accentColor}
+                          id={id}
+                          gradient={el().fillGradient}
+                          strokeColor={el().lineColor}
+                          strokeWidth={el().lineWidth}
+                          shadow={el().shadow}
+                        />
                         <div
                           contentEditable
                           onFocus={(e) => {
                             pushSlideHistory();
-                            if (!el.content) {
+                            if (!el().content) {
                               e.currentTarget.innerText = "";
-                              setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === el.id ? { ...eItem, content: "" } : eItem) } : s));
+                              setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === id ? { ...eItem, content: "" } : eItem) } : s));
                             }
                           }}
                           onBlur={(e) => {
                             const newContent = e.currentTarget.innerText.trim();
                             e.currentTarget.innerText = newContent;
-                            setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === el.id ? { ...eItem, content: newContent } : eItem) } : s));
+                            setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(eItem => eItem.id === id ? { ...eItem, content: newContent } : eItem) } : s));
                             commitChange();
                           }}
                           style={{
                             position: "absolute",
                             inset: "8px",
-                            "font-family": el.fontFamily || "Inter, sans-serif",
-                            "font-size": `${el.fontSize || 16}px`,
-                            color: el.color === "#3b82f6" ? "#ffffff" : (el.color || "#ffffff"),
-                            "text-align": el.align || "center",
+                            "font-family": el().fontFamily || theme().fontFamily,
+                            "font-size": `${el().fontSize || 16}px`,
+                            color: el().color && el().color!.toLowerCase() === "#ffffff" ? "#0f172a" : "#ffffff",
+                            "text-align": el().align || "center",
                             outline: "none",
                             display: "flex",
                             "align-items": "center",
                             "justify-content": "center",
                             "pointer-events": "auto",
+                            "text-shadow": "0 1px 2px rgba(0,0,0,.25)",
                           }}
                         >
-                          {el.content}
+                          {el().content}
                         </div>
                       </>
                     )}
-                    {(el.type === "line" || el.type === "arrow") && (
-                      <ShapeBody type={el.type} color={el.color || "#3b82f6"} id={el.id} />
+                    {(el().type === "line" || el().type === "arrow") && (
+                      <ShapeBody type={el().type} color={el().color || theme().accentColor} id={id} strokeColor={el().lineColor} strokeWidth={el().lineWidth} />
                     )}
-                    {el.type === "image" && (
-                      <img src={el.content} alt="Slide asset" style={{ width: "100%", height: "100%", "object-fit": "contain", "pointer-events": "none" }} />
+                    {el().type === "image" && (
+                      <img src={el().content} alt="Slide asset" style={{ width: "100%", height: "100%", "object-fit": "contain", "pointer-events": "none" }} />
                     )}
-                    {el.type === "table" && el.tableData && (
-                      <table style={{ width: "100%", height: "100%", "border-collapse": "collapse", "font-size": "12px", background: "#fff" }}>
+                    {el().type === "table" && el().tableData && (
+                      <table class="slide-el-table">
                         <tbody>
-                          <For each={el.tableData}>
+                          <For each={el().tableData}>
                             {(row, ri) => (
                               <tr>
                                 <For each={row}>
                                   {(cell, ci) => {
-                                    const merge = mergeAt(el.tableMerges ?? [], ri(), ci());
+                                    const merge = mergeAt(el().tableMerges ?? [], ri(), ci());
                                     if (merge && (merge.r !== ri() || merge.c !== ci())) {
                                       // Covered by a merge anchored elsewhere: skip.
                                       return <td style={{ display: "none" }} />;
@@ -2531,23 +2597,17 @@ export function SlideEditor(props: SlideEditorProps) {
                                         onContextMenu={(e) => {
                                           setTableContextCell({ r: ri(), c: ci() });
                                         }}
-                                        style={{ border: "1px solid #cbd5e1", padding: "4px", "min-width": "24px", ...(el.tableHeaderRow && ri() === 0 ? { background: "#e2e8f0", "font-weight": "600" } : {}) }}
+                                        style={el().tableHeaderRow && ri() === 0 ? { background: "#e2e8f0", "font-weight": "600" } : {}}
                                         onInput={(e) => {
+                                          // In-place cell mutation: replacing the
+                                          // element object here would key the row
+                                          // For anew and destroy the focused td.
                                           const newText = e.currentTarget.textContent || "";
-                                          setSlides(prev => prev.map((s, i) => {
-                                            if (i !== activeSlideIndex()) return s;
-                                            return {
-                                              ...s,
-                                              elements: s.elements.map(elItem => {
-                                                if (elItem.id === el.id && elItem.tableData) {
-                                                  const newData = elItem.tableData.map(r => [...r]);
-                                                  newData[ri()][ci()] = newText;
-                                                  return { ...elItem, tableData: newData };
-                                                }
-                                                return elItem;
-                                              })
-                                            };
-                                          }));
+                                          const data = el().tableData;
+                                          if (!data || !data[ri()]) return;
+                                          pushSlideHistoryCoalesced();
+                                          data[ri()][ci()] = newText;
+                                          emitChange();
                                         }}
                                         onBlur={() => commitChange()}
                                       >
@@ -2562,41 +2622,44 @@ export function SlideEditor(props: SlideEditorProps) {
                         </tbody>
                       </table>
                     )}
-                    {el.type === "chart" && (
-                      <div style={{ width: "100%", height: "100%", background: "#f8fafc", display: "flex", "flex-direction": "column", padding: "8px", "box-sizing": "border-box", position: "relative" }}>
-                        <div style={{ display: "flex", gap: "6px", "align-items": "center", "margin-bottom": "4px" }}>
+                    {el().type === "chart" && (
+                      <div class="slide-el-chart">
+                        <div class="slide-el-chart-head">
                           <input
                             type="text"
-                            value={el.chartTitle || "Chart"}
+                            class="slide-el-chart-title"
+                            aria-label="Chart title"
+                            value={el().chartTitle || "Chart"}
                             onInput={(e) => {
                               const newTitle = e.currentTarget.value;
-                              setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(elItem => elItem.id === el.id ? { ...elItem, chartTitle: newTitle } : elItem) } : s));
+                              pushSlideHistoryCoalesced();
+                              patchElementById(id, { chartTitle: newTitle });
+                              emitChange();
                             }}
                             onBlur={() => commitChange()}
-                            style={{ flex: 1, "font-size": "14px", "font-weight": "600", border: "none", background: "transparent" }}
                           />
                           <select
                             aria-label="Chart type"
-                            value={el.chartType || "bar"}
+                            class="slide-el-chart-type"
+                            value={el().chartType || "bar"}
                             onClick={(e) => e.stopPropagation()}
                             onPointerDown={(e) => e.stopPropagation()}
                             onChange={(e) => {
                               const chartType = e.currentTarget.value as ChartType;
                               pushSlideHistory();
-                              setSlides(prev => prev.map((s, i) => i === activeSlideIndex() ? { ...s, elements: s.elements.map(elItem => elItem.id === el.id ? { ...elItem, chartType } : elItem) } : s));
+                              patchElementById(id, { chartType });
                               commitChange();
                             }}
-                            style={{ "font-size": "11px", border: "1px solid var(--border-color, #d9d9d9)", "border-radius": "4px", background: "var(--bg-input, #fff)", color: "inherit", padding: "1px 2px" }}
                           >
                             <For each={CHART_TYPES}>
                               {(type) => <option value={type}>{type}</option>}
                             </For>
                           </select>
                         </div>
-                        {el.chartType === "pie" ? (
+                        {el().chartType === "pie" ? (
                           <svg viewBox="0 0 100 100" style={{ flex: 1 }}>
                             <For each={(() => {
-                              const data = el.chartData || [3, 5, 2, 8];
+                              const data = el().chartData || [3, 5, 2, 8];
                               const total = data.reduce((a, b) => a + b, 0) || 1;
                               let angle = 0;
                               return data.map((v, i) => {
@@ -2629,23 +2692,23 @@ export function SlideEditor(props: SlideEditorProps) {
                               }}
                             </For>
                           </svg>
-                        ) : el.chartType === "line" ? (
+                        ) : el().chartType === "line" ? (
                           <>
-                            <svg viewBox={`0 0 ${(el.chartData || [3, 5, 2, 8]).length * 40} 100`} preserveAspectRatio="none" style={{ flex: 1, width: "100%" }}>
-                              <For each={(el.chartData || [3, 5, 2, 8]).slice(0, -1)}>
+                            <svg viewBox={`0 0 ${(el().chartData || [3, 5, 2, 8]).length * 40} 100`} preserveAspectRatio="none" style={{ flex: 1, width: "100%" }}>
+                              <For each={(el().chartData || [3, 5, 2, 8]).slice(0, -1)}>
                                 {(_, i) => {
-                                  const data = el.chartData || [3, 5, 2, 8];
+                                  const data = el().chartData || [3, 5, 2, 8];
                                   const max = Math.max(...data, 1);
                                   const x1 = i() * 40 + 20;
                                   const x2 = (i() + 1) * 40 + 20;
                                   const y1 = 100 - (data[i()] / max) * 100;
                                   const y2 = 100 - (data[i() + 1] / max) * 100;
-                                  return <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#3b82f6" stroke-width="3" vector-effect="non-scaling-stroke" />;
+                                  return <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={theme().accentColor} stroke-width="3" vector-effect="non-scaling-stroke" />;
                                 }}
                               </For>
-                              <For each={el.chartData || [3, 5, 2, 8]}>
+                              <For each={el().chartData || [3, 5, 2, 8]}>
                                 {(v, i) => {
-                                  const data = el.chartData || [3, 5, 2, 8];
+                                  const data = el().chartData || [3, 5, 2, 8];
                                   const max = Math.max(...data, 1);
                                   const cx = i() * 40 + 20;
                                   const cy = 100 - (v / max) * 100;
@@ -2653,19 +2716,19 @@ export function SlideEditor(props: SlideEditorProps) {
                                 }}
                               </For>
                             </svg>
-                            <div style={{ display: "flex", "font-size": "9px", color: "#64748b", "justify-content": "space-around" }}>
-                              <For each={el.chartLabels || []}>{(label) => <span>{label}</span>}</For>
+                            <div class="slide-el-chart-labels">
+                              <For each={el().chartLabels || []}>{(label) => <span>{label}</span>}</For>
                             </div>
                           </>
                         ) : (
-                          <div style={{ flex: 1, display: "flex", "align-items": "flex-end", gap: "4px" }}>
-                            <For each={el.chartData || [3, 5, 2, 8]}>
+                          <div class="slide-el-chart-bars">
+                            <For each={el().chartData || [3, 5, 2, 8]}>
                               {(v, i) => {
-                                const max = Math.max(...(el.chartData || [1]), 1);
+                                const max = Math.max(...(el().chartData || [1]), 1);
                                 return (
-                                  <div style={{ flex: 1, display: "flex", "flex-direction": "column", "align-items": "center", gap: "2px" }}>
-                                    <div style={{ width: "100%", height: `${(v / max) * 100}%`, "min-height": "2px", background: `hsl(${(i() * 47) % 360}, 65%, 55%)` }} />
-                                    <span style={{ "font-size": "9px", color: "#64748b" }}>{el.chartLabels?.[i()] || i() + 1}</span>
+                                  <div class="slide-el-chart-barcol">
+                                    <div style={{ width: "100%", height: `${(v / max) * 100}%`, "min-height": "2px", "border-radius": "2px 2px 0 0", background: `hsl(${(i() * 47) % 360}, 65%, 55%)` }} />
+                                    <span class="slide-el-chart-barlabel">{el().chartLabels?.[i()] || i() + 1}</span>
                                   </div>
                                 );
                               }}
@@ -2673,69 +2736,54 @@ export function SlideEditor(props: SlideEditorProps) {
                           </div>
                         )}
                         <Show when={isSelected()}>
-                          {/* Inline chart-data editor: values and labels become
-                              editable after insert instead of being frozen. */}
-                          <div
-                            class="g-chart-data-editor"
-                            style={{
-                              position: "absolute",
-                              top: "100%",
-                              left: "0",
-                              "margin-top": "6px",
-                              width: "240px",
-                              background: "var(--bg-surface, #ffffff)",
-                              border: "1px solid var(--border-color, #d9d9d9)",
-                              "border-radius": "8px",
-                              "box-shadow": "0 8px 24px rgba(0,0,0,.18)",
-                              padding: "8px",
-                              display: "flex",
-                              "flex-direction": "column",
-                              gap: "6px",
-                              "z-index": "40",
-                            }}
-                          >
-                            <div style={{ "font-size": "11px", "font-weight": "600", color: "var(--text-secondary, #6b7280)" }}>Chart data</div>
-                            <For each={el.chartData || [3, 5, 2, 8]}>
-                              {(v, i) => (
-                                <div style={{ display: "flex", gap: "4px", "align-items": "center" }}>
+                          {/* Inline chart-data editor. Rows are keyed by index so
+                              editing a value (which replaces chartData) never
+                              rebuilds the focused input. */}
+                          <div class="g-chart-data-editor slide-chart-editor">
+                            <div class="slide-chart-editor-title">Chart data</div>
+                            <For each={Array.from({ length: (el().chartData || [3, 5, 2, 8]).length }, (_, i) => i)}>
+                              {(i) => (
+                                <div class="slide-chart-editor-row">
                                   <input
-                                    aria-label={`Label for data point ${i() + 1}`}
+                                    aria-label={`Label for data point ${i + 1}`}
                                     type="text"
-                                    value={el.chartLabels?.[i()] ?? ""}
-                                    placeholder={`Point ${i() + 1}`}
+                                    value={el().chartLabels?.[i] ?? ""}
+                                    placeholder={`Point ${i + 1}`}
                                     onInput={(e) => {
                                       const label = e.currentTarget.value;
-                                      const labels = [...(el.chartLabels || [])];
-                                      labels[i()] = label;
-                                      setSlides(prev => prev.map((s, si) => si === activeSlideIndex() ? { ...s, elements: s.elements.map(item => item.id === el.id ? { ...item, chartLabels: labels } : item) } : s));
+                                      const labels = [...(el().chartLabels || [])];
+                                      labels[i] = label;
+                                      pushSlideHistoryCoalesced();
+                                      patchElementById(id, { chartLabels: labels });
+                                      emitChange();
                                     }}
                                     onBlur={() => commitChange()}
-                                    style={{ width: "72px", "font-size": "11px", padding: "2px 6px", border: "1px solid var(--border-color, #d9d9d9)", "border-radius": "4px", background: "var(--bg-input, #fff)", color: "inherit" }}
                                   />
                                   <input
-                                    aria-label={`Value for data point ${i() + 1}`}
+                                    aria-label={`Value for data point ${i + 1}`}
                                     type="number"
-                                    value={v}
+                                    value={el().chartData?.[i] ?? 0}
                                     onInput={(e) => {
                                       const parsed = Number(e.currentTarget.value);
                                       if (!Number.isFinite(parsed)) return;
-                                      const data = [...(el.chartData || [])];
-                                      data[i()] = parsed;
-                                      setSlides(prev => prev.map((s, si) => si === activeSlideIndex() ? { ...s, elements: s.elements.map(item => item.id === el.id ? { ...item, chartData: data } : item) } : s));
+                                      const data = [...(el().chartData || [])];
+                                      data[i] = parsed;
+                                      pushSlideHistoryCoalesced();
+                                      patchElementById(id, { chartData: data });
+                                      emitChange();
                                     }}
                                     onBlur={() => commitChange()}
-                                    style={{ width: "60px", "font-size": "11px", padding: "2px 6px", border: "1px solid var(--border-color, #d9d9d9)", "border-radius": "4px", background: "var(--bg-input, #fff)", color: "inherit" }}
                                   />
                                   <button
                                     type="button"
-                                    aria-label={`Remove data point ${i() + 1}`}
-                                    style={{ border: "none", background: "transparent", color: "var(--danger, #b91c1c)", cursor: "pointer", "font-size": "12px", padding: "0 4px" }}
+                                    aria-label={`Remove data point ${i + 1}`}
+                                    class="slide-chart-editor-remove"
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       pushSlideHistory();
-                                      const data = (el.chartData || []).filter((_, di) => di !== i());
-                                      const labels = (el.chartLabels || []).filter((_, di) => di !== i());
-                                      setSlides(prev => prev.map((s, si) => si === activeSlideIndex() ? { ...s, elements: s.elements.map(item => item.id === el.id ? { ...item, chartData: data, chartLabels: labels } : item) } : s));
+                                      const data = (el().chartData || []).filter((_, di) => di !== i);
+                                      const labels = (el().chartLabels || []).filter((_, di) => di !== i);
+                                      patchElementById(id, { chartData: data, chartLabels: labels });
                                       commitChange();
                                     }}
                                   >
@@ -2746,13 +2794,13 @@ export function SlideEditor(props: SlideEditorProps) {
                             </For>
                             <button
                               type="button"
-                              style={{ "font-size": "11px", padding: "3px 8px", border: "1px solid var(--border-color, #d9d9d9)", "border-radius": "4px", background: "var(--bg-input, #fff)", color: "inherit", cursor: "pointer" }}
+                              class="slide-chart-editor-add"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 pushSlideHistory();
-                                const data = [...(el.chartData || []), 1];
-                                const labels = [...(el.chartLabels || []), `P${data.length}`];
-                                setSlides(prev => prev.map((s, si) => si === activeSlideIndex() ? { ...s, elements: s.elements.map(item => item.id === el.id ? { ...item, chartData: data, chartLabels: labels } : item) } : s));
+                                const data = [...(el().chartData || []), 1];
+                                const labels = [...(el().chartLabels || []), `P${data.length}`];
+                                patchElementById(id, { chartData: data, chartLabels: labels });
                                 commitChange();
                               }}
                             >
@@ -2775,14 +2823,14 @@ export function SlideEditor(props: SlideEditorProps) {
                               event.currentTarget.setPointerCapture(event.pointerId);
                               setAlignmentGuides([]);
                               setResizing({
-                                id: el.id,
+                                id,
                                 handle,
                                 startX: event.clientX,
                                 startY: event.clientY,
-                                origX: el.x,
-                                origY: el.y,
-                                width: el.width,
-                                height: el.height,
+                                origX: el().x,
+                                origY: el().y,
+                                width: el().width,
+                                height: el().height,
                               });
                             }}
                           />
@@ -2798,21 +2846,15 @@ export function SlideEditor(props: SlideEditorProps) {
 
           {/* Notes pane */}
           <div
-            style={{
-              width: `${canvasW()}px`,
-              "margin-top": "12px",
-              background: "var(--bg-toolbar)",
-              border: "1px solid var(--border-color)",
-              "border-radius": "0",
-              padding: "8px 10px",
-              "flex-shrink": "0",
-            }}
+            class="slide-notes"
+            style={{ width: `${canvasW()}px` }}
           >
             <div
               role="separator"
               aria-orientation="horizontal"
               aria-label="Resize notes pane"
               title="Drag to resize notes"
+              class="slide-notes-resizer"
               onPointerDown={(event) => {
                 event.currentTarget.setPointerCapture(event.pointerId);
                 const startY = event.clientY;
@@ -2833,16 +2875,10 @@ export function SlideEditor(props: SlideEditorProps) {
                 window.addEventListener("pointermove", onMove);
                 window.addEventListener("pointerup", onUp);
               }}
-              style={{
-                height: "6px",
-                "margin-bottom": "6px",
-                cursor: "ns-resize",
-                background: "var(--border-color)",
-                "border-radius": "2px",
-              }}
             />
-            <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "4px" }}>Notes</div>
+            <div class="slide-notes-label">Notes</div>
             <textarea
+              class="slide-notes-input"
               placeholder="Type speaker notes here..."
               value={activeSlide()?.notes || ""}
               onInput={(e) => {
@@ -2861,29 +2897,19 @@ export function SlideEditor(props: SlideEditorProps) {
               onBlur={() => {
                 setNotesHistoryPushed(false);
               }}
-              style={{
-                width: "100%",
-                height: `${notesHeight()}px`,
-                border: "none",
-                background: "transparent",
-                color: "var(--text-primary)",
-                resize: "vertical",
-                "min-height": "56px",
-                "max-height": "240px",
-                "font-size": "13px",
-              }}
+              style={{ height: `${notesHeight()}px` }}
             />
             {/* Review comments on this slide (offline collaboration) */}
-            <div style={{ "margin-top": "8px" }}>
-              <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "4px" }}>
+            <div class="slide-comments">
+              <div class="slide-notes-label">
                 Comments{" "}
                 {(activeSlide()?.comments ?? []).filter((comment) => !comment.resolved).length > 0
                   ? `· ${(activeSlide()?.comments ?? []).filter((comment) => !comment.resolved).length} open`
                   : ""}
               </div>
-              <div style={{ display: "flex", gap: "6px" }}>
+              <div class="slide-comment-compose">
                 <input
-                  class="g-toolbar-input"
+                  class="g-toolbar-input slide-input"
                   aria-label="New slide comment"
                   placeholder="Comment on this slide…"
                   value={commentDraft()}
@@ -2900,12 +2926,12 @@ export function SlideEditor(props: SlideEditorProps) {
               </div>
               <For each={activeSlide()?.comments ?? []}>
                 {(comment) => (
-                  <div style={{ border: "1px solid var(--border-color)", "border-radius": "6px", padding: "5px", "margin-top": "5px" }}>
-                    <div style={{ display: "flex", "align-items": "center", gap: "5px" }}>
-                      <span style={{ flex: 1, "font-size": "11px", "font-weight": "600" }}>{comment.author}</span>
+                  <div class="slide-comment">
+                    <div class="slide-comment-head">
+                      <span class="slide-comment-author">{comment.author}</span>
                       <button
                         type="button"
-                        class="g-toolbar-btn"
+                        class="g-toolbar-btn slide-mini-btn"
                         aria-label={comment.resolved ? `Reopen comment ${comment.id}` : `Resolve comment ${comment.id}`}
                         onClick={() => setSlideCommentResolved(comment.id, !comment.resolved)}
                       >
@@ -2913,7 +2939,7 @@ export function SlideEditor(props: SlideEditorProps) {
                       </button>
                       <button
                         type="button"
-                        class="g-toolbar-btn"
+                        class="g-toolbar-btn slide-mini-btn"
                         aria-label={`Delete comment ${comment.id}`}
                         onClick={() => deleteSlideComment(comment.id)}
                       >
@@ -2921,12 +2947,7 @@ export function SlideEditor(props: SlideEditorProps) {
                       </button>
                     </div>
                     <div
-                      style={{
-                        "font-size": "11px",
-                        "margin-top": "3px",
-                        color: comment.resolved ? "var(--text-muted)" : "var(--text-primary)",
-                        "text-decoration": comment.resolved ? "line-through" : "none",
-                      }}
+                      class={`slide-comment-text${comment.resolved ? " slide-comment-text--resolved" : ""}`}
                     >
                       {comment.text}
                     </div>
@@ -2936,8 +2957,15 @@ export function SlideEditor(props: SlideEditorProps) {
             </div>
           </div>
         </main>
+        {/* Floating zoom control (Canvas/Slides-style); mirrors the toolbar zoom. */}
+        <div class="slide-zoom-pill g-no-print" role="group" aria-label="Zoom controls">
+          <button type="button" class="slide-zoom-btn" title="Zoom out" aria-label="Zoom out" onClick={() => setZoom((z) => Math.max(50, z - 10))}>−</button>
+          <button type="button" class="slide-zoom-value" title="Reset zoom to 100%" aria-label="Reset zoom to 100%" onClick={() => setZoom(100)}>{zoom()}%</button>
+          <button type="button" class="slide-zoom-btn" title="Zoom in" aria-label="Zoom in" onClick={() => setZoom((z) => Math.min(200, z + 10))}>+</button>
+        </div>
+        </div>
 
-        <IconSidebar panels={sidebarPanels()} activePanel={sidebarPanel()} onActivePanelChange={setSidebarPanel} />
+        <IconSidebar panels={sidebarPanelDefs} activePanel={sidebarPanel()} onActivePanelChange={setSidebarPanel} />
       </div>
       <Show when={slideshowOpen()}>
         <AudienceSlideshow

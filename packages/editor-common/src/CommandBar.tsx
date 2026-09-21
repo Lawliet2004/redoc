@@ -1,5 +1,6 @@
 import { For, Show, createSignal, onMount, onCleanup } from "solid-js";
 import type { MenuDefinition } from "./ShortcutRegistry";
+import { IconSearch } from "@redoc/icons";
 import { t } from "@redoc/ui";
 
 export interface CommandBarAction {
@@ -35,6 +36,48 @@ export function CommandBar(props: CommandBarProps) {
 
   const focusables = () =>
     Array.from(barRef?.querySelectorAll<HTMLElement>("[data-cmd]:not([disabled])") ?? []);
+
+  /** Shared Arrow/Home/End navigation for open dropdown menus. */
+  const menuItemKeyDown = (e: KeyboardEvent, onEscape?: () => void) => {
+    const menu = e.currentTarget as HTMLElement;
+    const items = Array.from(
+      menu.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])'),
+    );
+    if (!items.length) return;
+    const idx = items.findIndex((n) => n === document.activeElement);
+    const focusAt = (i: number) =>
+      items[((i % items.length) + items.length) % items.length].focus();
+    const handled =
+      e.key === "ArrowDown" ||
+      e.key === "ArrowUp" ||
+      e.key === "Home" ||
+      e.key === "End" ||
+      e.key === "Escape";
+    if (!handled) return;
+    // Keep handled keys from bubbling to the bar-level roving-tabindex handler
+    // (Home/End there would steal focus back to the bar while a menu is open).
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "ArrowDown") {
+      focusAt(idx + 1);
+    } else if (e.key === "ArrowUp") {
+      focusAt(idx < 0 ? items.length - 1 : idx - 1);
+    } else if (e.key === "Home") {
+      focusAt(0);
+    } else if (e.key === "End") {
+      focusAt(items.length - 1);
+    } else {
+      onEscape?.();
+    }
+  };
+
+  const onMenuKeyDownOverflow = (e: KeyboardEvent) =>
+    menuItemKeyDown(e, () => {
+      setOverflowOpen(false);
+      overflowTriggerRef?.focus();
+    });
+
+  let overflowTriggerRef: HTMLButtonElement | undefined;
 
   const syncRoving = (el?: HTMLElement) => {
     const list = focusables();
@@ -97,10 +140,26 @@ export function CommandBar(props: CommandBarProps) {
     >
       {/* Menus (MENU_ORDER preserved upstream) */}
       <For each={props.menus}>
-        {(menu) => (
-          <div style={{ position: "relative" }}>
+        {(menu) => {
+          let wrapRef!: HTMLDivElement;
+          let triggerRef!: HTMLButtonElement;
+          const focusMenuItem = (index: number) => {
+            const items = Array.from(
+              wrapRef?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])') ?? [],
+            );
+            if (!items.length) return;
+            items[((index % items.length) + items.length) % items.length].focus();
+          };
+          const onMenuKeyDown = (e: KeyboardEvent) =>
+            menuItemKeyDown(e, () => {
+              setOpenMenu(null);
+              triggerRef?.focus();
+            });
+          return (
+          <div style={{ position: "relative" }} ref={wrapRef}>
             <button
               type="button"
+              ref={triggerRef}
               data-cmd
               class="g-cmd-menu-trigger"
               aria-haspopup="true"
@@ -110,6 +169,14 @@ export function CommandBar(props: CommandBarProps) {
                 setOpenMenu(openMenu() === menu.id ? null : menu.id);
                 setOverflowOpen(false);
               }}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setOpenMenu(menu.id);
+                  setOverflowOpen(false);
+                  queueMicrotask(() => focusMenuItem(0));
+                }
+              }}
               onMouseEnter={() => {
                 if (openMenu()) setOpenMenu(menu.id);
               }}
@@ -118,7 +185,7 @@ export function CommandBar(props: CommandBarProps) {
               {menu.label}
             </button>
             <Show when={openMenu() === menu.id}>
-              <div role="menu" aria-label={menu.label} class="g-cmd-menu">
+              <div role="menu" aria-label={menu.label} class="g-cmd-menu ec-menu-pop" onKeyDown={onMenuKeyDown}>
                 <For each={menu.items}>
                   {(item) =>
                     item.separator ? (
@@ -146,7 +213,8 @@ export function CommandBar(props: CommandBarProps) {
               </div>
             </Show>
           </div>
-        )}
+          );
+        }}
       </For>
 
       <div class="g-cmd-sep-v" aria-hidden="true" />
@@ -161,9 +229,9 @@ export function CommandBar(props: CommandBarProps) {
         aria-label={t("shell.titlebar.commandSearch")}
         onFocus={(e) => syncRoving(e.currentTarget)}
       >
-        <span aria-hidden="true">⌘</span>
+        <IconSearch width={13} height={13} aria-hidden="true" />
         <span>{t("shell.commandbar.searchPlaceholder")}</span>
-        <kbd class="g-cmd-kbd">Ctrl+K</kbd>
+        <kbd class="g-cmd-kbd ec-kbd">Ctrl+K</kbd>
       </button>
 
       <div class="g-cmd-sep-v" aria-hidden="true" />
@@ -191,6 +259,7 @@ export function CommandBar(props: CommandBarProps) {
         <div style={{ position: "relative" }}>
           <button
             type="button"
+            ref={overflowTriggerRef}
             data-cmd
             class="g-toolbar-btn"
             aria-haspopup="true"
@@ -202,12 +271,24 @@ export function CommandBar(props: CommandBarProps) {
               setOverflowOpen(!overflowOpen());
               setOpenMenu(null);
             }}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setOverflowOpen(true);
+                setOpenMenu(null);
+                queueMicrotask(() => {
+                  e.currentTarget.parentElement
+                    ?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')
+                    ?.focus();
+                });
+              }
+            }}
             onFocus={(e) => syncRoving(e.currentTarget)}
           >
             ⋯
           </button>
           <Show when={overflowOpen()}>
-            <div role="menu" aria-label={t("toolbar.overflowLabel")} class="g-cmd-menu g-cmd-overflow">
+            <div role="menu" aria-label={t("toolbar.overflowLabel")} class="g-cmd-menu g-cmd-overflow ec-menu-pop" onKeyDown={onMenuKeyDownOverflow}>
               <For each={props.overflowActions ?? []}>
                 {(a) => (
                   <button

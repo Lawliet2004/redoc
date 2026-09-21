@@ -21,8 +21,8 @@ export function SheetToolbar(props: SheetToolbarProps) {
   const [borderColor, setBorderColor] = createSignal("#0f172a");
   return (
     <>
-      {/* Formatting toolbar */}
-      <ToolbarRow>
+      {/* Formatting toolbar — font | emphasis | colors | alignment | numbers | borders */}
+      <ToolbarRow class="sheet-toolbar sheet-toolbar-format">
         <ToolbarSelect
           ariaLabel="Font"
           width="120px"

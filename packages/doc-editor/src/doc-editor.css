@@ -1,0 +1,581 @@
+/* ── Doc editor scoped chrome ──────────────────────────────────────────────
+   Owns the document-editing surface: paper page on a muted canvas, floating
+   controls (find bar, selection bubble, link popover), sidebar panels and the
+   small dialogs. Global tokens (.g-*, --*) live in packages/ui/theme.css —
+   everything here is prefixed `doc-` and layered on top of those tokens. */
+
+.doc-editor-root {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-canvas);
+  overflow: hidden;
+}
+
+/* ── Toolbar ── */
+.doc-toolbar {
+  padding: 4px 10px;
+  gap: 2px;
+  box-shadow: 0 1px 0 var(--border-color);
+  scrollbar-width: none;
+}
+.doc-toolbar::-webkit-scrollbar {
+  display: none;
+}
+.doc-toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.doc-toolbar-fontsize-btn {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  padding: 0 4px;
+}
+
+/* ── Canvas + paper page ── */
+.doc-canvas {
+  flex: 1;
+  overflow: auto;
+  /* Block layout + margin auto on .doc-page: keeps an over-wide (zoomed)
+     page scrollable on both edges — flex centering would clip the left. */
+  padding: 28px 24px 80px;
+  background: var(--bg-canvas);
+}
+
+.doc-page {
+  position: relative;
+  background: var(--bg-paper);
+  color: var(--text-on-paper, #111);
+  border-radius: 3px;
+  box-shadow:
+    var(--shadow-paper),
+    0 1px 2px rgba(15, 23, 42, 0.10),
+    0 24px 48px -24px rgba(15, 23, 42, 0.38);
+  transition: box-shadow var(--transition-base, 200ms ease);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.doc-surface {
+  min-height: 800px;
+  outline: none;
+  font-family: var(--font-doc);
+  font-size: 12pt;
+}
+
+/* Comfortable reading rhythm inside the paper — theme.css owns the base
+   .ProseMirror rules; these are scoped refinements. */
+.doc-page .ProseMirror {
+  caret-color: var(--doc-accent);
+}
+.doc-page .ProseMirror ::selection {
+  background: color-mix(in srgb, var(--doc-accent) 26%, transparent);
+}
+.doc-page .ProseMirror a {
+  color: #1a5fb4;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.doc-page .ProseMirror img {
+  border-radius: 3px;
+}
+.doc-page .ProseMirror hr {
+  border: none;
+  border-top: 1px solid #d0d0d0;
+  margin: 1em 0;
+}
+
+/* Manual page-break node: ::before/::after are already used by the
+   header/footer renderer (see the dynamic <style> block in DocEditor), so
+   keep this element free of pseudo-element rules — the dashed rule itself
+   is the indicator. */
+.doc-page-break {
+  cursor: default;
+}
+
+/* ── Floating find bar (top-right of the canvas) ── */
+.doc-find-float {
+  position: absolute;
+  top: calc(var(--toolbar-h, 28px) + var(--ruler-h, 22px) + 12px);
+  /* --doc-inset-right is set on .doc-editor-root so the bar clears the
+     inspector panel as well as the always-visible rail. */
+  right: var(--doc-inset-right, calc(var(--sidebar-rail-w, 28px) + 20px));
+  transition: right var(--transition-fast, 100ms ease);
+  z-index: var(--z-overlay, 300);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: doc-pop-in 140ms cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.doc-find-float .g-find-bar {
+  border: none;
+  background: transparent;
+  height: auto;
+  min-height: 34px;
+  padding: 5px 8px;
+  flex-wrap: wrap;
+  max-width: min(520px, calc(100vw - 120px));
+}
+.doc-find-float .g-toolbar-input {
+  height: 24px;
+}
+
+/* ── Selection bubble pill ── */
+.doc-bubble {
+  gap: 2px;
+  padding: 4px 6px;
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  /* opacity-only: the element's own translate(-50%,-100%) must be preserved. */
+  animation: doc-fade-in 140ms ease;
+}
+.doc-bubble::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: var(--bg-surface);
+  border-bottom: 0;
+  pointer-events: none;
+}
+.doc-bubble-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  color: inherit;
+}
+.doc-bubble-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border-color);
+  margin: 0 3px;
+  flex-shrink: 0;
+}
+
+/* ── Link popover (click affordance for hyperlinks) ── */
+.doc-link-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 220px;
+  max-width: 340px;
+  padding: 8px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  z-index: var(--z-popover, 500);
+  animation: doc-pop-in 140ms cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.doc-link-pop-url {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-link);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.doc-link-pop-url span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.doc-link-pop-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.doc-link-pop-btn {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  color: var(--text-primary);
+}
+.doc-link-pop-btn:hover {
+  background: var(--bg-tertiary);
+}
+.doc-link-pop-btn.danger {
+  color: var(--color-error, #ef6f5f);
+}
+.doc-link-pop-btn.icon {
+  padding: 3px 6px;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* ── Sidebar panels ── */
+.doc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.doc-panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.doc-panel-section + .doc-panel-section {
+  border-top: 1px solid var(--border-color);
+  padding-top: 10px;
+}
+.doc-panel-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.doc-panel-kv {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 12px;
+  padding: 1px 0;
+}
+.doc-panel-kv .k {
+  color: var(--text-muted);
+}
+.doc-panel-kv .v {
+  color: var(--text-primary);
+  text-align: right;
+}
+.doc-panel-muted {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+.doc-panel-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 10px;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-md, 6px);
+  text-align: center;
+  line-height: 1.45;
+}
+.doc-panel-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.doc-panel-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  transition: border-color var(--transition-fast, 100ms ease),
+    box-shadow var(--transition-fast, 100ms ease);
+}
+.doc-panel-card.selected {
+  border-color: var(--doc-accent);
+  box-shadow: 0 0 0 1px var(--doc-accent);
+}
+.doc-panel-card.resolved {
+  opacity: 0.62;
+}
+
+/* Styles panel rows */
+.doc-style-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 9px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-primary);
+  text-align: left;
+}
+.doc-style-item:hover {
+  background: var(--bg-tertiary);
+}
+.doc-style-item.active {
+  background: var(--accent-light);
+  color: var(--accent-color);
+}
+.doc-style-item .hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 400;
+  font-style: normal;
+}
+
+/* Navigator rows */
+.doc-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-primary);
+  text-align: left;
+  overflow: hidden;
+}
+.doc-nav-item:hover {
+  background: var(--bg-tertiary);
+}
+.doc-nav-item .tag {
+  font-size: 9px;
+  font-weight: 700;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  padding: 1px 4px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.doc-nav-item .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Tracked-change rows */
+.doc-change-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-size: 11px;
+  background: var(--bg-surface);
+}
+.doc-change-row .desc {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.doc-change-kind {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.doc-change-kind.insert {
+  background: color-mix(in srgb, #22c55e 22%, transparent);
+  color: #4ade80;
+}
+.doc-change-kind.delete {
+  background: color-mix(in srgb, #ef4444 18%, transparent);
+  color: #f87171;
+}
+
+/* Comment thread card */
+.doc-comment-card {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.doc-comment-card.selected {
+  border-color: var(--doc-accent);
+  box-shadow: 0 0 0 1px var(--doc-accent);
+}
+.doc-comment-card.resolved {
+  opacity: 0.62;
+}
+.doc-comment-author {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.doc-comment-text {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+.doc-comment-replies {
+  padding-left: 10px;
+  border-left: 2px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Footnote card */
+.doc-footnote-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-surface);
+}
+.doc-footnote-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.doc-footnote-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--doc-accent);
+}
+
+/* ── Dialogs (link / bookmark / comment / image) ── */
+.doc-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 360px;
+}
+.doc-dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.doc-dialog-field .g-toolbar-input,
+.doc-dialog-field textarea,
+.doc-dialog > textarea {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+}
+.doc-dialog-field textarea,
+.doc-dialog > textarea {
+  height: auto;
+  padding: 8px;
+  resize: vertical;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.doc-dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.doc-dialog-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+.doc-dialog-error {
+  font-size: 12px;
+  color: var(--color-error, #ef6f5f);
+}
+
+/* Dialog tabs (Page Setup) */
+.doc-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 4px;
+}
+.doc-tab {
+  padding: 7px 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  border-radius: var(--radius-sm, 4px) var(--radius-sm, 4px) 0 0;
+}
+.doc-tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+.doc-tab[aria-selected="true"] {
+  border-bottom-color: var(--accent-color);
+  color: var(--accent-color);
+  font-weight: 600;
+}
+.doc-field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+/* ── Load warning banner ── */
+.doc-load-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--warn-bg, #3a2b0b);
+  color: var(--warn-fg, #ffd479);
+  font-size: 13px;
+  border-bottom: 1px solid rgba(255, 212, 121, 0.35);
+}
+.doc-load-warning button {
+  background: transparent;
+  border: 1px solid currentColor;
+  color: inherit;
+  border-radius: 6px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+/* ── Find-match + review decorations (moved off the inline <style> block) ── */
+.doc-comment-highlight {
+  background: color-mix(in srgb, var(--doc-accent) 24%, transparent);
+  border-bottom: 2px solid var(--doc-accent);
+}
+.doc-track-insert {
+  background: color-mix(in srgb, #22c55e 18%, transparent);
+  border-bottom: 2px solid #22c55e;
+}
+.doc-track-delete {
+  background: color-mix(in srgb, #ef4444 14%, transparent);
+  color: #b91c1c;
+  text-decoration: line-through;
+}
+.doc-spell-misspelled {
+  text-decoration: underline wavy #e74c3c;
+  text-underline-offset: 2px;
+}
+
+/* ── Motion ── */
+@keyframes doc-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes doc-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .doc-find-float,
+  .doc-bubble,
+  .doc-link-pop {
+    animation: none;
+  }
+}

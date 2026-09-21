@@ -1,4 +1,4 @@
-import { ParentProps, Show, createSignal, onMount } from "solid-js";
+import { ErrorBoundary as SolidErrorBoundary, ParentProps } from "solid-js";
 import { Button } from "./Button";
 
 interface ErrorBoundaryProps {
@@ -7,40 +7,13 @@ interface ErrorBoundaryProps {
 }
 
 export function ErrorBoundary(props: ParentProps<ErrorBoundaryProps>) {
-  const [error, setError] = createSignal<Error | null>(null);
-
-  const reset = () => setError(null);
-
-  onMount(() => {
-    const handler = (event: ErrorEvent) => {
-      event.preventDefault();
-      const err = event.error instanceof Error ? event.error : new Error(String(event.error));
-      setError(err);
-      props.onError?.(err);
-    };
-    const rejectionHandler = (event: PromiseRejectionEvent) => {
-      event.preventDefault();
-      const err = event.reason instanceof Error ? event.reason : new Error(String(event.reason));
-      setError(err);
-    };
-    window.addEventListener("error", handler);
-    window.addEventListener("unhandledrejection", rejectionHandler);
-    return () => {
-      window.removeEventListener("error", handler);
-      window.removeEventListener("unhandledrejection", rejectionHandler);
-    };
-  });
-
-  const handleReset = () => {
-    reset();
-  };
-
   return (
-    <Show
-      when={!error()}
-      fallback={
-        props.fallback ? (
-          props.fallback(error()!, handleReset)
+    <SolidErrorBoundary
+      fallback={(err, reset) => {
+        const error = err instanceof Error ? err : new Error(String(err));
+        props.onError?.(error);
+        return props.fallback ? (
+          props.fallback(error, reset)
         ) : (
           <div
             role="alert"
@@ -80,10 +53,10 @@ export function ErrorBoundary(props: ParentProps<ErrorBoundaryProps>) {
                 "word-break": "break-word",
               }}
             >
-              {error()?.message || "An unexpected error occurred"}
+              {error.message || "An unexpected error occurred"}
             </div>
             <div style={{ display: "flex", gap: "var(--space-2, 8px)", "margin-top": "var(--space-2, 8px)" }}>
-              <Button variant="primary" onClick={handleReset}>
+              <Button variant="primary" onClick={reset}>
                 Try Again
               </Button>
               <Button variant="secondary" onClick={() => window.location.reload()}>
@@ -91,10 +64,10 @@ export function ErrorBoundary(props: ParentProps<ErrorBoundaryProps>) {
               </Button>
             </div>
           </div>
-        )
-      }
+        );
+      }}
     >
       {props.children}
-    </Show>
+    </SolidErrorBoundary>
   );
 }

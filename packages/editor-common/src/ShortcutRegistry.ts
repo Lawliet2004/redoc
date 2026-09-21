@@ -62,14 +62,34 @@ export class ShortcutRegistry {
   }
 
   run(id: string) {
-    this.commands.get(id)?.action();
+    const cmd = this.commands.get(id);
+    if (!cmd || cmd.disabled?.()) return;
+    cmd.action();
   }
 
   handleKeyDown(event: KeyboardEvent, currentMode: "doc" | "sheet" | "slide") {
+    // Something upstream already consumed this key (e.g. a ProseMirror keymap
+    // or an editor-level handler) — never double-fire a registered command.
+    if (event.defaultPrevented || event.isComposing) return;
+    // Plain form fields own every chord: typing Ctrl+B/V/Z in an input or
+    // textarea must edit the field, not trigger editor commands.
+    if (isFormFieldTarget(event.target)) return;
+    // Editable surfaces (ProseMirror, slide text boxes) handle editing chords
+    // natively; block just those so global chords like Ctrl+S/F/K still work.
+    const editable = isEditableTarget(event.target);
+
     for (const cmd of this.commands.values()) {
       if (!cmd.shortcut) continue;
       if (cmd.mode && cmd.mode !== "global" && cmd.mode !== currentMode) continue;
       if (!matchShortcut(event, cmd.shortcut)) continue;
+      // In an editable surface, chords the surface performs natively
+      // (paste, undo, bold…) must not also fire via the registry.
+      if (editable && isNativeEditingChord(cmd.shortcut)) return;
+      if (cmd.disabled?.()) {
+        // Disabled commands swallow their shortcut without running.
+        event.preventDefault();
+        return;
+      }
       event.preventDefault();
       cmd.action();
       return;
@@ -125,6 +145,83 @@ export class ShortcutRegistry {
   }
 }
 
+/**
+ * Characters that Shift+<key> produces on a standard ANSI layout, mapped back
+ * to the unshifted key. Lets a shortcut declaring a base key ("=") still match
+ * when the user presses Shift to produce the shifted glyph ("+") — the same
+ * convention browsers use for zoom (Ctrl+= and Ctrl+Shift+= both zoom in).
+ */
+const UNSHIFT_KEY: Record<string, string> = {
+  "~": "`",
+  "!": "1",
+  "@": "2",
+  "#": "3",
+  $: "4",
+  "%": "5",
+  "^": "6",
+  "&": "7",
+  "*": "8",
+  "(": "9",
+  ")": "0",
+  _: "-",
+  "+": "=",
+  "{": "[",
+  "}": "]",
+  "|": "\\",
+  ":": ";",
+  '"': "'",
+  "<": ",",
+  ">": ".",
+  "?": "/",
+};
+
+/** Input types that never receive typed text — shortcuts may pass through. */
+const NON_TEXT_INPUT_TYPES = new Set([
+  "button",
+  "checkbox",
+  "color",
+  "file",
+  "image",
+  "radio",
+  "range",
+  "reset",
+  "submit",
+]);
+
+/** Single-character editing chords native to inputs and contenteditable. */
+const NATIVE_EDITING_KEYS = new Set(["a", "b", "c", "e", "i", "u", "v", "x", "y", "z"]);
+
+/** True for text-entry form fields (input/textarea/select) — fields own all chords. */
+function isFormFieldTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;
+  if (target instanceof HTMLInputElement) {
+    // Button-like inputs don't consume typing chords; let shortcuts through.
+    return !NON_TEXT_INPUT_TYPES.has(target.type);
+  }
+  return false;
+}
+
+/** True for anything the user can type into, including contenteditable roots. */
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable || isFormFieldTarget(target);
+}
+
+/**
+ * True when `shortcut` is a plain Ctrl/Cmd(+Shift)+<char> chord that editable
+ * surfaces already perform natively (clipboard, undo/redo, inline emphasis,
+ * select-all). Alt-chords and non-editing keys are never treated as editing.
+ */
+function isNativeEditingChord(shortcut: string): boolean {
+  const parts = shortcut.toLowerCase().split("+");
+  if (!parts.includes("ctrl") && !parts.includes("cmd")) return false;
+  if (parts.includes("alt")) return false;
+  let key = parts[parts.length - 1];
+  if (key === "") key = "=";
+  return key.length === 1 && NATIVE_EDITING_KEYS.has(key);
+}
+
 export function matchShortcut(e: KeyboardEvent, shortcut: string): boolean {
   const parts = shortcut.toLowerCase().split("+");
   const ctrl = parts.includes("ctrl") || parts.includes("cmd");
@@ -135,13 +232,27 @@ export function matchShortcut(e: KeyboardEvent, shortcut: string): boolean {
   let key = parts[parts.length - 1];
   if (key === "") key = "=";
   const code = e.code.replace(/Key|Digit|Numpad/, "").toLowerCase();
+  const eventKey = e.key.toLowerCase();
 
-  return (
-    (e.ctrlKey || e.metaKey) === ctrl &&
-    e.altKey === alt &&
-    e.shiftKey === shift &&
-    (e.key.toLowerCase() === key || code === key)
-  );
+  if ((e.ctrlKey || e.metaKey) !== ctrl || e.altKey !== alt) return false;
+
+  if (eventKey === key) {
+    // The produced character equals the declared key. For printable keys the
+    // produced char already encodes Shift (Shift+= yields "+"), so a declared
+    // shifted symbol is satisfied by the glyph itself; otherwise demand exact
+    // Shift equality (keeps Ctrl+A and Ctrl+Shift+A distinct).
+    if (e.shiftKey === shift) return true;
+    return key.length === 1 && Object.prototype.hasOwnProperty.call(UNSHIFT_KEY, key);
+  }
+
+  // The event produced a shifted symbol whose unshifted key is the declared
+  // one — e.g. declared "Ctrl+=" (or "Ctrl+Shift+="/"Ctrl++") and the press
+  // Shift+= produced "+". Shift is already encoded in the glyph, so this also
+  // covers dedicated "+" keys (e.g. Numpad+) that produce it without Shift.
+  if (UNSHIFT_KEY[eventKey] === key) return true;
+
+  // Fall back to physical-position matching for named keys / other layouts.
+  return e.shiftKey === shift && code === key;
 }
 
 /** Register shell shortcuts that either call App handlers or emit editor commands. */

@@ -1,3 +1,5 @@
+import "./editor-common.css";
+
 export * from "./ShortcutRegistry";
 export * from "./EditorCommands";
 export * from "./ContextMenu";

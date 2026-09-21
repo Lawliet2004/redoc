@@ -18,6 +18,7 @@ import { resolveValidationOptions } from "./validationOptions";
 
 export function FormulaBar(props: FormulaBarProps) {
   const { activeCell, formulaValue, setFormulaValue, getColName, insertFormulaPrefix, commitCellEdit, editing, setEditing, cellsData, containerRef, formulaInputRef } = props;
+  let inputEl: HTMLInputElement | undefined;
   const activeValidation = () => cellsData()[`${activeCell().row}:${activeCell().col}`]?.style?.validation;
   const validationOptions = () => resolveValidationOptions(
     activeValidation(),
@@ -28,31 +29,21 @@ export function FormulaBar(props: FormulaBarProps) {
   );
   return (
     <>
-      {/* Formula bar */}
-      <div class="g-formula-bar g-no-print">
-        <div
-          style={{
-            width: "72px",
-            "border-right": "1px solid var(--border-color)",
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "center",
-            "font-size": "12px",
-            "font-family": "var(--font-sans)",
-            color: "var(--text-primary)",
-            "flex-shrink": "0",
-          }}
-        >
+      {/* Formula bar — name box + fx affordances + input. Formulas render in
+          the monospace font; literal values stay in the UI font. */}
+      <div class="g-formula-bar sheet-formula-bar g-no-print">
+        <div class="sheet-name-box" aria-label="Active cell reference" title="Active cell">
           {getColName(activeCell().col)}{activeCell().row}
         </div>
-        <ToolbarButton title="Function wizard" onClick={() => formulaInputRef?.focus()}>fx</ToolbarButton>
+        <span class="sheet-fx">
+          <ToolbarButton title="Function wizard" onClick={() => inputEl?.focus()}>fx</ToolbarButton>
+        </span>
         <ToolbarButton title="Sum" onClick={() => insertFormulaPrefix("=SUM()")}><IconSum /></ToolbarButton>
         <ToolbarButton title="Equals" onClick={() => insertFormulaPrefix("=")}><IconEquals /></ToolbarButton>
         <Show when={activeValidation()?.type === "list" && validationOptions().length}>
           <select
             aria-label="Pick from list"
-            class="g-toolbar-input"
-            style={{ height: "24px", "margin-left": "4px", "max-width": "140px" }}
+            class="g-toolbar-input sheet-validation-picker"
             value={formulaValue()}
             onChange={(e) => {
               const val = e.currentTarget.value;
@@ -66,8 +57,12 @@ export function FormulaBar(props: FormulaBarProps) {
         </Show>
         <div style={{ width: "1px", background: "var(--border-color)", "align-self": "stretch" }} />
         <input
-          ref={formulaInputRef}
+          ref={(el) => {
+            inputEl = el;
+            formulaInputRef?.(el);
+          }}
           type="text"
+          class="sheet-formula-input"
           aria-label="Formula input"
           value={formulaValue()}
           onFocus={() => setEditing(true)}
@@ -78,25 +73,18 @@ export function FormulaBar(props: FormulaBarProps) {
             if (e.key === "Enter") {
               e.preventDefault();
               void commitCellEdit(formulaValue());
-              containerRef?.focus();
+              containerRef?.()?.focus();
             } else if (e.key === "Escape") {
               e.preventDefault();
               setFormulaValue(cellsData()[`${activeCell().row}:${activeCell().col}`]?.raw || "");
-              containerRef?.focus();
+              containerRef?.()?.focus();
             }
           }}
           onBlur={() => {
             if (editing()) void commitCellEdit(formulaValue());
           }}
           style={{
-            flex: 1,
-            border: "none",
-            background: "transparent",
-            color: "var(--text-primary)",
-            "font-family": "var(--font-sans)",
-            "font-size": "12px",
-            padding: "0 8px",
-            outline: "none",
+            "font-family": formulaValue().startsWith("=") ? "var(--font-mono)" : "var(--font-sans)",
           }}
         />
       </div>

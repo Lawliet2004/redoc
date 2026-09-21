@@ -53,8 +53,6 @@ export const commands = {
   getSettings: async () => unwrap(await generatedCommands.getSettings()) as AppSettings,
   updateSettings: async (newSettings: AppSettings) =>
     unwrap(await generatedCommands.updateSettings(newSettings)),
-  recordTelemetryEvent: async (event: string) =>
-    unwrap(await generatedCommands.recordTelemetryEvent(event)),
   getRecents: async () => unwrap(await generatedCommands.getRecents()) as RecentEntry[],
   togglePinRecent: async (id: string) => unwrap(await generatedCommands.togglePinRecent(id)),
   checkRecovery: async () => unwrap(await generatedCommands.checkRecovery()),

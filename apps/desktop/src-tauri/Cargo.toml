@@ -7,7 +7,6 @@ default-run = "redoc-desktop-tauri"
 [features]
 default = []
 updater = ["dep:tauri-plugin-updater"]
-telemetry = []
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }

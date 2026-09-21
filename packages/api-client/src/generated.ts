@@ -29,14 +29,6 @@ async updateSettings(newSettings: AppSettings) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async recordTelemetryEvent(event: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("record_telemetry_event", { event }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async getRecents() : Promise<Result<RecentEntry[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_recents") };
@@ -389,7 +381,7 @@ async compareDocumentFiles(currentPath: string, candidatePath: string) : Promise
 
 /** user-defined types **/
 
-export type AppSettings = { theme: string; autosaveIntervalMs: number; spellcheckEnabled: boolean; fontSizeDefault: number; telemetryEnabled: boolean; zoomLevel?: number; checkForUpdates?: boolean; author?: AuthorProfile }
+export type AppSettings = { theme: string; autosaveIntervalMs: number; spellcheckEnabled: boolean; fontSizeDefault: number; zoomLevel?: number; checkForUpdates?: boolean; author?: AuthorProfile }
 export type ArraySpill = { originRow: number; originCol: number; rows: number; cols: number; values: string[] }
 export type AssetInfo = { hash: string; mime: string; name: string; size: number }
 /**

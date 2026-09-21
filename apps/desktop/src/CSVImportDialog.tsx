@@ -155,10 +155,10 @@ export function CSVImportDialog(props: CSVImportDialogProps) {
     <Dialog open={props.open} title={t("csvImport.title") || "Import CSV Options"} onClose={props.onClose}>
       <div style={{ display: "flex", "flex-direction": "column", gap: "12px", "min-width": "500px", "max-width": "80vw" }}>
         <div style={{ display: "flex", gap: "16px" }}>
-          <label style={{ display: "flex", "flex-direction": "column", gap: "4px", flex: 1 }}>
+          <label style={{ display: "flex", "flex-direction": "column", gap: "6px", flex: 1, "font-size": "13px", "font-weight": "500", color: "var(--text-secondary)" }}>
             {t("csvImport.delimiter") || "Separator Options"}
             <select
-              style={{ "padding": "4px", "border-radius": "4px", "border": "1px solid var(--border-color)", "background": "var(--bg-surface)", "color": "var(--text-primary)" }}
+              class="app-field-input"
               aria-label={t("csvImport.delimiter")}
               value={delimiter()}
               onChange={(event) => setDelimiter(event.currentTarget.value)}
@@ -170,10 +170,10 @@ export function CSVImportDialog(props: CSVImportDialogProps) {
               <option value="|">Pipe (|)</option>
             </select>
           </label>
-          <label style={{ display: "flex", "flex-direction": "column", gap: "4px", flex: 1 }}>
+          <label style={{ display: "flex", "flex-direction": "column", gap: "6px", flex: 1, "font-size": "13px", "font-weight": "500", color: "var(--text-secondary)" }}>
             {t("csvImport.encoding") || "Character Set"}
             <select
-              style={{ "padding": "4px", "border-radius": "4px", "border": "1px solid var(--border-color)", "background": "var(--bg-surface)", "color": "var(--text-primary)" }}
+              class="app-field-input"
               aria-label={t("csvImport.encoding")}
               value={encoding()}
               onChange={(event) => setEncoding(event.currentTarget.value as any)}
@@ -186,7 +186,7 @@ export function CSVImportDialog(props: CSVImportDialogProps) {
         </div>
 
         <div>
-          <span style={{ "font-size": "13px", "font-weight": "500" }}>Preview</span>
+          <span class="app-field-label" style={{ "margin-bottom": "4px" }}>Preview</span>
           <Show when={loading()}>
             <div style={{ padding: "20px", "text-align": "center", color: "var(--text-muted)", "font-size": "13px" }}>Loading preview...</div>
           </Show>
@@ -198,7 +198,7 @@ export function CSVImportDialog(props: CSVImportDialogProps) {
           </Show>
         </div>
 
-        <div style={{ display: "flex", "justify-content": "flex-end", gap: "8px", "margin-top": "8px" }}>
+        <div class="app-dialog-actions">
           <Button variant="secondary" onClick={props.onClose}>
             {t("common.cancel") || "Cancel"}
           </Button>

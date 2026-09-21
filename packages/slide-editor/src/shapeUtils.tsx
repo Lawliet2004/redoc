@@ -200,19 +200,22 @@ export function ShapeBody(props: {
   strokeWidth?: number;
   shadow?: boolean;
 }): JSX.Element {
-  const fill = props.color || "#3b82f6";
-  const stroke = props.strokeColor || fill;
-  const strokeWidth = Math.max(0, Math.min(24, props.strokeWidth ?? 0));
-  const shadow = shapeShadowCss(props.shadow);
-  const background = shapeFillCss(fill, props.gradient);
+  // All paint inputs are read through accessors so a keyed element host can
+  // patch color/stroke/shadow without remounting this subtree.
+  const fill = () => props.color || "#3b82f6";
+  const stroke = () => props.strokeColor || fill();
+  const strokeWidth = () => Math.max(0, Math.min(24, props.strokeWidth ?? 0));
+  const shadow = () => shapeShadowCss(props.shadow);
+  const background = () => shapeFillCss(fill(), props.gradient);
   if (props.type === "line" || props.type === "arrow") {
     // Canonical line/arrow geometry: a diagonal from the box's top-left
     // corner to its bottom-right corner, matching PPTX/PDF/PNG exports.
+    // The stroke falls back to `color` so an explicit lineColor wins when set.
     return (
       <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
         <defs>
           <marker id={`arrowhead-${props.id}`} markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-            <path d="M0,0 L8,4 L0,8 z" fill={fill} />
+            <path d="M0,0 L8,4 L0,8 z" fill={stroke()} />
           </marker>
         </defs>
         <line
@@ -220,7 +223,7 @@ export function ShapeBody(props: {
           y1="0"
           x2="100"
           y2="100"
-          stroke={fill}
+          stroke={stroke()}
           stroke-width="4"
           vector-effect="non-scaling-stroke"
           marker-end={props.type === "arrow" ? `url(#arrowhead-${props.id})` : undefined}
@@ -237,11 +240,11 @@ export function ShapeBody(props: {
       style={{
         width: "100%",
         height: "100%",
-        background,
+        background: background(),
         "border-radius": radius,
         "clip-path": clip,
-        border: strokeWidth > 0 ? `${strokeWidth}px solid ${stroke}` : undefined,
-        "box-shadow": shadow,
+        border: strokeWidth() > 0 ? `${strokeWidth()}px solid ${stroke()}` : undefined,
+        "box-shadow": shadow(),
         "box-sizing": "border-box",
       }}
     />

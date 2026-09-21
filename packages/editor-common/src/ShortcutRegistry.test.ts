@@ -56,7 +56,16 @@ describe("ShortcutRegistry", () => {
     expect(matchShortcut(keyEvent({ key: "0", code: "Digit0", ctrlKey: true }), "Ctrl+0")).toBe(true);
     // No accidental match without modifiers.
     expect(matchShortcut(keyEvent({ key: "=", code: "Equal" }), "Ctrl+=")).toBe(false);
-    // Ctrl+Shift+= must not match Ctrl+= (shift is tracked).
-    expect(matchShortcut(keyEvent({ key: "=", code: "Equal", ctrlKey: true, shiftKey: true }), "Ctrl+=")).toBe(false);
+    // Ctrl+Shift+= produces e.key "+"; the shifted glyph satisfies the declared
+    // base key so "Ctrl+=" still fires (browser zoom-in convention), as do
+    // equivalent "Ctrl+Shift+=" / "Ctrl++" declarations.
+    expect(matchShortcut(keyEvent({ key: "+", code: "Equal", ctrlKey: true, shiftKey: true }), "Ctrl+=")).toBe(true);
+    expect(matchShortcut(keyEvent({ key: "+", code: "Equal", ctrlKey: true, shiftKey: true }), "Ctrl+Shift+=")).toBe(true);
+    expect(matchShortcut(keyEvent({ key: "+", code: "Equal", ctrlKey: true, shiftKey: true }), "Ctrl++")).toBe(true);
+    // A declared unshifted key never fires without its required modifiers.
+    expect(matchShortcut(keyEvent({ key: "=", code: "Equal", shiftKey: true }), "Ctrl+=")).toBe(false);
+    // Shift on letters stays strict: Ctrl+Shift+A is not Ctrl+A.
+    expect(matchShortcut(keyEvent({ key: "A", code: "KeyA", ctrlKey: true, shiftKey: true }), "Ctrl+A")).toBe(false);
+    expect(matchShortcut(keyEvent({ key: "A", code: "KeyA", ctrlKey: true, shiftKey: true }), "Ctrl+Shift+A")).toBe(true);
   });
 });

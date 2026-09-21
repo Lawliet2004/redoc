@@ -22,7 +22,13 @@ export function ToolbarRow(props: ToolbarRowProps) {
     queueMicrotask(() => syncTabIndexes());
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      if (
+        event.key !== "ArrowLeft" &&
+        event.key !== "ArrowRight" &&
+        event.key !== "Home" &&
+        event.key !== "End"
+      )
+        return;
       const list = buttons();
       if (!list.length) return;
       const current = document.activeElement as HTMLElement | null;
@@ -32,7 +38,11 @@ export function ToolbarRow(props: ToolbarRowProps) {
       const nextIndex =
         event.key === "ArrowRight"
           ? (index + 1) % list.length
-          : (index - 1 + list.length) % list.length;
+          : event.key === "ArrowLeft"
+            ? (index - 1 + list.length) % list.length
+            : event.key === "Home"
+              ? 0
+              : list.length - 1;
       const next = list[nextIndex];
       syncTabIndexes(next);
       next.focus();

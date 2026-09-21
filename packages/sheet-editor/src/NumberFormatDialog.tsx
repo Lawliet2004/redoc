@@ -60,7 +60,7 @@ export function NumberFormatDialog(props: NumberFormatDialogProps) {
 
   return (
     <Dialog open={props.open} title="Number Format" onClose={props.onClose}>
-      <div style={{ display: "flex", "flex-direction": "column", gap: "12px", "min-width": "320px" }}>
+      <div class="sheet-dialog-body" style={{ "min-width": "320px" }}>
         <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
           Format
           <select
@@ -109,9 +109,9 @@ export function NumberFormatDialog(props: NumberFormatDialogProps) {
             style={{ height: "28px", padding: "0 8px", width: "80px" }}
           />
         </label>
-        <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
-          <button type="button" class="g-toolbar-btn" onClick={props.onClose}>Cancel</button>
-          <button type="button" class="g-toolbar-btn" style={{ "background": "var(--accent-color, #1a73e8)", color: "#fff" }} onClick={handleApply}>
+        <div class="sheet-dialog-actions">
+          <button type="button" class="g-toolbar-btn sheet-btn" onClick={props.onClose}>Cancel</button>
+          <button type="button" class="g-toolbar-btn sheet-btn sheet-btn-primary" onClick={handleApply}>
             Apply
           </button>
         </div>

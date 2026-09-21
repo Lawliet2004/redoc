@@ -43,6 +43,27 @@ import { setRichClipboard, takeRichClipboard, shiftFormulaReferences, type RichC
 import { SortDialog } from "./dialogs/SortDialog";
 import { PrintDialog } from "./dialogs/PrintDialog";
 import { applyBorderPresetToStyle, drawCellBorders, rangePosition, type BorderPreset } from "./cellBorders";
+import "./sheet-editor.css";
+
+/* Canvas paint palette — the grid always renders on white "paper" regardless
+   of the app theme, so these are fixed hexes tuned for a light sheet surface.
+   Accent = Google-Sheets green; header/chrome grays keep the grid content
+   dominant. */
+const SHEET_GRID_LINE = "#e8ecf1";
+const SHEET_GRID_LINE_MERGED = "#e2e8f0";
+const SHEET_HEADER_BG = "#f8fafc";
+const SHEET_HEADER_CORNER_BG = "#eef1f5";
+const SHEET_HEADER_EDGE = "#d4dbe4";
+const SHEET_HEADER_TEXT = "#64748b";
+const SHEET_HEADER_ACTIVE_BG = "#e1efe5";
+const SHEET_HEADER_ACTIVE_TEXT = "#188038";
+const SHEET_CELL_TEXT = "#0f172a";
+const SHEET_ACCENT = "#188038";
+const SHEET_ACCENT_FILL = "rgba(24, 128, 56, 0.09)";
+const SHEET_ACCENT_RANGE_EDGE = "rgba(24, 128, 56, 0.5)";
+const SHEET_FREEZE_LINE = "#a9b4c2";
+const SHEET_HEADER_FONT = '11px "Liberation Sans", Arial, Helvetica, sans-serif';
+const SHEET_HEADER_FONT_ACTIVE = '600 11px "Liberation Sans", Arial, Helvetica, sans-serif';
 
 interface SheetEditorProps {
   initialContent?: any;
@@ -513,7 +534,9 @@ export function SheetEditor(props: SheetEditorProps) {
 
   onMount(() => {
     if (props.initialContent?.sheets?.length) {
-      setSheets(props.initialContent.sheets.map((sheet: any) => ({ id: sheet.id, name: sheet.name })));
+      // Preserve tabColor so per-sheet tab colors survive the workbook →
+      // sheets-meta mapping (buildWorkbookFromCells writes it back out).
+      setSheets(props.initialContent.sheets.map((sheet: any) => ({ id: sheet.id, name: sheet.name, color: sheet.tabColor })));
       const index = props.initialContent.activeSheetIndex || 0;
       setActiveSheetIndex(index);
       setFreezeRows(props.initialContent.sheets[index].freezeRows || 0);
@@ -1061,7 +1084,7 @@ export function SheetEditor(props: SheetEditorProps) {
         ctx.beginPath();
         ctx.moveTo(startX, y + 2);
         ctx.lineTo(startX + w, y + 2);
-        ctx.strokeStyle = link ? "#2563eb" : style?.fontColor || "#0f172a";
+        ctx.strokeStyle = link ? "#2563eb" : style?.fontColor || SHEET_CELL_TEXT;
         ctx.lineWidth = 1;
         ctx.stroke();
       }
@@ -1121,15 +1144,26 @@ export function SheetEditor(props: SheetEditorProps) {
     const width = cssWidth;
     const height = cssHeight;
 
-    ctx.font = "12px Inter, sans-serif";
+    ctx.font = SHEET_HEADER_FONT;
 
-    // Draw header backgrounds
-    ctx.fillStyle = "#f1f5f9";
+    // Selection geometry is read early: the row/column headers highlight the
+    // active selection range (Google Sheets-style affordance).
+    const sel = activeCell();
+    const anchor = selectionAnchor();
+    const selStartRow = Math.min(anchor.row, sel.row);
+    const selEndRow = Math.max(anchor.row, sel.row);
+    const selStartCol = Math.min(anchor.col, sel.col);
+    const selEndCol = Math.max(anchor.col, sel.col);
+
+    // Header strips + the corner select-all block (slightly deeper shade).
+    ctx.fillStyle = SHEET_HEADER_BG;
     ctx.fillRect(0, 0, width, headerRowHeight);
     ctx.fillRect(0, 0, headerColWidth, height);
+    ctx.fillStyle = SHEET_HEADER_CORNER_BG;
+    ctx.fillRect(0, 0, headerColWidth, headerRowHeight);
 
     // Grid lines & Headers
-    ctx.strokeStyle = "#e2e8f0";
+    ctx.strokeStyle = SHEET_GRID_LINE;
     ctx.lineWidth = 1;
 
     const columnStart = columnAtOffset(scrollLeft());
@@ -1171,25 +1205,44 @@ export function SheetEditor(props: SheetEditorProps) {
       }
     }
 
-    // Columns
+    // Columns: vertical gridlines + column headers. Clipped to the data side
+    // of the row-header strip so scrolled columns never bleed over it.
+    const filterRangeBounds = filterBounds();
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(headerColWidth, 0, width, height);
+    ctx.clip();
     for (const column of columns) {
       const c = column.col;
       const x = column.x;
+      ctx.strokeStyle = SHEET_GRID_LINE;
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, height);
       ctx.stroke();
 
+      const isActiveHeader = c >= selStartCol && c <= selEndCol;
+      if (isActiveHeader) {
+        ctx.fillStyle = SHEET_HEADER_ACTIVE_BG;
+        ctx.fillRect(x, 0, column.width, headerRowHeight);
+        // Keep the left-edge separator visible over the tint.
+        ctx.strokeStyle = SHEET_GRID_LINE;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, headerRowHeight);
+        ctx.stroke();
+      }
+
       // Col Header text
-      ctx.fillStyle = "#475569";
+      ctx.fillStyle = isActiveHeader ? SHEET_HEADER_ACTIVE_TEXT : SHEET_HEADER_TEXT;
+      ctx.font = isActiveHeader ? SHEET_HEADER_FONT_ACTIVE : SHEET_HEADER_FONT;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      const bounds = filterBounds();
       const showFilter =
         autoFilterEnabled() &&
-        bounds &&
-        c >= bounds.startCol &&
-        c <= bounds.endCol;
+        filterRangeBounds &&
+        c >= filterRangeBounds.startCol &&
+        c <= filterRangeBounds.endCol;
       ctx.fillText(
         showFilter ? `${getColName(c)} ▾` : getColName(c),
         x + column.width / 2,
@@ -1202,25 +1255,56 @@ export function SheetEditor(props: SheetEditorProps) {
         ctx.fill();
       }
     }
+    ctx.restore();
 
-    // Rows
+    // Rows: horizontal gridlines + row headers. Clipped below the
+    // column-header strip so scrolled rows never bleed over it.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, headerRowHeight, width, height);
+    ctx.clip();
     for (const row of rows) {
       const r = row.row;
       const y = row.y;
+      ctx.strokeStyle = SHEET_GRID_LINE;
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(width, y);
       ctx.stroke();
 
+      const isActiveRow = r >= selStartRow && r <= selEndRow;
+      if (isActiveRow) {
+        ctx.fillStyle = SHEET_HEADER_ACTIVE_BG;
+        ctx.fillRect(0, y, headerColWidth, row.height);
+        ctx.strokeStyle = SHEET_GRID_LINE;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(headerColWidth, y);
+        ctx.stroke();
+      }
+
       // Row Header text
-      ctx.fillStyle = "#475569";
+      ctx.fillStyle = isActiveRow ? SHEET_HEADER_ACTIVE_TEXT : SHEET_HEADER_TEXT;
+      ctx.font = isActiveRow ? SHEET_HEADER_FONT_ACTIVE : SHEET_HEADER_FONT;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(r.toString(), headerColWidth / 2, y + row.height / 2);
     }
+    ctx.restore();
 
-    // Draw Cell Values
+    // Crisp header boundary edges — always drawn at the strip edge so the
+    // headers read as a fixed chrome layer even mid-scroll.
+    ctx.fillStyle = SHEET_HEADER_EDGE;
+    ctx.fillRect(headerColWidth, 0, 1, height);
+    ctx.fillRect(0, headerRowHeight, width, 1);
+
+    // Draw Cell Values — clipped to the data region so partially-scrolled
+    // cells never paint over the header strips.
     const data = cellsData();
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(headerColWidth, headerRowHeight, width, height);
+    ctx.clip();
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
 
@@ -1242,14 +1326,14 @@ export function SheetEditor(props: SheetEditorProps) {
       drawConditionalBar(style, cellX, cellY, cellWidth, cellHeight);
       drawCellImage(style?.image, cellX, cellY, cellWidth, cellHeight);
 
-      ctx.strokeStyle = "#e2e8f0";
+      ctx.strokeStyle = SHEET_GRID_LINE_MERGED;
       ctx.lineWidth = 1;
       ctx.strokeRect(cellX, cellY, cellWidth, cellHeight);
       drawCellBorders(ctx, style?.borders, cellX, cellY, cellWidth, cellHeight);
 
       if (cell) {
         const link = cellHyperlink(cell);
-        ctx.fillStyle = link ? "#2563eb" : style?.fontColor || "#0f172a";
+        ctx.fillStyle = link ? "#2563eb" : style?.fontColor || SHEET_CELL_TEXT;
         ctx.font = cellFont(style, m.startRow);
         ctx.textAlign = style?.align || "left";
         const textX = style?.align === "center" ? cellX + cellWidth / 2 : style?.align === "right" ? cellX + cellWidth - 6 : cellX + 6;
@@ -1312,7 +1396,7 @@ export function SheetEditor(props: SheetEditorProps) {
           drawConditionalBar(style, column.x, row.y, column.width, row.height);
           drawCellImage(style?.image, column.x, row.y, column.width, row.height);
           drawCellBorders(ctx, style?.borders, column.x, row.y, column.width, row.height);
-          ctx.fillStyle = link ? "#2563eb" : style?.fontColor || "#0f172a";
+          ctx.fillStyle = link ? "#2563eb" : style?.fontColor || SHEET_CELL_TEXT;
           const fontStr = cellFont(style, r);
           ctx.font = fontStr;
           ctx.textAlign = style?.align || "left";
@@ -1385,6 +1469,7 @@ export function SheetEditor(props: SheetEditorProps) {
         }
       }
     }
+    ctx.restore(); // end data-region clip
 
     // Paint frozen panes over the scrolling grid. The overlay keeps the
     // frozen headers and cells anchored while the rest of the canvas moves.
@@ -1395,18 +1480,25 @@ export function SheetEditor(props: SheetEditorProps) {
     if (frozenRows || frozenCols) {
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(headerColWidth, headerRowHeight, frozenWidth, frozenHeight);
+      ctx.fillStyle = SHEET_HEADER_BG;
       ctx.fillRect(headerColWidth, 0, frozenWidth, headerRowHeight);
       ctx.fillRect(0, headerRowHeight, headerColWidth, frozenHeight);
 
       for (let c = 1; c <= frozenCols; c++) {
         const x = headerColWidth + offsetForColumn(c);
         const widthForColumn = widthAt(c);
-        ctx.strokeStyle = "#e2e8f0";
+        ctx.strokeStyle = SHEET_GRID_LINE;
         ctx.beginPath();
         ctx.moveTo(x, 0);
         ctx.lineTo(x, headerRowHeight + frozenHeight);
         ctx.stroke();
-        ctx.fillStyle = "#475569";
+        const isActiveHeader = c >= selStartCol && c <= selEndCol;
+        if (isActiveHeader) {
+          ctx.fillStyle = SHEET_HEADER_ACTIVE_BG;
+          ctx.fillRect(x, 0, widthForColumn, headerRowHeight);
+        }
+        ctx.fillStyle = isActiveHeader ? SHEET_HEADER_ACTIVE_TEXT : SHEET_HEADER_TEXT;
+        ctx.font = isActiveHeader ? SHEET_HEADER_FONT_ACTIVE : SHEET_HEADER_FONT;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(getColName(c), x + widthForColumn / 2, headerRowHeight / 2);
@@ -1414,7 +1506,7 @@ export function SheetEditor(props: SheetEditorProps) {
           const y = headerRowHeight + offsetForRow(r);
           const heightForRow = heightAt(r);
           const value = data[`${r}:${c}`];
-          ctx.strokeStyle = "#e2e8f0";
+          ctx.strokeStyle = SHEET_GRID_LINE;
           ctx.beginPath();
           ctx.moveTo(x, y);
           ctx.lineTo(x + widthForColumn, y);
@@ -1422,7 +1514,7 @@ export function SheetEditor(props: SheetEditorProps) {
           if (value) {
             const cellStyle = value.style;
             drawCellImage(cellStyle?.image, x, y, widthForColumn, heightForRow);
-            ctx.fillStyle = cellStyle?.fontColor || "#0f172a";
+            ctx.fillStyle = cellStyle?.fontColor || SHEET_CELL_TEXT;
             ctx.font = cellFont(cellStyle, r);
             ctx.textAlign = "left";
             drawTextWithUnderline(value.display, x + 6, y + heightForRow / 2, cellStyle, "left");
@@ -1432,40 +1524,69 @@ export function SheetEditor(props: SheetEditorProps) {
       for (let r = 1; r <= frozenRows; r++) {
         const y = headerRowHeight + offsetForRow(r);
         const heightForRow = heightAt(r);
-        ctx.strokeStyle = "#e2e8f0";
+        ctx.strokeStyle = SHEET_GRID_LINE;
         ctx.beginPath();
         ctx.moveTo(0, y);
         ctx.lineTo(headerColWidth + frozenWidth, y);
         ctx.stroke();
-        ctx.fillStyle = "#475569";
+        const isActiveRow = r >= selStartRow && r <= selEndRow;
+        if (isActiveRow) {
+          ctx.fillStyle = SHEET_HEADER_ACTIVE_BG;
+          ctx.fillRect(0, y, headerColWidth, heightForRow);
+        }
+        ctx.fillStyle = isActiveRow ? SHEET_HEADER_ACTIVE_TEXT : SHEET_HEADER_TEXT;
+        ctx.font = isActiveRow ? SHEET_HEADER_FONT_ACTIVE : SHEET_HEADER_FONT;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(r.toString(), headerColWidth / 2, y + heightForRow / 2);
       }
-      ctx.strokeStyle = "#94a3b8";
-      ctx.lineWidth = 2;
-      if (frozenCols) ctx.strokeRect(headerColWidth + frozenWidth - 1, 0, 1, height);
-      if (frozenRows) ctx.strokeRect(0, headerRowHeight + frozenHeight - 1, width, 1);
+      // Freeze dividers: a crisp 2px slate edge where the panes split.
+      ctx.fillStyle = SHEET_FREEZE_LINE;
+      if (frozenCols) ctx.fillRect(headerColWidth + frozenWidth - 1, 0, 2, height);
+      if (frozenRows) ctx.fillRect(0, headerRowHeight + frozenHeight - 1, width, 2);
     }
 
-    // Selection border
-    const sel = activeCell();
-    const anchor = selectionAnchor();
-    const startRow = Math.min(anchor.row, sel.row);
-    const endRow = Math.max(anchor.row, sel.row);
-    const startCol = Math.min(anchor.col, sel.col);
-    const endCol = Math.max(anchor.col, sel.col);
-    const selX = headerColWidth - scrollLeft() + offsetForColumn(startCol);
-    const selY = headerRowHeight - scrollTop() + offsetForRow(startRow);
-    const selWidth = offsetForColumn(endCol + 1) - offsetForColumn(startCol);
-    const selHeight = offsetForRow(endRow + 1) - offsetForRow(startRow);
-    ctx.strokeStyle = "#16a34a";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(selX, selY, selWidth, selHeight);
+    // Selection overlay — Google Sheets/Excel style: a translucent accent
+    // wash over the range (the active cell keeps its paper interior), a 1px
+    // range edge, the 2px active-cell ring, and the fill-handle square.
+    const selX = headerColWidth - scrollLeft() + offsetForColumn(selStartCol);
+    const selY = headerRowHeight - scrollTop() + offsetForRow(selStartRow);
+    const selWidth = offsetForColumn(selEndCol + 1) - offsetForColumn(selStartCol);
+    const selHeight = offsetForRow(selEndRow + 1) - offsetForRow(selStartRow);
+    const actX = headerColWidth - scrollLeft() + offsetForColumn(sel.col);
+    const actY = headerRowHeight - scrollTop() + offsetForRow(sel.row);
+    const actW = offsetForColumn(sel.col + 1) - offsetForColumn(sel.col);
+    const actH = offsetForRow(sel.row + 1) - offsetForRow(sel.row);
+    const singleCell = selStartRow === selEndRow && selStartCol === selEndCol;
 
-    // Fill handle square
-    ctx.fillStyle = "#16a34a";
-    ctx.fillRect(selX + selWidth - 4, selY + selHeight - 4, 6, 6);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(headerColWidth, headerRowHeight, width, height);
+    ctx.clip();
+
+    if (!singleCell) {
+      // Four strips around the active cell so it stays unfilled/white.
+      ctx.fillStyle = SHEET_ACCENT_FILL;
+      ctx.fillRect(selX, selY, selWidth, Math.max(0, actY - selY));
+      const belowY = actY + actH;
+      ctx.fillRect(selX, belowY, selWidth, Math.max(0, selY + selHeight - belowY));
+      ctx.fillRect(selX, actY, Math.max(0, actX - selX), actH);
+      ctx.fillRect(actX + actW, actY, Math.max(0, selX + selWidth - (actX + actW)), actH);
+      ctx.strokeStyle = SHEET_ACCENT_RANGE_EDGE;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(selX + 0.5, selY + 0.5, Math.max(0, selWidth - 1), Math.max(0, selHeight - 1));
+    }
+
+    // Active-cell ring (2px accent) and the white-haloed fill handle centered
+    // on the selection's bottom-right corner (matches isFillHandlePoint).
+    ctx.strokeStyle = SHEET_ACCENT;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(actX, actY, actW, actH);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(selX + selWidth - 4, selY + selHeight - 4, 8, 8);
+    ctx.fillStyle = SHEET_ACCENT;
+    ctx.fillRect(selX + selWidth - 3, selY + selHeight - 3, 6, 6);
+    ctx.restore();
   };
 
   onMount(() => {
@@ -1595,6 +1716,27 @@ export function SheetEditor(props: SheetEditorProps) {
     const handleX = headerColWidth - scrollLeft() + offsetForColumn(endCol + 1);
     const handleY = headerRowHeight - scrollTop() + offsetForRow(endRow + 1);
     return Math.abs(x - handleX) <= 10 && Math.abs(y - handleY) <= 10;
+  };
+
+  /**
+   * Hover cursor affordance for a pointer position — mirrors the hit zones in
+   * isFillHandlePoint/startDimensionDrag: crosshair on the fill handle,
+   * col/row-resize on header edges, the spreadsheet "cell" cursor in the grid.
+   */
+  const cursorForPoint = (event: MouseEvent): string => {
+    if (isFillHandlePoint(event)) return "crosshair";
+    const rect = canvasRef.getBoundingClientRect();
+    const x = event.clientX - rect.left + scrollLeft();
+    const y = event.clientY - rect.top + scrollTop();
+    if (y <= headerRowHeight && x > headerColWidth) {
+      const hit = columnAtOffset(x - headerColWidth);
+      return widthAt(hit.col) - hit.remainder <= 7 ? "col-resize" : "default";
+    }
+    if (x <= headerColWidth && y > headerRowHeight) {
+      const hit = rowAtOffset(y - headerRowHeight);
+      return heightAt(hit.row) - hit.remainder <= 7 ? "row-resize" : "default";
+    }
+    return "cell";
   };
 
   const finishFillDrag = async (event: MouseEvent) => {
@@ -1883,7 +2025,7 @@ export function SheetEditor(props: SheetEditorProps) {
   const importCsv = async () => {
     const imported = await props.onImportCsv?.();
     if (imported) {
-      setSheets(imported.sheets.map((sheet: any) => ({ id: sheet.id, name: sheet.name })));
+      setSheets(imported.sheets.map((sheet: any) => ({ id: sheet.id, name: sheet.name, color: sheet.tabColor })));
       const index = imported.activeSheetIndex || 0;
       setActiveSheetIndex(index);
       loadSheet(imported.sheets[index]);
@@ -2783,10 +2925,33 @@ export function SheetEditor(props: SheetEditorProps) {
         const payload = detail.payload as { dRow?: number; dCol?: number } | undefined;
         jumpToDataEdge(payload?.dRow || 0, payload?.dCol || 0);
       }
-      else if (detail.id === "insert-rows") void insertRowsAt(activeCell().row);
-      else if (detail.id === "delete-rows") void deleteRowsAt(activeCell().row);
-      else if (detail.id === "insert-cols") void insertColsAt(activeCell().col);
-      else if (detail.id === "delete-cols") void deleteColsAt(activeCell().col);
+      // Row/column insert & delete commands are selection-aware: the count
+      // matches the selected span, like Excel/Google Sheets context menus.
+      else if (detail.id === "insert-rows" || detail.id === "insert-row-above") {
+        const bounds = selectedBounds();
+        void insertRowsAt(bounds.startRow, bounds.endRow - bounds.startRow + 1);
+      }
+      else if (detail.id === "insert-row-below") {
+        const bounds = selectedBounds();
+        void insertRowsAt(bounds.endRow + 1, bounds.endRow - bounds.startRow + 1);
+      }
+      else if (detail.id === "delete-rows") {
+        const bounds = selectedBounds();
+        void deleteRowsAt(bounds.startRow, bounds.endRow - bounds.startRow + 1);
+      }
+      else if (detail.id === "insert-cols" || detail.id === "insert-col-left") {
+        const bounds = selectedBounds();
+        void insertColsAt(bounds.startCol, bounds.endCol - bounds.startCol + 1);
+      }
+      else if (detail.id === "insert-col-right") {
+        const bounds = selectedBounds();
+        void insertColsAt(bounds.endCol + 1, bounds.endCol - bounds.startCol + 1);
+      }
+      else if (detail.id === "delete-cols") {
+        const bounds = selectedBounds();
+        void deleteColsAt(bounds.startCol, bounds.endCol - bounds.startCol + 1);
+      }
+      else if (detail.id === "format-cells") setNumberFormatOpen(true);
       else if (detail.id === "freeze-from-selection") void freezeFromSelection();
       else if (detail.id === "bold") updateActiveStyle({ bold: !activeStyle()?.bold });
       else if (detail.id === "italic") updateActiveStyle({ italic: !activeStyle()?.italic });
@@ -2902,7 +3067,7 @@ export function SheetEditor(props: SheetEditorProps) {
     const sourceSheetData = workbook.sheets?.[index] ? structuredClone(workbook.sheets[index]) : null;
     
     const nextSheets = [...sheets()];
-    nextSheets.splice(index + 1, 0, { id: newId, name: newName });
+    nextSheets.splice(index + 1, 0, { id: newId, name: newName, color: current.color });
     setSheets(nextSheets);
     
     if (workbook.sheets && sourceSheetData) {
@@ -2967,23 +3132,33 @@ export function SheetEditor(props: SheetEditorProps) {
     requestDrawGrid();
   };
 
-  const findNextCell = () => {
-    const query = findQuery().trim();
-    if (!query) return;
-    const needle = matchCase() ? query : query.toLowerCase();
-    const entries = Object.entries(cellsData());
-    entries.sort((a, b) => {
+  /** Cells sorted in row-major order; shared by find-next/find-prev and the match counter. */
+  const sortedCellEntries = () =>
+    Object.entries(cellsData()).sort((a, b) => {
       const [rA, cA] = a[0].split(':').map(Number);
       const [rB, cB] = b[0].split(':').map(Number);
       return rA !== rB ? rA - rB : cA - cB;
     });
+
+  const cellMatchesQuery = (cell: GridCell, needle: string) => {
+    const haystack = `${cell.raw}\n${cell.display}`;
+    return (matchCase() ? haystack : haystack.toLowerCase()).includes(needle);
+  };
+
+  /** Find next/previous match from the active cell, wrapping around the sheet. */
+  const findCellInDirection = (direction: 1 | -1) => {
+    const query = findQuery().trim();
+    if (!query) return;
+    const needle = matchCase() ? query : query.toLowerCase();
+    const entries = sortedCellEntries();
     const currentKey = `${activeCell().row}:${activeCell().col}`;
-    const start = Math.max(0, entries.findIndex(([key]) => key === currentKey) + 1);
-    const ordered = [...entries.slice(start), ...entries.slice(0, start)];
-    const match = ordered.find(([, cell]) => {
-      const haystack = `${cell.raw}\n${cell.display}`;
-      return (matchCase() ? haystack : haystack.toLowerCase()).includes(needle);
-    });
+    const index = entries.findIndex(([key]) => key === currentKey);
+    // Forward: everything after the active cell, then wrap from the top.
+    // Reverse: everything before it (nearest first), then wrap from the bottom.
+    const ordered = direction === 1
+      ? [...entries.slice(Math.max(0, index + 1)), ...entries.slice(0, Math.max(0, index + 1))]
+      : [...entries.slice(0, index < 0 ? entries.length : index).reverse(), ...entries.slice(index < 0 ? entries.length : index).reverse()];
+    const match = ordered.find(([, cell]) => cellMatchesQuery(cell, needle));
     if (!match) return;
     const [key, cell] = match;
     const [row, col] = key.split(":").map(Number);
@@ -2993,6 +3168,26 @@ export function SheetEditor(props: SheetEditorProps) {
     emitCellInfo(row, col);
     requestDrawGrid();
   };
+
+  const findNextCell = () => findCellInDirection(1);
+  const findPrevCell = () => findCellInDirection(-1);
+
+  /** "n of m matches" indicator for the find bar. */
+  const findMatchInfo = createMemo(() => {
+    if (!findBarOpen()) return { count: 0, index: -1 };
+    const query = findQuery().trim();
+    if (!query) return { count: 0, index: -1 };
+    const needle = matchCase() ? query : query.toLowerCase();
+    const currentKey = `${activeCell().row}:${activeCell().col}`;
+    let count = 0;
+    let index = -1;
+    for (const [key, cell] of sortedCellEntries()) {
+      if (!cellMatchesQuery(cell, needle)) continue;
+      if (key === currentKey) index = count;
+      count += 1;
+    }
+    return { count, index };
+  });
 
   const replaceCurrentCell = async () => {
     const query = findQuery().trim();
@@ -3202,7 +3397,7 @@ export function SheetEditor(props: SheetEditorProps) {
             format={activeStyle()?.format || "general"}
           </div>
           <div>Colors: {activeStyle()?.fontColor || "default"} / {activeStyle()?.bgColor || "none"}</div>
-          <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "8px", "margin-top": "2px" }}>
+          <div class="sheet-panel-section" style={{ "margin-top": "2px" }}>
             <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "12px" }}>
               Cell hyperlink
               <input
@@ -3228,7 +3423,7 @@ export function SheetEditor(props: SheetEditorProps) {
       icon: <IconStyles />,
       content: (
         <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
-          <div style={{ "font-weight": "600" }}>Named ranges</div>
+          <div class="sheet-panel-heading">Named ranges</div>
           <For each={namedRanges()}>
             {(nr) => (
               <div style={{ display: "flex", gap: "6px", "align-items": "center", "font-size": "12px" }}>
@@ -3257,9 +3452,9 @@ export function SheetEditor(props: SheetEditorProps) {
               Add named range
             </button>
           </div>
-          <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "8px", "margin-top": "4px" }}>
-            <div style={{ "font-weight": "600", "margin-bottom": "6px" }}>Conditional formatting</div>
-            <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "6px" }}>Applies to the current selection.</div>
+          <div class="sheet-panel-section" style={{ "margin-top": "4px" }}>
+            <div class="sheet-panel-heading">Conditional formatting</div>
+            <div class="sheet-panel-hint">Applies to the current selection.</div>
             <select
               class="g-toolbar-select"
               aria-label="Conditional formatting rule"
@@ -3292,15 +3487,15 @@ export function SheetEditor(props: SheetEditorProps) {
             <button type="button" class="g-toolbar-btn" style={{ width: "100%" }} onClick={addConditionalFormatRule}>Add rule</button>
             <For each={conditionalFormatting()}>
               {(rule, index) => (
-                <div style={{ display: "flex", "align-items": "center", gap: "5px", "font-size": "11px", "margin-top": "5px" }}>
+                <div class="sheet-panel-row">
                   <span style={{ flex: 1, overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>{rule.type} {rule.value || ""}</span>
                   <button type="button" class="g-toolbar-btn" aria-label={`Remove conditional formatting rule ${index() + 1}`} onClick={() => removeConditionalFormatRule(index())}>✕</button>
                 </div>
               )}
             </For>
-            <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "8px", "margin-top": "8px" }}>
-              <div style={{ "font-weight": "600", "margin-bottom": "6px" }}>Pivot summary</div>
-              <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "6px" }}>Select a source range with a header row, then choose the row and value columns.</div>
+            <div class="sheet-panel-section">
+              <div class="sheet-panel-heading">Pivot summary</div>
+              <div class="sheet-panel-hint">Select a source range with a header row, then choose the row and value columns.</div>
               <div style={{ display: "flex", gap: "5px" }}>
                 <label style={{ flex: 1, "font-size": "11px" }}>Row column
                   <input type="number" min="1" value={pivotRowField()} onInput={(e) => setPivotRowField(Math.max(1, Number(e.currentTarget.value) || 1))} class="g-toolbar-input" style={{ width: "100%" }} />
@@ -3331,16 +3526,16 @@ export function SheetEditor(props: SheetEditorProps) {
               <button type="button" class="g-toolbar-btn" style={{ width: "100%", "margin-top": "5px" }} onClick={createPivotTable}>Create pivot summary below selection</button>
               <For each={pivotTables()}>
                 {(pivot) => (
-                  <div style={{ display: "flex", "align-items": "center", gap: "5px", "font-size": "11px", "margin-top": "5px" }}>
+                  <div class="sheet-panel-row">
                     <span style={{ flex: 1 }}>Pivot {pivot.aggregation} · {pivot.outputRowCount || 0} rows</span>
                     <button type="button" class="g-toolbar-btn" aria-label={`Remove pivot ${pivot.id}`} onClick={() => removePivotTable(pivot.id)}>✕</button>
                   </div>
                 )}
               </For>
             </div>
-            <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "8px", "margin-top": "8px" }}>
-              <div style={{ "font-weight": "600", "margin-bottom": "6px" }}>What-if scenarios</div>
-              <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "6px" }}>Capture the selected cells, then apply a saved set of overrides later.</div>
+            <div class="sheet-panel-section">
+              <div class="sheet-panel-heading">What-if scenarios</div>
+              <div class="sheet-panel-hint">Capture the selected cells, then apply a saved set of overrides later.</div>
               <input
                 class="g-toolbar-input"
                 aria-label="Scenario name"
@@ -3352,7 +3547,7 @@ export function SheetEditor(props: SheetEditorProps) {
               <button type="button" class="g-toolbar-btn" style={{ width: "100%" }} onClick={captureScenario}>Capture selected cells</button>
               <For each={scenarios()}>
                 {(scenario) => (
-                  <div style={{ display: "flex", "align-items": "center", gap: "5px", "font-size": "11px", "margin-top": "5px" }}>
+                  <div class="sheet-panel-row">
                     <span style={{ flex: 1, overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>{scenario.name} · {scenario.changes.length} cells</span>
                     <button type="button" class="g-toolbar-btn" aria-label={`Apply scenario ${scenario.name}`} onClick={() => void applyScenario(scenario)}>Apply</button>
                     <button type="button" class="g-toolbar-btn" aria-label={`Delete scenario ${scenario.name}`} onClick={() => deleteScenario(scenario.id)}>✕</button>
@@ -3360,9 +3555,9 @@ export function SheetEditor(props: SheetEditorProps) {
                 )}
               </For>
             </div>
-            <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "8px", "margin-top": "8px" }}>
-              <div style={{ "font-weight": "600", "margin-bottom": "6px" }}>Slicers</div>
-              <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "6px" }}>Create a reusable value filter for the selected table range. An empty selection shows all values.</div>
+            <div class="sheet-panel-section">
+              <div class="sheet-panel-heading">Slicers</div>
+              <div class="sheet-panel-hint">Create a reusable value filter for the selected table range. An empty selection shows all values.</div>
               <div style={{ display: "flex", gap: "5px" }}>
                 <label style={{ flex: 1, "font-size": "11px" }}>Column
                   <input
@@ -3415,11 +3610,11 @@ export function SheetEditor(props: SheetEditorProps) {
                 }}
               </For>
             </div>
-            <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "8px", "margin-top": "8px" }}>
-              <div style={{ "font-weight": "600", "margin-bottom": "6px" }}>
+            <div class="sheet-panel-section">
+              <div class="sheet-panel-heading">
                 Comments {openCommentCount(cellComments()) > 0 ? `· ${openCommentCount(cellComments())} open` : ""}
               </div>
-              <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "6px" }}>
+              <div class="sheet-panel-hint">
                 Comments attach to the active cell and persist with the workbook.
               </div>
               <textarea
@@ -3616,12 +3811,15 @@ export function SheetEditor(props: SheetEditorProps) {
   ];
 
   return (
-    <div style={{ display: "flex", "flex-direction": "column", height: "100%", background: "var(--bg-surface)", overflow: "hidden" }}>
-      {/* Standard toolbar */}
-      <ToolbarRow>
+    <div class="sheet-root" style={{ display: "flex", "flex-direction": "column", height: "100%", background: "var(--bg-surface)", overflow: "hidden" }}>
+      {/* Standard toolbar — file/output | clipboard | history | data | visuals | structure */}
+      <ToolbarRow class="sheet-toolbar sheet-toolbar-main">
         <ToolbarButton title="New" onClick={() => props.onRequestNew?.()}><IconNew /></ToolbarButton>
         <ToolbarButton title="Open" onClick={() => props.onRequestOpen?.()}><IconFolderOpen /></ToolbarButton>
         <ToolbarButton title="Save" onClick={() => props.onRequestSave?.()}><IconSave /></ToolbarButton>
+        <ToolbarButton title="Import CSV" onClick={() => void importCsv()}>Import</ToolbarButton>
+        <ToolbarButton title="Export CSV" onClick={() => props.onExportCsv?.()}>Export</ToolbarButton>
+        <ToolbarSep />
         <ToolbarButton title="Export PDF" onClick={() => props.onRequestExportPdf?.()}><IconPdf /></ToolbarButton>
         <ToolbarButton title="Print" onClick={() => setPrintDialogOpen(true)}><IconPrint /></ToolbarButton>
         <ToolbarSep />
@@ -3645,6 +3843,8 @@ export function SheetEditor(props: SheetEditorProps) {
             ▾ {getColName(activeCell().col)}
           </ToolbarButton>
         </Show>
+        <ToolbarButton title="Fill down" onClick={() => void fillDown()}>Fill</ToolbarButton>
+        <ToolbarSep />
         <ToolbarButton title="Insert Chart" onClick={() => updateChart(chartType() ? null : "bar")} active={!!chartType()}><IconChart /></ToolbarButton>
         <ToolbarSelect
           ariaLabel="Chart type"
@@ -3669,10 +3869,6 @@ export function SheetEditor(props: SheetEditorProps) {
         <ToolbarSep />
         <ToolbarButton title="Freeze panes at selection" onClick={() => void freezeFromSelection()} active={freezeRows() > 0 || freezeCols() > 0}><IconFreeze /></ToolbarButton>
         <ToolbarButton title="Unfreeze panes" onClick={() => void unfreezePanes()} disabled={freezeRows() === 0 && freezeCols() === 0}>Unfreeze</ToolbarButton>
-        <ToolbarButton title="Fill down" onClick={() => void fillDown()}>Fill</ToolbarButton>
-        <ToolbarButton title="Import CSV" onClick={() => void importCsv()}>Import</ToolbarButton>
-        <ToolbarButton title="Export CSV" onClick={() => props.onExportCsv?.()}>Export</ToolbarButton>
-        <ToolbarButton title="Print…" onClick={() => setPrintDialogOpen(true)}><IconPrint /></ToolbarButton>
       </ToolbarRow>
 
       <SheetToolbar
@@ -3710,8 +3906,8 @@ export function SheetEditor(props: SheetEditorProps) {
           cellsBySheet: validationCellsBySheet,
           namedRanges,
           activeSheetName: () => sheets()[activeSheetIndex()]?.name ?? "",
-          containerRef,
-          formulaInputRef,
+          containerRef: () => containerRef,
+          formulaInputRef: (el) => (formulaInputRef = el),
         }}
       />
       <div
@@ -3737,8 +3933,8 @@ export function SheetEditor(props: SheetEditorProps) {
         }}>
           <GridCanvas
           {...{
-            containerRef,
-            canvasRef,
+            containerRef: (el) => (containerRef = el),
+            canvasRef: (el) => (canvasRef = el),
             scrollTop,
             scrollLeft,
             setScrollTop,
@@ -3756,11 +3952,13 @@ export function SheetEditor(props: SheetEditorProps) {
             pasteTsv,
             selectCell,
             moveActiveCell,
+            selectedBounds,
+            cursorForPoint,
             lastUsedCell,
             jumpToDataEdge,
             setEditing,
             setFormulaValue,
-            formulaInputRef,
+            formulaInputRef: () => formulaInputRef,
             handleCanvasClick,
             setContextMenu,
             emitEditorCommand,
@@ -3800,6 +3998,7 @@ export function SheetEditor(props: SheetEditorProps) {
         <Show when={editing()}>
           <input
             type="text"
+            class="sheet-cell-editor"
             spellcheck={props.spellcheckEnabled !== false}
             value={formulaValue()}
             onInput={(e) => setFormulaValue(e.currentTarget.value)}
@@ -3860,9 +4059,12 @@ export function SheetEditor(props: SheetEditorProps) {
           replaceWith={replaceWith()}
           showReplace={findReplaceMode()}
           matchCase={matchCase()}
+          matchCount={findMatchInfo().count}
+          matchIndex={findMatchInfo().index}
           onQueryChange={setFindQuery}
           onReplaceChange={setReplaceWith}
           onFindNext={findNextCell}
+          onFindPrev={findPrevCell}
           onReplace={() => void replaceCurrentCell()}
           onReplaceAll={() => void replaceAllCells()}
           onMatchCaseChange={setMatchCase}
@@ -3870,14 +4072,21 @@ export function SheetEditor(props: SheetEditorProps) {
         />
       </Show>
 
-      {/* Sheet Tabs */}
-      <footer class="g-sheet-tabs g-no-print">
+      {/* Sheet Tabs — rounded tabs docked to the grid, accent underline for
+          the active sheet (its tab color when set), dot swatch on inactive
+          colored tabs, drag to reorder. */}
+      <footer class="g-sheet-tabs sheet-tabs g-no-print" role="tablist" aria-label="Sheets">
         <For each={sheets()}>
           {(sheet, index) => {
             const active = () => index() === activeSheetIndex();
             return (
               <button
                 type="button"
+                role="tab"
+                aria-selected={active()}
+                class="sheet-tab"
+                classList={{ active: active() }}
+                style={{ "--sheet-tab-color": sheet.color || "var(--sheet-accent)" }}
                 draggable={true}
                 onDragStart={(e) => {
                   e.dataTransfer?.setData("text/redoc-sheet", String(index()));
@@ -3890,6 +4099,17 @@ export function SheetEditor(props: SheetEditorProps) {
                   const from = Number(e.dataTransfer?.getData("text/redoc-sheet"));
                   if (Number.isFinite(from)) reorderSheet(from, index());
                   e.preventDefault();
+                }}
+                onKeyDown={(e) => {
+                  // APG tab-strip arrow navigation: move focus between tabs.
+                  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+                  const sibling = e.key === "ArrowRight"
+                    ? e.currentTarget.nextElementSibling
+                    : e.currentTarget.previousElementSibling;
+                  if (sibling instanceof HTMLButtonElement && sibling.classList.contains("sheet-tab")) {
+                    e.preventDefault();
+                    sibling.focus();
+                  }
                 }}
                 onClick={() => {
                   const workbook = makeWorkbook(cellsData());
@@ -3939,19 +4159,10 @@ export function SheetEditor(props: SheetEditorProps) {
                   });
                   setContextMenu({ x: e.clientX, y: e.clientY, items });
                 }}
-                style={{
-                  padding: "2px 10px",
-                  height: "22px",
-                  "border-radius": "0",
-                  background: active() ? "var(--bg-surface)" : "transparent",
-                  border: active() ? "1px solid var(--border-color)" : "1px solid transparent",
-                  "border-bottom": active() ? "1px solid var(--bg-surface)" : "1px solid transparent",
-                  "border-top": sheet.color ? `3px solid ${sheet.color}` : undefined,
-                  "font-size": "11px",
-                  "font-weight": active() ? "600" : "400",
-                  color: active() ? "var(--text-primary)" : "var(--text-secondary)",
-                }}
               >
+                <Show when={sheet.color && !active()}>
+                  <span class="sheet-tab-dot" style={{ background: sheet.color }} aria-hidden="true" />
+                </Show>
                 {sheet.name}
               </button>
             );
@@ -3964,34 +4175,20 @@ export function SheetEditor(props: SheetEditorProps) {
         <div
           role="dialog"
           aria-label={`Filter column ${getColName(filterDropdownCol()!)}`}
-          style={{
-            position: "absolute",
-            top: "96px",
-            left: "56px",
-            "z-index": 40,
-            background: "var(--bg-surface)",
-            border: "1px solid var(--border-color)",
-            "border-radius": "6px",
-            "box-shadow": "var(--shadow-md)",
-            padding: "8px",
-            width: "220px",
-            "max-height": "280px",
-            overflow: "auto",
-          }}
+          class="sheet-filter-popover"
         >
-          <div style={{ display: "flex", gap: "6px", "margin-bottom": "8px" }}>
+          <div class="sheet-filter-actions">
             <button type="button" class="g-toolbar-btn" onClick={() => setColumnFilterAll(filterDropdownCol()!, true)}>Select All</button>
             <button type="button" class="g-toolbar-btn" onClick={() => setColumnFilterAll(filterDropdownCol()!, false)}>Clear</button>
           </div>
           <input
-            class="g-toolbar-input"
+            class="g-toolbar-input sheet-filter-search"
             aria-label="Search filter values"
             placeholder="Search values…"
             value={filterValueSearch()}
             onInput={(e) => setFilterValueSearch(e.currentTarget.value)}
-            style={{ width: "100%", "margin-bottom": "8px", height: "26px", padding: "0 8px", "box-sizing": "border-box" }}
           />
-          <div style={{ display: "flex", gap: "6px", "margin-bottom": "8px" }}>
+          <div class="sheet-filter-actions">
             <button
               type="button"
               class="g-toolbar-btn"
@@ -4020,7 +4217,7 @@ export function SheetEditor(props: SheetEditorProps) {
               const allowed = () => columnFilters()[col()] ?? all();
               const checked = () => allowed().includes(value);
               return (
-                <label style={{ display: "flex", gap: "8px", "align-items": "center", padding: "2px 0", "font-size": "12px" }}>
+                <label class="sheet-filter-option">
                   <input
                     type="checkbox"
                     checked={checked()}

@@ -31,53 +31,53 @@ export function Button(props: ParentProps<ButtonProps>) {
       case "secondary":
         return {
           background: "var(--bg-surface, #383838)",
-          color: "var(--accent-color, #66b3ff)",
+          color: "var(--text-primary, #f5f5f5)",
           border: "1px solid var(--border-color, #555)",
-          "border-radius": "var(--radius-md, 6px)",
+          "border-radius": "var(--radius-md, 8px)",
         };
       case "ghost":
         return {
           background: "transparent",
           color: "var(--text-primary, #f5f5f5)",
           border: "1px solid transparent",
-          "border-radius": "var(--radius-md, 6px)",
+          "border-radius": "var(--radius-md, 8px)",
         };
       case "danger":
         return {
           background: "var(--g-red, #d93025)",
-          color: "#ffffff",
+          color: "var(--text-on-accent, #ffffff)",
           border: "none",
-          "border-radius": "var(--radius-md, 6px)",
+          "border-radius": "var(--radius-md, 8px)",
         };
       case "success":
         return {
           background: "var(--g-green, #22c55e)",
-          color: "#ffffff",
+          color: "var(--text-on-accent, #ffffff)",
           border: "none",
-          "border-radius": "var(--radius-md, 6px)",
+          "border-radius": "var(--radius-md, 8px)",
         };
       case "warning":
         return {
           background: "var(--g-yellow, #f59e0b)",
           color: "#000000",
           border: "none",
-          "border-radius": "var(--radius-md, 6px)",
+          "border-radius": "var(--radius-md, 8px)",
         };
       case "link":
         return {
           background: "transparent",
           color: "var(--text-link, #8ecbff)",
           border: "none",
-          "border-radius": "var(--radius-sm, 4px)",
+          "border-radius": "var(--radius-sm, 6px)",
           "text-decoration": "underline",
           "text-underline-offset": "2px",
         };
       case "share":
         return {
           background: "var(--accent-color, #66b3ff)",
-          color: "#ffffff",
+          color: "var(--text-on-accent, #ffffff)",
           border: "none",
-          "border-radius": "24px",
+          "border-radius": "var(--radius-full, 9999px)",
           "font-weight": "500",
         };
       default: // primary
@@ -152,7 +152,8 @@ export function Button(props: ParentProps<ButtonProps>) {
         cursor: isDisabled() ? "not-allowed" : "pointer",
         opacity: isDisabled() && !isLoading() ? 0.5 : 1,
         width: local.fullWidth ? "100%" : "auto",
-        transition: "background var(--duration-fast, 100ms) ease, box-shadow var(--duration-fast, 100ms) ease, opacity var(--duration-fast, 100ms) ease",
+        transition:
+          "background var(--duration-fast, 120ms) ease, box-shadow var(--duration-fast, 120ms) ease, opacity var(--duration-fast, 120ms) ease, transform var(--duration-fast, 120ms) ease",
         "white-space": "nowrap",
         "user-select": "none",
         ...sizeStyles(),

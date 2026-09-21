@@ -1,5 +1,5 @@
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { shortcutRegistry } from "./ShortcutRegistry";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { shortcutRegistry, type CommandItem } from "./ShortcutRegistry";
 import { IconSearch } from "@redoc/icons";
 import { t } from "@redoc/ui";
 
@@ -54,19 +54,45 @@ function scoreMatch(target: string, q: string): number {
   return score;
 }
 
+/** Split a shortcut declaration into per-key chips ("Ctrl+Shift+S" → 3 chips). */
+function shortcutParts(shortcut: string): string[] {
+  return shortcut.split("+").map((part) => (part === "" ? "+" : part));
+}
+
 export function CommandPalette(props: CommandPaletteProps) {
   const [query, setQuery] = createSignal("");
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  let previouslyFocused: Element | null = null;
+  let panelRef: HTMLDivElement | undefined;
+  let inputRef: HTMLInputElement | undefined;
+  let previouslyFocused: HTMLElement | null = null;
 
-  onMount(() => {
-    previouslyFocused = document.activeElement;
+  const isDisabled = (item: CommandItem) => item.disabled?.() ?? false;
+
+  // The component stays mounted — `open` only toggles the inner <Show>, so
+  // focus capture/restore must run per open/close, not on mount. Capture the
+  // previously focused element BEFORE moving focus into the palette, then give
+  // it back on close — unless the invoked command already moved focus itself
+  // (e.g. it opened a dialog).
+  createEffect(() => {
+    if (!props.open) return;
+    previouslyFocused =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setQuery("");
+    setSelectedIndex(0);
+    queueMicrotask(() => inputRef?.focus());
     onCleanup(() => {
-      if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
+      const el = previouslyFocused;
+      previouslyFocused = null;
+      if (!el || !el.isConnected) return;
+      const active = document.activeElement;
+      const focusInsidePalette = active instanceof Node && !!panelRef?.contains(active);
+      const focusLost =
+        !active || active === document.body || active === document.documentElement;
+      if (focusInsidePalette || focusLost) el.focus();
     });
   });
 
-  const filteredCommands = () => {
+  const filteredCommands = createMemo(() => {
     const q = query().toLowerCase().trim();
     const mode = props.activeMode || "home";
     const recents = loadRecentCommands();
@@ -93,9 +119,68 @@ export function CommandPalette(props: CommandPaletteProps) {
       .filter((x) => x.score > 0)
       .sort((a, b) => (b.score + b.recentBoost) - (a.score + a.recentBoost))
       .map((x) => x.item);
+  });
+
+  /** Flat results grouped into labelled sections (Recent first when idle). */
+  const groups = () => {
+    const searching = query().trim().length > 0;
+    const recents = new Set(loadRecentCommands());
+    const byLabel = new Map<string, { item: CommandItem; index: number }[]>();
+    filteredCommands().forEach((item, index) => {
+      const label =
+        !searching && recents.has(item.id)
+          ? "Recent"
+          : item.menuPath?.[0] ?? "Commands";
+      const bucket = byLabel.get(label);
+      if (bucket) bucket.push({ item, index });
+      else byLabel.set(label, [{ item, index }]);
+    });
+    return Array.from(byLabel, ([label, items]) => ({ label, items }));
   };
 
-  const runCommand = (item: { id: string; action: () => void }) => {
+  /** Move the highlight by `delta`, skipping disabled commands (Linear-style). */
+  const moveSelection = (delta: 1 | -1) => {
+    const list = filteredCommands();
+    const count = list.length;
+    if (!count) {
+      setSelectedIndex(0);
+      return;
+    }
+    let next = selectedIndex();
+    for (let i = 0; i < count; i++) {
+      next = (next + delta + count) % count;
+      if (!isDisabled(list[next])) break;
+    }
+    setSelectedIndex(next);
+  };
+
+  // Keep the highlight on a runnable item whenever the result set changes.
+  createEffect(() => {
+    const list = filteredCommands();
+    if (!list.length) {
+      if (selectedIndex() !== 0) setSelectedIndex(0);
+      return;
+    }
+    const idx = selectedIndex();
+    if (idx >= list.length || isDisabled(list[idx])) {
+      const fallback = list.findIndex((c) => !isDisabled(c));
+      setSelectedIndex(fallback >= 0 ? fallback : 0);
+    }
+  });
+
+  // Keep the highlighted option in view while arrow-keying.
+  createEffect(() => {
+    const idx = selectedIndex();
+    if (!props.open) return;
+    queueMicrotask(() => {
+      document
+        .getElementById(`cmd-palette-option-${idx}`)
+        ?.scrollIntoView?.({ block: "nearest" });
+    });
+  });
+
+  const runCommand = (item: CommandItem) => {
+    if (isDisabled(item)) return;
     saveRecentCommand(item.id);
     item.action();
     props.onClose();
@@ -105,15 +190,16 @@ export function CommandPalette(props: CommandPaletteProps) {
     const list = filteredCommands();
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setSelectedIndex((prev) => (prev + 1) % Math.max(1, list.length));
+      moveSelection(1);
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setSelectedIndex((prev) => (prev - 1 + list.length) % Math.max(1, list.length));
+      moveSelection(-1);
     } else if (e.key === "Enter") {
       e.preventDefault();
       const item = list[selectedIndex()];
       if (item) runCommand(item);
     } else if (e.key === "Escape") {
+      e.preventDefault();
       props.onClose();
     }
   };
@@ -124,50 +210,18 @@ export function CommandPalette(props: CommandPaletteProps) {
         role="dialog"
         aria-modal="true"
         aria-label={t("palette.searchLabel")}
-        style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: "rgba(0, 0, 0, 0.4)",
-          display: "flex",
-          "align-items": "flex-start",
-          "justify-content": "center",
-          "padding-top": "120px",
-          "z-index": "var(--z-modal)",
-          "backdrop-filter": "blur(3px)",
-        }}
+        class="ec-palette-overlay"
         onClick={(e) => {
           if (e.target === e.currentTarget) props.onClose();
         }}
       >
-        <div
-          style={{
-            background: "var(--bg-surface)",
-            border: "1px solid var(--border-color)",
-            "border-radius": "var(--radius-lg)",
-            width: "560px",
-            "max-width": "90vw",
-            "box-shadow": "var(--shadow-lg)",
-            overflow: "hidden",
-            display: "flex",
-            "flex-direction": "column",
-          }}
-          onKeyDown={handleKeyDown}
-        >
-          <div
-            style={{
-              display: "flex",
-              "align-items": "center",
-              gap: "10px",
-              padding: "12px 16px",
-              "border-bottom": "1px solid var(--border-color)",
-            }}
-          >
-            <IconSearch color="var(--text-muted)" />
+        <div class="ec-palette" ref={panelRef} onKeyDown={handleKeyDown}>
+          <div class="ec-palette-input-row">
+            <IconSearch width={16} height={16} color="var(--text-muted)" aria-hidden="true" />
             <input
+              ref={inputRef}
               type="text"
+              class="ec-palette-input"
               role="combobox"
               aria-expanded="true"
               aria-controls="cmd-palette-listbox"
@@ -175,66 +229,70 @@ export function CommandPalette(props: CommandPaletteProps) {
               aria-label={t("palette.searchLabel")}
               placeholder={t("palette.placeholder")}
               value={query()}
+              spellcheck={false}
+              autocomplete="off"
               onInput={(e) => {
                 setQuery(e.currentTarget.value);
                 setSelectedIndex(0);
               }}
-              autofocus
-              style={{
-                width: "100%",
-                background: "transparent",
-                border: "none",
-                color: "var(--text-primary)",
-                "font-size": "15px",
-              }}
             />
+            <kbd class="g-cmd-kbd ec-kbd ec-palette-esc" aria-hidden="true">esc</kbd>
           </div>
-          <div id="cmd-palette-listbox" role="listbox" aria-label={t("palette.searchLabel")} style={{ "max-height": "320px", "overflow-y": "auto", padding: "6px" }} aria-live="polite">
+          <div
+            id="cmd-palette-listbox"
+            role="listbox"
+            aria-label={t("palette.searchLabel")}
+            class="ec-palette-list"
+            aria-live="polite"
+          >
             <Show when={filteredCommands().length === 0}>
-              <div style={{ padding: "12px", color: "var(--text-muted)", "font-size": "13px" }}>{t("palette.noResults")}</div>
+              <div class="ec-palette-empty">{t("palette.noResults")}</div>
             </Show>
-            <div style={{ padding: "6px 12px", color: "var(--text-muted)", "font-size": "11px" }}>{t("palette.hint")}</div>
-            <For each={filteredCommands()}>
-              {(item, index) => {
-                const selected = () => index() === selectedIndex();
-                return (
-                  <div
-                    id={`cmd-palette-option-${index()}`}
-                    role="option"
-                    aria-selected={selected()}
-                    tabindex="-1"
-                    onClick={() => runCommand(item)}
-                    style={{
-                      display: "flex",
-                      "align-items": "center",
-                      "justify-content": "space-between",
-                      padding: "8px 12px",
-                      "border-radius": "var(--radius-md)",
-                      background: selected() ? "var(--accent-light)" : "transparent",
-                      color: selected() ? "var(--accent-color)" : "var(--text-primary)",
-                      cursor: "pointer",
-                      "font-size": "14px",
+            <For each={groups()}>
+              {(group) => (
+                <div class="ec-palette-group" role="group" aria-label={group.label}>
+                  <div class="ec-palette-group-label" aria-hidden="true">{group.label}</div>
+                  <For each={group.items}>
+                    {({ item, index }) => {
+                      const selected = () => index === selectedIndex();
+                      const disabled = () => isDisabled(item);
+                      return (
+                        <div
+                          id={`cmd-palette-option-${index}`}
+                          role="option"
+                          aria-selected={selected()}
+                          aria-disabled={disabled() || undefined}
+                          data-selected={selected()}
+                          tabindex="-1"
+                          class="ec-palette-item"
+                          onMouseEnter={() => {
+                            if (!disabled()) setSelectedIndex(index);
+                          }}
+                          onClick={() => runCommand(item)}
+                        >
+                          <span class="ec-palette-item-title">{item.title}</span>
+                          <Show when={item.shortcut}>
+                            <span class="ec-palette-kbds" aria-hidden="true">
+                              <For each={shortcutParts(item.shortcut!)}>
+                                {(part) => <kbd class="g-cmd-kbd ec-kbd">{part}</kbd>}
+                              </For>
+                            </span>
+                          </Show>
+                        </div>
+                      );
                     }}
-                  >
-                    <span>{item.title}</span>
-                    <Show when={item.shortcut}>
-                      <span
-                        style={{
-                          "font-size": "11px",
-                          "font-family": "var(--font-mono)",
-                          background: "var(--bg-tertiary)",
-                          padding: "2px 6px",
-                          "border-radius": "var(--radius-sm)",
-                          color: "var(--text-secondary)",
-                        }}
-                      >
-                        {item.shortcut}
-                      </span>
-                    </Show>
-                  </div>
-                );
-              }}
+                  </For>
+                </div>
+              )}
             </For>
+          </div>
+          <div class="ec-palette-footer">
+            <span class="ec-palette-hint">{t("palette.hint")}</span>
+            <span class="ec-palette-nav" aria-hidden="true">
+              <kbd class="g-cmd-kbd ec-kbd">↑</kbd>
+              <kbd class="g-cmd-kbd ec-kbd">↓</kbd>
+              <kbd class="g-cmd-kbd ec-kbd">↵</kbd>
+            </span>
           </div>
         </div>
       </div>

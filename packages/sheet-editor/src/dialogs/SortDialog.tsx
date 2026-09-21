@@ -20,7 +20,7 @@ export interface SortDialogProps {
 export function SortDialog(props: SortDialogProps) {
   return (
     <Dialog open={props.open} title="Sort" onClose={props.onClose}>
-      <div style={{ display: "flex", "flex-direction": "column", gap: "10px", "min-width": "280px" }}>
+      <div class="sheet-dialog-body" style={{ "min-width": "300px" }}>
         <For each={props.sortKeys}>
           {(key, index) => (
             <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
@@ -67,15 +67,16 @@ export function SortDialog(props: SortDialogProps) {
         <Show when={props.sortKeys.length < 3}>
           <button
             type="button"
-            class="g-toolbar-btn"
+            class="g-toolbar-btn sheet-btn"
+            style={{ "align-self": "flex-start" }}
             onClick={() => props.onSortKeysChange([...props.sortKeys, { col: props.activeCol, ascending: true }])}
           >
             Add level
           </button>
         </Show>
-        <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
-          <button type="button" class="g-toolbar-btn" onClick={props.onClose}>Cancel</button>
-          <button type="button" class="g-toolbar-btn" onClick={props.onApply}>Apply</button>
+        <div class="sheet-dialog-actions">
+          <button type="button" class="g-toolbar-btn sheet-btn" onClick={props.onClose}>Cancel</button>
+          <button type="button" class="g-toolbar-btn sheet-btn sheet-btn-primary" onClick={props.onApply}>Apply</button>
         </div>
       </div>
     </Dialog>

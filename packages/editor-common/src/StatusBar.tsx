@@ -36,62 +36,46 @@ export function StatusBar(props: StatusBarProps) {
     <footer
       data-pane="status"
       data-testid="statusbar"
-      class="g-no-print g-statusbar"
+      class="g-no-print g-statusbar ec-statusbar"
       role="contentinfo"
       aria-label={t("shell.panes.status")}
-      style={{
-        height: "var(--statusbar-h)",
-        background: "var(--bg-statusbar)",
-        "border-top": "1px solid var(--border-color)",
-        display: "flex",
-        "align-items": "center",
-        "justify-content": "space-between",
-        padding: "0 8px",
-        "font-size": "11px",
-        color: "var(--text-secondary)",
-        gap: "8px",
-        "flex-shrink": "0",
-      }}
     >
-      <div style={{ display: "flex", "align-items": "center", gap: "12px", "min-width": "0", overflow: "hidden" }}>
-        <span style={{ "font-weight": "500", color: "var(--text-primary)", "white-space": "nowrap" }}>{modeLabel()}</span>
+      <div class="ec-status-group">
+        <span class="ec-status-mode">{modeLabel()}</span>
         <span
           role="status"
           aria-live="polite"
           aria-atomic="true"
-          style={{
-            color:
-              props.saveState === "Error"
-                ? "var(--g-red)"
-                : props.saveState === "Dirty"
-                  ? "var(--g-orange)"
-                  : "var(--text-muted)",
-            "white-space": "nowrap",
-          }}
+          class="ec-status-save"
+          data-state={props.saveState}
         >
+          <span class="ec-status-dot" aria-hidden="true" />
           {saveLabel()}
         </span>
-        {props.wordCountInfo && (
+        <Show when={props.wordCountInfo}>
           <span
-            class="g-status-count"
+            class="g-status-count ec-status-words"
             aria-label={t("statusbar.wordCount")}
-            style={{ "white-space": "nowrap", overflow: "hidden", "text-overflow": "ellipsis" }}
           >
             {props.wordCountInfo}
           </span>
-        )}
+        </Show>
       </div>
 
-      <div style={{ display: "flex", "align-items": "center", gap: "12px", "flex-shrink": "0" }}>
-        <span aria-label={t("statusbar.pageStyle")}>{props.pageStyle || t("statusbar.defaultStyle")}</span>
-        <span aria-label={t("statusbar.language")}>{props.language || t("statusbar.english")}</span>
+      <div class="ec-status-group ec-status-mid">
+        <span class="ec-status-text" aria-label={t("statusbar.pageStyle")}>
+          {props.pageStyle || t("statusbar.defaultStyle")}
+        </span>
+        <span class="ec-status-sep" aria-hidden="true" />
+        <span class="ec-status-text" aria-label={t("statusbar.language")}>
+          {props.language || t("statusbar.english")}
+        </span>
       </div>
 
-      <div style={{ display: "flex", "align-items": "center", gap: "4px", "flex-shrink": "0" }}>
+      <div class="ec-status-group ec-status-zoom">
         <button
           type="button"
-          class="g-icon-btn"
-          style={{ width: "20px", height: "20px", "font-size": "12px" }}
+          class="g-icon-btn ec-zoom-btn"
           onClick={zoomOut}
           aria-label={t("statusbar.zoomOut")}
           disabled={props.zoomLevel <= 50}
@@ -104,22 +88,21 @@ export function StatusBar(props: StatusBarProps) {
           max="200"
           step="10"
           value={props.zoomLevel}
+          class="ec-zoom-range"
           aria-label={t("statusbar.zoom")}
           aria-valuetext={t("statusbar.zoomValue", { value: props.zoomLevel })}
           onInput={(e) => props.onZoomChange(Number(e.currentTarget.value))}
-          style={{ width: "80px", height: "14px" }}
         />
         <button
           type="button"
-          class="g-icon-btn"
-          style={{ width: "20px", height: "20px", "font-size": "12px" }}
+          class="g-icon-btn ec-zoom-btn"
           onClick={zoomIn}
           aria-label={t("statusbar.zoomIn")}
           disabled={props.zoomLevel >= 200}
         >
           +
         </button>
-        <span class="g-status-count" style={{ width: "36px", "text-align": "right", "font-size": "11px" }} aria-live="polite">
+        <span class="g-status-count ec-zoom-value" aria-live="polite">
           {props.zoomLevel}%
         </span>
       </div>

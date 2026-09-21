@@ -93,13 +93,13 @@ export function Dialog(props: ParentProps<DialogProps>) {
           left: 0,
           right: 0,
           bottom: 0,
-          background: "rgba(0, 0, 0, 0.5)",
+          background: "rgba(0, 0, 0, 0.48)",
           display: "flex",
           "align-items": "center",
           "justify-content": "center",
           "z-index": "var(--z-modal, 1000)",
-          "backdrop-filter": "blur(4px)",
-          animation: "fadeIn 0.2s ease-out",
+          "backdrop-filter": "blur(6px)",
+          animation: "fadeIn 0.18s ease-out",
         }}
         onClick={(e) => {
           if (e.target === e.currentTarget) props.onClose();
@@ -115,15 +115,17 @@ export function Dialog(props: ParentProps<DialogProps>) {
           style={{
             background: "var(--bg-surface)",
             border: "1px solid var(--border-color)",
-            "border-radius": "var(--radius-lg, 8px)",
-            padding: "var(--space-5, 20px)",
+            "border-radius": "var(--radius-lg, 12px)",
+            padding: "var(--space-6, 24px)",
             width: "480px",
             "max-width": "90vw",
-            "box-shadow": "var(--shadow-lg)",
+            "max-height": "85vh",
+            "overflow-y": "auto",
+            "box-shadow": "var(--shadow-xl)",
             display: "flex",
             "flex-direction": "column",
             gap: "var(--space-4, 16px)",
-            animation: "fadeInScale 0.2s ease-out",
+            animation: "fadeInScale 0.18s ease-out",
           }}
         >
           <div style={{ display: "flex", "justify-content": "space-between", "align-items": "center" }}>

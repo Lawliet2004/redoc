@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseTsv, serializeTsv } from "@redoc/utils";
+import { parseTsv } from "@redoc/utils";
 import { buildWorkbookFromCells } from "./sheetModel";
 import type { GridCell } from "./sheetTypes";
 
@@ -335,14 +335,12 @@ describe("buildWorkbookFromCells", () => {
   });
 });
 
-describe("TSV round-trip via @redoc/utils", () => {
-  it("parseTsv and serializeTsv round-trip sheet clipboard data", () => {
-    const data = [
+describe("TSV parsing via @redoc/utils", () => {
+  it("parseTsv splits clipboard data into rows and fields", () => {
+    expect(parseTsv("Name\tQty\tPrice\nWidget\t3\t9.99\nGadget\t1\t4.50")).toEqual([
       ["Name", "Qty", "Price"],
       ["Widget", "3", "9.99"],
       ["Gadget", "1", "4.50"],
-    ];
-    const tsv = serializeTsv(data);
-    expect(parseTsv(tsv)).toEqual(data);
+    ]);
   });
 });

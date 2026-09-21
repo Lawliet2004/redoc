@@ -1,13 +1,12 @@
 import { createEffect, createSignal, onCleanup, onMount, Show, For } from "solid-js";
 import { EditorState, Plugin, TextSelection, NodeSelection } from "prosemirror-state";
 import { Decoration, DecorationSet, EditorView } from "prosemirror-view";
-import { Schema, MarkSpec, NodeSpec, Mark, Node, Fragment, Slice, DOMSerializer } from "prosemirror-model";
-import { schema as basicSchema } from "prosemirror-schema-basic";
-import { addListNodes, wrapInList, sinkListItem, liftListItem } from "prosemirror-schema-list";
+import { Schema, Mark, Node, Fragment, Slice, DOMSerializer } from "prosemirror-model";
+import { wrapInList, sinkListItem, liftListItem } from "prosemirror-schema-list";
 import { history, undo, redo } from "prosemirror-history";
 import { inputRules, wrappingInputRule, smartQuotes, emDash, ellipsis } from "prosemirror-inputrules";
 import { keymap } from "prosemirror-keymap";
-import { baseKeymap, toggleMark, setBlockType } from "prosemirror-commands";
+import { baseKeymap, toggleMark, setBlockType, wrapIn, lift } from "prosemirror-commands";
 import {
   columnResizing,
   tableEditing,
@@ -26,16 +25,10 @@ import {
 import { Dialog, showToast } from "@redoc/ui";
 import { PrintPreview } from "./PrintPreview";
 import {
-  IconBold, IconItalic, IconUnderline, IconStrikethrough, IconAlignLeft, IconAlignCenter,
-  IconAlignRight, IconAlignJustify, IconList, IconOrderedList, IconUndo, IconRedo, IconSearch,
-  IconNew, IconFolderOpen, IconSave, IconPdf, IconPrint, IconCut, IconCopy, IconPaste,
-  IconTable, IconImage, IconLink, IconIndent, IconOutdent, IconClearFormat, IconSuperscript,
-  IconSubscript, IconTextColor, IconHighlight, IconLineSpacing, IconProperties, IconPage,
-  IconStyles, IconGallery, IconNavigator,
+  IconList, IconLink, IconProperties, IconPage, IconStyles, IconGallery, IconNavigator,
 } from "@redoc/icons";
 import {
-  ToolbarRow, ToolbarButton, ToolbarSep, ToolbarSelect, ToolbarColor,
-  Ruler, FindBar, IconSidebar, type SidebarPanel,
+  Ruler, IconSidebar, type SidebarPanel,
   ContextMenu, type ContextMenuItem,
   EDITOR_COMMAND, type EditorCommandDetail, emitEditorCommand,
 } from "@redoc/editor-common";
@@ -51,7 +44,6 @@ import { normalizeDocLink } from "./links";
 import { documentFieldResult, normalizeDocumentFieldKind, type DocumentFieldKind } from "./fields";
 import { buildTocContent, sanitizeTocAnchor, type TocEntry } from "./toc";
 import type { DocContent, DocEditorProps, ReviewComment, TableCommandState } from "./types";
-import { mapReviewCommentAnchors } from "./review";
 import { compareDocContent, findCompareSource } from "./compare";
 import {
   BUILT_IN_STYLES,
@@ -82,6 +74,26 @@ import {
 } from "./trackedChanges";
 
 import { mySchema } from "./schema";
+import "./doc-editor.css";
+
+/** Comment glyph — lucide "message-square" in the shared stroke style. */
+function IconComment() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
 
 function buildDocJson(
   doc: Node,
@@ -343,6 +355,9 @@ export function DocEditor(props: DocEditorProps) {
   let view: EditorView | null = null;
   let lastEmittedJson = "";
   const [findOpen, setFindOpen] = createSignal(false);
+  // Controlled sidebar panel so chrome (e.g. the floating find bar) can
+  // measure how much horizontal space the inspector is occupying.
+  const [sidebarPanel, setSidebarPanel] = createSignal<string | null>("properties");
   const [findQuery, setFindQuery] = createSignal("");
   const [replaceWith, setReplaceWith] = createSignal("");
   const [matchCount, setMatchCount] = createSignal(0);
@@ -375,6 +390,12 @@ export function DocEditor(props: DocEditorProps) {
   const [printPreviewOpen, setPrintPreviewOpen] = createSignal(false);
   const [selectedImage, setSelectedImage] = createSignal<{ pos: number; width: number; height: number } | null>(null);
   const [contextMenu, setContextMenu] = createSignal<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+  // Floating card shown when a hyperlink is clicked: gives external links an
+  // explicit open/copy/remove affordance instead of silently swallowing clicks.
+  const [linkPopover, setLinkPopover] = createSignal<{ left: number; top: number; href: string; pos: number } | null>(null);
+  // Toolbar toggle indicators, refreshed from the selection on every transaction.
+  const [activeMarks, setActiveMarks] = createSignal<Record<string, boolean>>({});
+  const [activeList, setActiveList] = createSignal<string | null>(null);
 
   const [painterState, setPainterState] = createSignal<"idle" | "armed" | "locked">("idle");
   const [storedMarks, setStoredMarks] = createSignal<Mark[]>([]);
@@ -452,19 +473,26 @@ export function DocEditor(props: DocEditorProps) {
     const blockAttrs = styleBlockAttrs(style);
     const inlineMarks = styleInlineAttrs(style).map((mark) => state.schema.marks[mark.type].create(mark.attrs));
     const { from, to } = state.selection;
+    const $from = state.selection.$from;
+    // A collapsed caret sits *inside* its textblock, so the block can start
+    // more than one step behind `from`; anchor the lower bound at the caret's
+    // parent block so styles also apply when nothing is selected.
+    const minPos = $from.depth > 0 ? Math.min(from - 1, $from.before($from.depth)) : from - 1;
     let tr = state.tr;
     if (style.blockType === "heading") {
       const headingType = state.schema.nodes.heading;
       if (headingType) {
         state.doc.nodesBetween(from, to, (node, pos) => {
-          if (node.isBlock && pos >= from - 1 && pos < to) {
+          // Textblocks only — converting a list_item/blockquote wrapper would
+          // shred the structure around the paragraph instead of restyling it.
+          if (node.isTextblock && pos >= minPos && pos < to) {
             tr = tr.setNodeMarkup(tr.mapping.map(pos), headingType, { ...node.attrs, ...blockAttrs, level: style.headingLevel ?? 1 });
           }
         });
       }
     } else {
       state.doc.nodesBetween(from, to, (node, pos) => {
-        if ((node.type.name === "paragraph" || node.type.name === "heading") && pos >= from - 1 && pos < to) {
+        if ((node.type.name === "paragraph" || node.type.name === "heading") && pos >= minPos && pos < to) {
           tr = tr.setNodeMarkup(tr.mapping.map(pos), state.schema.nodes.paragraph, {
             ...node.attrs,
             ...blockAttrs,
@@ -768,7 +796,10 @@ export function DocEditor(props: DocEditorProps) {
   const openCommentDialog = () => {
     withView((v) => {
       const { from, to } = v.state.selection;
-      if (from === to) return;
+      if (from === to) {
+        showToast("Select some text first — comments anchor to a selection.", "info");
+        return;
+      }
       setCommentAnchor({ from, to });
       setCommentDraft("");
       setCommentDialogOpen(true);
@@ -983,6 +1014,17 @@ export function DocEditor(props: DocEditorProps) {
             setFindOpen(true);
             return true;
           },
+          "Escape": () => {
+            if (linkPopover()) {
+              setLinkPopover(null);
+              return true;
+            }
+            if (findOpen()) {
+              closeFind();
+              return true;
+            }
+            return false;
+          },
           "Mod-z": undo,
           "Mod-y": redo,
           "Mod-Shift-z": redo,
@@ -997,18 +1039,49 @@ export function DocEditor(props: DocEditorProps) {
         const newState = view!.state.apply(transaction);
         view!.updateState(newState);
 
-        const parent = newState.selection.$from.parent;
+        const sel$from = newState.selection.$from;
+        const parent = sel$from.parent;
         let bType = "paragraph";
         if (parent.type.name === "heading") {
           bType = `heading${parent.attrs.level || 1}`;
         } else if (parent.type.name === "code_block") {
           bType = "code_block";
-        } else if (parent.type.name === "blockquote") {
-          bType = "blockquote";
-        } else if (parent.type.name === "paragraph") {
-          bType = "paragraph";
+        } else {
+          // A blockquote is a wrapper, never the direct parent — walk the
+          // ancestors so the style picker reflects "Block Quote".
+          for (let d = sel$from.depth - 1; d > 0; d--) {
+            if (sel$from.node(d).type.name === "blockquote") {
+              bType = "blockquote";
+              break;
+            }
+          }
         }
         setCurrentBlockType(bType);
+
+        // Toolbar toggle states: marks at the caret (or anywhere in the
+        // selection) light up B/I/U/S/link; the innermost list ancestor
+        // lights up the matching list button.
+        const nextActiveMarks: Record<string, boolean> = {};
+        const selFrom = newState.selection.from;
+        const selTo = newState.selection.to;
+        const cursorMarks = newState.storedMarks || sel$from.marks();
+        for (const markName of ["bold", "italic", "underline", "strike", "link"]) {
+          const markType = mySchema.marks[markName];
+          if (!markType) continue;
+          nextActiveMarks[markName] = newState.selection.empty
+            ? cursorMarks.some((m) => m.type === markType)
+            : newState.doc.rangeHasMark(selFrom, selTo, markType);
+        }
+        setActiveMarks(nextActiveMarks);
+        let listName: string | null = null;
+        for (let d = sel$from.depth; d > 0; d--) {
+          const nodeName = sel$from.node(d).type.name;
+          if (nodeName === "bullet_list" || nodeName === "ordered_list") {
+            listName = nodeName;
+            break;
+          }
+        }
+        setActiveList(listName);
 
         if (parent.attrs && parent.attrs.lineHeight !== undefined) {
           setCurrentLineSpacing(String(parent.attrs.lineHeight));
@@ -1025,17 +1098,19 @@ export function DocEditor(props: DocEditorProps) {
         }
 
         if (transaction.docChanged && comments().length > 0) {
-          setComments((previous) => mapReviewCommentAnchors(
-            previous,
-            (position) => transaction.mapping.map(position, 1),
-            (position) => transaction.mapping.map(position, -1),
-          ));
+          setComments((previous) => previous.map((comment) => ({
+            ...comment,
+            from: transaction.mapping.map(comment.from, 1),
+            to: transaction.mapping.map(comment.to, -1),
+          })));
         }
 
         if (transaction.docChanged) {
           lastStatusJson = buildDocJson(newState.doc, pageSetup(), comments(), customStyles(), footnotes());
         }
         refreshStatus(lastStatusJson, transaction.docChanged);
+        // Editing invalidates the anchored position of the link card.
+        if (transaction.docChanged && linkPopover()) setLinkPopover(null);
         // Keep footnote labels in sync with reference order after edits
         // (debounced; the notes array feeds the next document emit).
         if (transaction.docChanged && footnotes().length > 0) {
@@ -1108,8 +1183,10 @@ export function DocEditor(props: DocEditorProps) {
           const { from } = newState.selection;
           const coords = view!.coordsAtPos(from);
           setBubbleVisible(true);
-          setBubbleTop(coords.top);
-          setBubbleLeft(coords.left);
+          // Keep the pill on-screen: never slide under the toolbar or off the
+          // left/right viewport edges.
+          setBubbleTop(Math.max(coords.top, 96));
+          setBubbleLeft(Math.min(Math.max(coords.left, 120), Math.max(120, window.innerWidth - 120)));
         } else {
           setBubbleVisible(false);
         }
@@ -1147,18 +1224,39 @@ export function DocEditor(props: DocEditorProps) {
         }
         return false;
       },
-      handleClick(clickedView, _position, event) {
+      handleClick(clickedView, position, event) {
         const target = event.target instanceof Element ? event.target.closest("a") : null;
         const href = target?.getAttribute("href");
         const normalized = href ? normalizeDocLink(href) : null;
-        if (!normalized?.startsWith("internal:")) return false;
-        const bookmarkPosition = findBookmarkPosition(clickedView.state.doc, normalized.slice("internal:".length));
-        if (bookmarkPosition == null) return false;
-        clickedView.dispatch(
-          clickedView.state.tr
-            .setSelection(TextSelection.create(clickedView.state.doc, bookmarkPosition))
-            .scrollIntoView(),
-        );
+        if (!normalized) {
+          // Any click that isn't on a link dismisses the link card.
+          if (linkPopover()) setLinkPopover(null);
+          return false;
+        }
+        if (normalized.startsWith("internal:")) {
+          const bookmarkPosition = findBookmarkPosition(clickedView.state.doc, normalized.slice("internal:".length));
+          if (bookmarkPosition == null) return false;
+          setLinkPopover(null);
+          clickedView.dispatch(
+            clickedView.state.tr
+              .setSelection(TextSelection.create(clickedView.state.doc, bookmarkPosition))
+              .scrollIntoView(),
+          );
+          return true;
+        }
+        // External link: show the open/copy/remove affordance instead of
+        // letting the webview navigate away from the document.
+        try {
+          const coords = clickedView.coordsAtPos(position);
+          setLinkPopover({
+            left: Math.max(12, Math.min(event.clientX, window.innerWidth - 320)),
+            top: Math.min(coords.bottom + 8, Math.max(80, window.innerHeight - 110)),
+            href: normalized,
+            pos: position,
+          });
+        } catch {
+          setLinkPopover({ left: event.clientX, top: event.clientY + 8, href: normalized, pos: position });
+        }
         return true;
       },
     });
@@ -1246,6 +1344,127 @@ export function DocEditor(props: DocEditorProps) {
     if (view) fn(view);
   };
 
+  /**
+   * Open an external URL. Prefer the Tauri shell plugin when the desktop
+   * shell exposes it; fall back to a plain new window (dev/browser path).
+   */
+  const openExternalHref = (href: string) => {
+    const tauriInvoke = (window as unknown as {
+      __TAURI_INTERNALS__?: { invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> };
+    }).__TAURI_INTERNALS__?.invoke;
+    if (tauriInvoke) {
+      tauriInvoke("plugin:shell|open", { path: href }).then(
+        () => setLinkPopover(null),
+        () => {
+          const opened = window.open(href, "_blank", "noopener,noreferrer");
+          if (opened) setLinkPopover(null);
+          else showToast("Couldn't open the link — try copying it instead.", "warning");
+        },
+      );
+      return;
+    }
+    const opened = window.open(href, "_blank", "noopener,noreferrer");
+    if (opened) setLinkPopover(null);
+    else showToast("Couldn't open the link — try copying it instead.", "warning");
+  };
+
+  const displayHref = (href: string): string => {
+    try {
+      const url = new URL(href);
+      const path = url.pathname === "/" ? "" : url.pathname;
+      return (url.hostname + path + url.search).slice(0, 72);
+    } catch {
+      return href.slice(0, 72);
+    }
+  };
+
+  const copyLinkToClipboard = (href: string) => {
+    const done = () => {
+      showToast("Link copied to clipboard", "success");
+      setLinkPopover(null);
+    };
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(href).then(
+        done,
+        () => showToast("Couldn't copy the link.", "warning"),
+      );
+    } else {
+      showToast("Couldn't copy the link.", "warning");
+    }
+  };
+
+  /** Extend `pos` to the full contiguous range of the link mark containing it. */
+  const linkRangeAt = (state: EditorState, pos: number, href: string): { from: number; to: number } | null => {
+    try {
+      const $pos = state.doc.resolve(pos);
+      let from = -1;
+      let to = -1;
+      let runFrom = -1;
+      let runTo = -1;
+      $pos.parent.forEach((child, offset) => {
+        if (!child.isText) return;
+        const start = $pos.start() + offset;
+        const end = start + child.nodeSize;
+        const linked = child.marks.some((m) => m.type.name === "link" && m.attrs.href === href);
+        if (linked) {
+          if (runFrom < 0) runFrom = start;
+          runTo = end;
+          if (pos >= start && pos <= end) {
+            from = runFrom;
+            to = runTo;
+          }
+        } else {
+          runFrom = -1;
+          runTo = -1;
+        }
+      });
+      return from >= 0 ? { from, to } : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const removeLinkAt = (pos: number, href: string) => {
+    withView((v) => {
+      const range = linkRangeAt(v.state, pos, href);
+      if (range) v.dispatch(v.state.tr.removeMark(range.from, range.to, mySchema.marks.link));
+    });
+    setLinkPopover(null);
+  };
+
+  /**
+   * Prefill the link dialog with the clicked URL and drop the old mark so the
+   * dialog's apply path writes the edited href (toggleMark would strip it).
+   */
+  const editLinkFromPopover = () => {
+    const pop = linkPopover();
+    if (!pop || !view) return;
+    const range = linkRangeAt(view.state, pop.pos, pop.href);
+    setLinkHref(pop.href);
+    setLinkError("");
+    setLinkPopover(null);
+    if (range) {
+      view.dispatch(
+        view.state.tr
+          .removeMark(range.from, range.to, mySchema.marks.link)
+          .setSelection(TextSelection.create(view.state.doc, range.from, range.to)),
+      );
+    }
+    setLinkDialogOpen(true);
+  };
+
+  // Clicking anywhere outside the link card dismisses it.
+  createEffect(() => {
+    if (!linkPopover()) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Element && event.target.closest(".doc-link-pop"))) {
+        setLinkPopover(null);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    onCleanup(() => document.removeEventListener("pointerdown", onPointerDown, true));
+  });
+
   const trackedStats = () => {
     trackedChangeRevision();
     return view
@@ -1317,18 +1536,51 @@ export function DocEditor(props: DocEditorProps) {
 
   const execBlockType = (type: string) => {
     withView((v) => {
+      if (type === "blockquote") {
+        // Blockquote is a wrapper node, not a textblock — setBlockType would
+        // throw. Wrap the selection, or lift out when already quoted.
+        const quoteType = mySchema.nodes.blockquote;
+        if (!quoteType) return;
+        const { $from } = v.state.selection;
+        for (let d = $from.depth - 1; d > 0; d--) {
+          if ($from.node(d).type.name === "blockquote") {
+            lift(v.state, v.dispatch);
+            return;
+          }
+        }
+        wrapIn(quoteType)(v.state, v.dispatch);
+        return;
+      }
       if (type.startsWith("heading")) {
         const level = Number(type.replace("heading", "")) || 1;
         setBlockType(mySchema.nodes.heading, { level })(v.state, v.dispatch);
         return;
       }
       const nodeType = mySchema.nodes[type];
-      if (nodeType) setBlockType(nodeType)(v.state, v.dispatch);
+      // Guard: only true textblocks may be setBlockType targets.
+      if (nodeType?.isTextblock) setBlockType(nodeType)(v.state, v.dispatch);
     });
   };
 
   const execList = (type: "bullet_list" | "ordered_list") => {
-    withView((v) => wrapInList(mySchema.nodes[type])(v.state, v.dispatch));
+    withView((v) => {
+      const { $from } = v.state.selection;
+      // Find the innermost list wrapping the selection start.
+      for (let d = $from.depth; d > 0; d--) {
+        const node = $from.node(d);
+        if (node.type.name !== "bullet_list" && node.type.name !== "ordered_list") continue;
+        if (node.type.name === type) {
+          // Same kind → toggle off: lift the item(s) out of the list.
+          liftListItem(mySchema.nodes.list_item)(v.state, v.dispatch);
+        } else {
+          // Other kind → convert the enclosing list in place (bullet ↔ numbered).
+          const tr = v.state.tr.setNodeMarkup($from.before(d), mySchema.nodes[type]);
+          if (tr.docChanged) v.dispatch(tr);
+        }
+        return;
+      }
+      wrapInList(mySchema.nodes[type])(v.state, v.dispatch);
+    });
   };
 
   const execColor = (markName: "color" | "highlight", color: string) => {
@@ -1793,6 +2045,21 @@ export function DocEditor(props: DocEditorProps) {
     });
   };
 
+  /**
+   * Closing the bar also clears the query: the find plugin decorates on any
+   * non-empty query, so highlights would otherwise stay painted in the doc.
+   */
+  const closeFind = () => {
+    setFindOpen(false);
+    if (findQuery() || matchCount()) {
+      setFindQuery("");
+      setMatchCount(0);
+      setMatchIndex(0);
+      refreshMatchDecorations();
+    }
+    view?.focus();
+  };
+
   const handleSearch = () => {
     if (!view || !findQuery()) {
       setMatchCount(0);
@@ -1867,14 +2134,18 @@ export function DocEditor(props: DocEditorProps) {
       title: "Properties",
       icon: <IconProperties />,
       content: (
-        <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
-          <div><strong>Character</strong></div>
-          <div>Font: {fontFamily()}</div>
-          <div>Size: {fontSize()} pt</div>
-          <div><strong>Paragraph</strong></div>
-          <div>Alignment / indent via toolbar</div>
-          <div style={{ "margin-top": "8px" }}>
-            <label style={{ display: "block", "margin-bottom": "4px" }}>Layout</label>
+        <div class="doc-panel">
+          <div class="doc-panel-section">
+            <div class="doc-panel-title">Character</div>
+            <div class="doc-panel-kv"><span class="k">Font</span><span class="v">{fontFamily()}</span></div>
+            <div class="doc-panel-kv"><span class="k">Size</span><span class="v">{fontSize()} pt</span></div>
+          </div>
+          <div class="doc-panel-section">
+            <div class="doc-panel-title">Paragraph</div>
+            <div class="doc-panel-muted">Alignment and indent live on the toolbar.</div>
+          </div>
+          <div class="doc-panel-section">
+            <div class="doc-panel-title">Layout</div>
             <select
               class="g-toolbar-select"
               value={layoutMode()}
@@ -1884,10 +2155,10 @@ export function DocEditor(props: DocEditorProps) {
               <option value="paginated">Print layout</option>
               <option value="focused">Web / pageless</option>
             </select>
+            <button type="button" class="g-toolbar-btn" style={{ width: "100%", "justify-content": "flex-start" }} onClick={insertPageBreak}>
+              Insert page break
+            </button>
           </div>
-          <button type="button" class="g-toolbar-btn" style={{ width: "100%", "justify-content": "flex-start" }} onClick={insertPageBreak}>
-            Insert page break
-          </button>
         </div>
       ),
     },
@@ -1896,15 +2167,24 @@ export function DocEditor(props: DocEditorProps) {
       title: "Page",
       icon: <IconPage />,
       content: (
-        <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
-          <div>Page style: Default</div>
-          <div>Format: <span style={{ "text-transform": "capitalize" }}>{pageSetup().paperSize}</span> ({paperDimensions().width} × {paperDimensions().height})</div>
-          <div>Margins: {pageSetup().margins.top}″ / {pageSetup().margins.bottom}″ / {pageSetup().margins.left}″ / {pageSetup().margins.right}″</div>
-          <div>Orientation: <span style={{ "text-transform": "capitalize" }}>{pageSetup().orientation}</span></div>
-          <div>Text columns: {Math.max(1, Math.min(4, pageSetup().columns || 1))}</div>
-          <div>Pages: {pageCount()}</div>
-          <button type="button" class="g-toolbar-btn" onClick={() => setPageSetupOpen(true)}>
-             Page Setup…
+        <div class="doc-panel">
+          <div class="doc-panel-section">
+            <div class="doc-panel-title">Page</div>
+            <div class="doc-panel-kv"><span class="k">Style</span><span class="v">Default</span></div>
+            <div class="doc-panel-kv">
+              <span class="k">Format</span>
+              <span class="v" style={{ "text-transform": "capitalize" }}>{pageSetup().paperSize} · {paperDimensions().width} × {paperDimensions().height}</span>
+            </div>
+            <div class="doc-panel-kv">
+              <span class="k">Margins</span>
+              <span class="v">{pageSetup().margins.top}″ / {pageSetup().margins.bottom}″ / {pageSetup().margins.left}″ / {pageSetup().margins.right}″</span>
+            </div>
+            <div class="doc-panel-kv"><span class="k">Orientation</span><span class="v" style={{ "text-transform": "capitalize" }}>{pageSetup().orientation}</span></div>
+            <div class="doc-panel-kv"><span class="k">Text columns</span><span class="v">{Math.max(1, Math.min(4, pageSetup().columns || 1))}</span></div>
+            <div class="doc-panel-kv"><span class="k">Pages</span><span class="v">{pageCount()}</span></div>
+          </div>
+          <button type="button" class="g-toolbar-btn" style={{ width: "100%", "justify-content": "flex-start" }} onClick={() => setPageSetupOpen(true)}>
+            Page Setup…
           </button>
         </div>
       ),
@@ -1914,30 +2194,32 @@ export function DocEditor(props: DocEditorProps) {
       title: "Styles",
       icon: <IconStyles />,
       content: (
-        <div style={{ display: "flex", "flex-direction": "column", gap: "4px" }}>
-          <For each={availableStyles()}>
-            {(style) => (
-              <button
-                type="button"
-                class="g-toolbar-btn"
-                title={`Apply ${style.name}`}
-                style={{
-                  "justify-content": "flex-start",
-                  width: "100%",
-                  height: "auto",
-                  padding: "4px 6px",
-                  background: activeStyleId() === style.id ? "var(--bg-selected, #505050)" : "transparent",
-                  "font-weight": style.bold ? "bold" : undefined,
-                  "font-style": style.italic ? "italic" : undefined,
-                  color: style.color || undefined,
-                }}
-                onClick={() => applyNamedStyle(style.id)}
-              >
-                {style.name}
-              </button>
-            )}
-          </For>
-          <div style={{ "border-top": "1px solid var(--border-color)", "margin-top": "4px", "padding-top": "6px" }}>
+        <div class="doc-panel">
+          <div class="doc-panel-section">
+            <div class="doc-panel-title">Paragraph styles</div>
+            <For each={availableStyles()}>
+              {(style) => (
+                <button
+                  type="button"
+                  class={`doc-style-item${activeStyleId() === style.id ? " active" : ""}`}
+                  title={`Apply ${style.name}`}
+                  aria-pressed={activeStyleId() === style.id}
+                  style={{
+                    "font-weight": style.bold ? "700" : undefined,
+                    "font-style": style.italic ? "italic" : undefined,
+                    color: style.color || undefined,
+                  }}
+                  onClick={() => applyNamedStyle(style.id)}
+                >
+                  <span>{style.name}</span>
+                  <span class="hint">
+                    {style.blockType === "heading" ? `H${style.headingLevel ?? 1}` : style.builtIn ? "" : "Custom"}
+                  </span>
+                </button>
+              )}
+            </For>
+          </div>
+          <div class="doc-panel-section">
             <button
               type="button"
               class="g-toolbar-btn"
@@ -1946,7 +2228,7 @@ export function DocEditor(props: DocEditorProps) {
             >
               + New style from selection
             </button>
-            <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-top": "4px" }}>
+            <div class="doc-panel-muted">
               Named styles persist through DOCX round-trips as Word styles.
             </div>
           </div>
@@ -1958,7 +2240,7 @@ export function DocEditor(props: DocEditorProps) {
       title: "Footnotes",
       icon: <IconList />,
       content: (
-        <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+        <div class="doc-panel">
           <button
             type="button"
             class="g-toolbar-btn"
@@ -1969,9 +2251,9 @@ export function DocEditor(props: DocEditorProps) {
           </button>
           <For each={footnotes()}>
             {(note) => (
-              <div style={{ display: "flex", "flex-direction": "column", gap: "3px", padding: "4px", background: "var(--bg-tertiary)", "border-radius": "4px" }}>
-                <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
-                  <span style={{ "font-size": "12px", "font-weight": "600", color: "var(--doc-accent)" }}>{note.label}.</span>
+              <div class="doc-footnote-card">
+                <div class="doc-footnote-head">
+                  <span class="doc-footnote-label">{note.label}.</span>
                   <span style={{ flex: 1 }} />
                   <button
                     type="button"
@@ -1995,7 +2277,7 @@ export function DocEditor(props: DocEditorProps) {
             )}
           </For>
           <Show when={footnotes().length === 0}>
-            <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
+            <div class="doc-panel-empty">
               No footnotes yet. Insert one at the cursor; notes export as native Word footnotes.
             </div>
           </Show>
@@ -2007,11 +2289,11 @@ export function DocEditor(props: DocEditorProps) {
       title: "Gallery",
       icon: <IconGallery />,
       content: (
-        <div>
-          <button type="button" class="g-toolbar-btn" style={{ width: "100%" }} onClick={() => setImageDialogOpen(true)}>
+        <div class="doc-panel">
+          <button type="button" class="g-toolbar-btn" style={{ width: "100%", "justify-content": "flex-start" }} onClick={() => setImageDialogOpen(true)}>
             Insert image…
           </button>
-          <div style={{ "margin-top": "8px", "font-size": "12px", color: "var(--text-muted)" }}>
+          <div class="doc-panel-muted">
             Paste an image from the clipboard into the document.
           </div>
         </div>
@@ -2022,44 +2304,30 @@ export function DocEditor(props: DocEditorProps) {
       title: "Navigator",
       icon: <IconNavigator />,
       content: (
-        <div style={{ "font-size": "13px", display: "flex", "flex-direction": "column", gap: "4px" }}>
-          <Show 
-            when={headings().length > 0} 
-            fallback={<div style={{ color: "var(--text-muted)", "font-size": "12px", padding: "8px" }}>No headings found. Add Headings (H1-H3) to see outline tree.</div>}
+        <div class="doc-panel">
+          <Show
+            when={headings().length > 0}
+            fallback={<div class="doc-panel-empty">No headings found. Add headings (H1–H6) to build an outline.</div>}
           >
-            {headings().map(h => (
-              <button
-                type="button"
-                class="g-toolbar-btn"
-                style={{ 
-                  "justify-content": "flex-start", 
-                  width: "100%", 
-                  height: "auto", 
-                  "padding-left": (h.level - 1) * 12 + "px",
-                  "text-align": "left",
-                  "white-space": "nowrap",
-                  overflow: "hidden",
-                  "text-overflow": "ellipsis"
-                }}
-                onClick={() => {
-                  if (view) {
-                    const sel = TextSelection.create(view.state.doc, h.pos);
-                    view.dispatch(view.state.tr.setSelection(sel).scrollIntoView());
-                  }
-                }}
-              >
-                <span style={{ 
-                  "font-size": "10px", 
-                  "font-weight": "bold", 
-                  background: "var(--bg-hover)", 
-                  padding: "2px 4px", 
-                  "border-radius": "4px", 
-                  "margin-right": "6px",
-                  color: "var(--text-muted)"
-                }}>H{h.level}</span>
-                <span style={{ overflow: "hidden", "text-overflow": "ellipsis" }}>{h.text || "Untitled"}</span>
-              </button>
-            ))}
+            <div class="doc-panel-section">
+              {headings().map(h => (
+                <button
+                  type="button"
+                  class="doc-nav-item"
+                  title={h.text || "Untitled"}
+                  style={{ "padding-left": `${6 + (h.level - 1) * 12}px` }}
+                  onClick={() => {
+                    if (view) {
+                      const sel = TextSelection.create(view.state.doc, h.pos);
+                      view.dispatch(view.state.tr.setSelection(sel).scrollIntoView());
+                    }
+                  }}
+                >
+                  <span class="tag">H{h.level}</span>
+                  <span class="label">{h.text || "Untitled"}</span>
+                </button>
+              ))}
+            </div>
           </Show>
         </div>
       ),
@@ -2067,199 +2335,216 @@ export function DocEditor(props: DocEditorProps) {
     {
       id: "review",
       title: "Review",
-      icon: <span aria-hidden="true" style={{ "font-size": "15px" }}>💬</span>,
+      icon: <IconComment />,
       content: (
-        <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
+        <div class="doc-panel">
           <button type="button" class="g-toolbar-btn active" style={{ width: "100%" }} onClick={openCommentDialog}>
             New comment
           </button>
-          <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
-            Tracked changes: {trackedStats().insertions} insertions ({trackedStats().insertedCharacters} chars), {trackedStats().deletions} deletions ({trackedStats().deletedCharacters} chars)
+
+          <div class="doc-panel-section">
+            <div class="doc-panel-title">Tracked changes</div>
+            <div class="doc-panel-kv">
+              <span class="k">Insertions</span>
+              <span class="v">{trackedStats().insertions} ({trackedStats().insertedCharacters} chars)</span>
+            </div>
+            <div class="doc-panel-kv">
+              <span class="k">Deletions</span>
+              <span class="v">{trackedStats().deletions} ({trackedStats().deletedCharacters} chars)</span>
+            </div>
+            <div class="doc-panel-actions">
+              <button
+                type="button"
+                class="g-toolbar-btn"
+                aria-pressed={trackChangesOn()}
+                onClick={() => setTrackChangesOn(!trackChangesOn())}
+                style={trackChangesOn() ? { "font-weight": "700", outline: "2px solid var(--doc-accent, #7c3aed)", "outline-offset": "-2px" } : undefined}
+                title="Automatically mark typed insertions as tracked changes"
+              >
+                {trackChangesOn() ? "✓ Track Changes: On" : "Track Changes"}
+              </button>
+              <button type="button" class="g-toolbar-btn" onClick={() => markSelectionAsChange("insert")}>
+                Mark insertion
+              </button>
+              <button type="button" class="g-toolbar-btn" onClick={() => markSelectionAsChange("delete")}>
+                Mark deletion
+              </button>
+            </div>
+            <div class="doc-panel-actions">
+              <button type="button" class="g-toolbar-btn" onClick={() => resolveAllTrackedChanges("accept")}>
+                Accept all
+              </button>
+              <button type="button" class="g-toolbar-btn" onClick={() => resolveAllTrackedChanges("reject")}>
+                Reject all
+              </button>
+            </div>
           </div>
+
           <Show when={trackedChangeSummaries().length > 0}>
-            <div style={{ "border-top": "1px solid var(--border-color)", "padding-top": "7px" }}>
-              <div style={{ "font-size": "11px", color: "var(--text-muted)", "margin-bottom": "5px" }}>Individual changes</div>
+            <div class="doc-panel-section">
+              <div class="doc-panel-title">Individual changes</div>
               <For each={trackedChangeSummaries()}>
                 {(change) => (
-                  <div style={{ display: "flex", "align-items": "center", gap: "5px", "font-size": "11px", "margin-top": "4px" }}>
-                    <span style={{ flex: 1, overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }} title={change.text}>
-                      {change.kind === "insert" ? "Insertion" : "Deletion"} · {change.author} · {change.text || "(empty)"}
+                  <div class="doc-change-row">
+                    <span class={`doc-change-kind ${change.kind === "insert" ? "insert" : "delete"}`}>
+                      {change.kind === "insert" ? "Ins" : "Del"}
                     </span>
-                    <button type="button" class="g-toolbar-btn" onClick={() => resolveOneTrackedChange(change.id, "accept")}>Accept</button>
-                    <button type="button" class="g-toolbar-btn" onClick={() => resolveOneTrackedChange(change.id, "reject")}>Reject</button>
+                    <span class="desc" title={change.text}>
+                      {change.author} · {change.text || "(empty)"}
+                    </span>
+                    <button type="button" class="g-toolbar-btn" title="Accept change" aria-label="Accept change" onClick={() => resolveOneTrackedChange(change.id, "accept")}>✓</button>
+                    <button type="button" class="g-toolbar-btn" title="Reject change" aria-label="Reject change" onClick={() => resolveOneTrackedChange(change.id, "reject")}>✕</button>
                   </div>
                 )}
               </For>
             </div>
           </Show>
-          <div style={{ "font-size": "11px", color: "var(--text-muted)", "border-top": "1px solid var(--border-color)", "padding-top": "7px" }}>
-            {(() => {
-              const comparison = compareSummary();
-              return comparison.changed
-                ? `${compareBaselineLabel()}: +${comparison.insertedWords} / −${comparison.deletedWords} words${comparison.truncated ? " (large-document summary)" : ""}`
-                : `No text changes ${compareBaselineLabel().toLowerCase()}`;
-            })()}
-          </div>
-          <Show when={(props.compareDocuments?.length ?? 0) > 0}>
-            <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "11px" }}>
-              Compare with open Writer document
-              <select
-                class="g-toolbar-select"
-                aria-label="Compare with open Writer document"
-                value={compareSourceId()}
-                onChange={(event) => compareWithDocument(event.currentTarget.value)}
-                style={{ height: "28px", padding: "0 6px" }}
-              >
-                <option value="">Select a document…</option>
-                <For each={props.compareDocuments ?? []}>
-                  {(document) => <option value={document.id}>{document.title || "Untitled document"}</option>}
-                </For>
-              </select>
-            </label>
-          </Show>
-          <button type="button" class="g-toolbar-btn" onClick={resetCompareBaseline}>
-            Reset compare baseline
-          </button>
-          <button
-            type="button"
-            class="g-toolbar-btn"
-            aria-expanded={compareDetailsOpen()}
-            onClick={() => setCompareDetailsOpen((open) => !open)}
-          >
-            {compareDetailsOpen() ? "Hide comparison" : "Show before/after comparison"}
-          </button>
-          <Show when={compareDetailsOpen()}>
-            {(() => {
-              const comparison = compareSummary();
-              return (
-                <div style={{ display: "flex", "flex-direction": "column", gap: "6px", "font-size": "11px" }}>
-                  <div style={{ display: "grid", "grid-template-columns": "1fr 1fr", gap: "6px" }}>
-                    <div>
-                      <div style={{ "font-weight": "600", "margin-bottom": "3px" }}>Before</div>
-                      <div style={{ "max-height": "180px", overflow: "auto", "white-space": "pre-wrap", padding: "6px", border: "1px solid var(--border-color)", "border-radius": "4px", background: "var(--bg-secondary, transparent)" }}>
-                        {comparePreview(comparison.beforeText) || "(empty)"}
-                      </div>
-                    </div>
-                    <div>
-                      <div style={{ "font-weight": "600", "margin-bottom": "3px" }}>After</div>
-                      <div style={{ "max-height": "180px", overflow: "auto", "white-space": "pre-wrap", padding: "6px", border: "1px solid var(--border-color)", "border-radius": "4px", background: "var(--bg-secondary, transparent)" }}>
-                        {comparePreview(comparison.afterText) || "(empty)"}
-                      </div>
-                    </div>
-                  </div>
-                  <div style={{ "font-weight": "600" }}>Token diff</div>
-                  <div style={{ "max-height": "120px", overflow: "auto", "white-space": "pre-wrap", padding: "6px", border: "1px solid var(--border-color)", "border-radius": "4px" }}>
-                    <For each={comparison.segments}>
-                      {(segment) => (
-                        <span style={{
-                          background: segment.kind === "insert" ? "#dcfce7" : segment.kind === "delete" ? "#fee2e2" : "transparent",
-                          color: segment.kind === "delete" ? "#991b1b" : "inherit",
-                          "text-decoration": segment.kind === "delete" ? "line-through" : "none",
-                        }}>
-                          {segment.text}
-                        </span>
-                      )}
-                    </For>
-                  </div>
-                  <Show when={comparison.truncated}>
-                    <div style={{ color: "var(--text-muted)" }}>Large-document preview is capped for responsiveness.</div>
-                  </Show>
-                </div>
-              );
-            })()}
-          </Show>
-          <div style={{ display: "flex", gap: "6px", "flex-wrap": "wrap" }}>
-            <button
-              type="button"
-              class="g-toolbar-btn"
-              aria-pressed={trackChangesOn()}
-              onClick={() => setTrackChangesOn(!trackChangesOn())}
-              style={trackChangesOn() ? { "font-weight": "700", outline: "2px solid var(--doc-accent, #7c3aed)", "outline-offset": "-2px" } : undefined}
-              title="Automatically mark typed insertions as tracked changes"
-            >
-              {trackChangesOn() ? "✓ Track Changes: On" : "Track Changes"}
-            </button>
-            <button type="button" class="g-toolbar-btn" onClick={() => markSelectionAsChange("insert")}>
-              Mark insertion
-            </button>
-            <button type="button" class="g-toolbar-btn" onClick={() => markSelectionAsChange("delete")}>
-              Mark deletion
-            </button>
-          </div>
-          <div style={{ display: "flex", gap: "6px", "flex-wrap": "wrap" }}>
-            <button type="button" class="g-toolbar-btn" onClick={() => resolveAllTrackedChanges("accept")}>
-              Accept all
-            </button>
-            <button type="button" class="g-toolbar-btn" onClick={() => resolveAllTrackedChanges("reject")}>
-              Reject all
-            </button>
-          </div>
-          <Show
-            when={comments().length > 0}
-            fallback={<div style={{ color: "var(--text-muted)", "font-size": "12px", padding: "8px 0" }}>Select text and add a comment to start a review thread.</div>}
-          >
-            <For each={comments()}>
-              {(comment) => (
-                <div
-                  style={{
-                    padding: "8px",
-                    border: "1px solid var(--border-color)",
-                    "border-radius": "6px",
-                    background: selectedCommentId() === comment.id ? "var(--bg-hover)" : "transparent",
-                    opacity: comment.resolved ? "0.65" : "1",
-                  }}
+
+          <div class="doc-panel-section">
+            <div class="doc-panel-title">Compare</div>
+            <div class="doc-panel-muted">
+              {(() => {
+                const comparison = compareSummary();
+                return comparison.changed
+                  ? `${compareBaselineLabel()}: +${comparison.insertedWords} / −${comparison.deletedWords} words${comparison.truncated ? " (large-document summary)" : ""}`
+                  : `No text changes ${compareBaselineLabel().toLowerCase()}`;
+              })()}
+            </div>
+            <Show when={(props.compareDocuments?.length ?? 0) > 0}>
+              <label class="doc-dialog-field" style={{ "font-size": "11px" }}>
+                Compare with open Writer document
+                <select
+                  class="g-toolbar-select"
+                  aria-label="Compare with open Writer document"
+                  value={compareSourceId()}
+                  onChange={(event) => compareWithDocument(event.currentTarget.value)}
+                  style={{ height: "28px", padding: "0 6px", width: "100%" }}
                 >
-                  <button
-                    type="button"
-                    onClick={() => selectComment(comment)}
-                    style={{ display: "block", width: "100%", padding: "0", background: "transparent", "text-align": "left", "font-size": "12px" }}
-                    title="Select comment anchor"
-                  >
-                    <strong>{comment.author}</strong>
-                    <span style={{ display: "block", "margin-top": "4px", "white-space": "pre-wrap", color: "var(--text-primary)" }}>{comment.text}</span>
-                  </button>
-                  {/* Threaded replies */}
-                  <Show when={(comment.replies?.length ?? 0) > 0}>
-                    <div style={{ "margin-top": "6px", "padding-left": "8px", "border-left": "2px solid var(--border-color)" }}>
-                      <For each={comment.replies}>
-                        {(reply) => (
-                          <div style={{ "font-size": "12px", "margin-bottom": "4px" }}>
-                            <strong>{reply.author}</strong>
-                            <span style={{ display: "block", "white-space": "pre-wrap", color: "var(--text-primary)" }}>{reply.text}</span>
-                          </div>
+                  <option value="">Select a document…</option>
+                  <For each={props.compareDocuments ?? []}>
+                    {(document) => <option value={document.id}>{document.title || "Untitled document"}</option>}
+                  </For>
+                </select>
+              </label>
+            </Show>
+            <div class="doc-panel-actions">
+              <button type="button" class="g-toolbar-btn" onClick={resetCompareBaseline}>
+                Reset baseline
+              </button>
+              <button
+                type="button"
+                class="g-toolbar-btn"
+                aria-expanded={compareDetailsOpen()}
+                onClick={() => setCompareDetailsOpen((open) => !open)}
+              >
+                {compareDetailsOpen() ? "Hide comparison" : "Before/after"}
+              </button>
+            </div>
+            <Show when={compareDetailsOpen()}>
+              {(() => {
+                const comparison = compareSummary();
+                return (
+                  <div style={{ display: "flex", "flex-direction": "column", gap: "6px", "font-size": "11px" }}>
+                    <div style={{ display: "grid", "grid-template-columns": "1fr 1fr", gap: "6px" }}>
+                      <div>
+                        <div class="doc-panel-title" style={{ "margin-bottom": "3px" }}>Before</div>
+                        <div style={{ "max-height": "180px", overflow: "auto", "white-space": "pre-wrap", padding: "6px", border: "1px solid var(--border-color)", "border-radius": "6px", background: "var(--bg-secondary, transparent)" }}>
+                          {comparePreview(comparison.beforeText) || "(empty)"}
+                        </div>
+                      </div>
+                      <div>
+                        <div class="doc-panel-title" style={{ "margin-bottom": "3px" }}>After</div>
+                        <div style={{ "max-height": "180px", overflow: "auto", "white-space": "pre-wrap", padding: "6px", border: "1px solid var(--border-color)", "border-radius": "6px", background: "var(--bg-secondary, transparent)" }}>
+                          {comparePreview(comparison.afterText) || "(empty)"}
+                        </div>
+                      </div>
+                    </div>
+                    <div class="doc-panel-title">Token diff</div>
+                    <div style={{ "max-height": "120px", overflow: "auto", "white-space": "pre-wrap", padding: "6px", border: "1px solid var(--border-color)", "border-radius": "6px" }}>
+                      <For each={comparison.segments}>
+                        {(segment) => (
+                          <span style={{
+                            background: segment.kind === "insert" ? "#dcfce7" : segment.kind === "delete" ? "#fee2e2" : "transparent",
+                            color: segment.kind === "delete" ? "#991b1b" : "inherit",
+                            "text-decoration": segment.kind === "delete" ? "line-through" : "none",
+                          }}>
+                            {segment.text}
+                          </span>
                         )}
                       </For>
                     </div>
-                  </Show>
-                  <Show when={selectedCommentId() === comment.id}>
-                    <div style={{ display: "flex", gap: "4px", "margin-top": "6px" }}>
-                      <input
-                        type="text"
-                        placeholder="Reply…"
-                        aria-label={`Reply to ${comment.author}'s comment`}
-                        value={replyDrafts()[comment.id] ?? ""}
-                        onInput={(e) => { setReplyDrafts((prev) => ({ ...prev, [comment.id]: e.currentTarget.value })); }}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            submitReply(comment.id);
-                          }
-                        }}
-                        style={{ flex: 1, "font-size": "12px", padding: "3px 8px", border: "1px solid var(--border-color)", "border-radius": "4px", background: "var(--bg-input, transparent)", color: "inherit" }}
-                      />
-                      <button type="button" class="g-toolbar-btn" onClick={() => submitReply(comment.id)}>Reply</button>
-                    </div>
-                  </Show>
-                  <div style={{ display: "flex", gap: "6px", "margin-top": "7px" }}>
-                    <button type="button" class="g-toolbar-btn" onClick={() => updateComment(comment.id, { resolved: !comment.resolved })}>
-                      {comment.resolved ? "Reopen" : "Resolve"}
-                    </button>
-                    <button type="button" class="g-toolbar-btn" onClick={() => removeComment(comment.id)}>Delete</button>
+                    <Show when={comparison.truncated}>
+                      <div class="doc-panel-muted">Large-document preview is capped for responsiveness.</div>
+                    </Show>
                   </div>
-                </div>
-              )}
-            </For>
-          </Show>
+                );
+              })()}
+            </Show>
+          </div>
+
+          <div class="doc-panel-section">
+            <div class="doc-panel-title">Comments</div>
+            <Show
+              when={comments().length > 0}
+              fallback={<div class="doc-panel-empty">Select text and add a comment to start a review thread.</div>}
+            >
+              <For each={comments()}>
+                {(comment) => (
+                  <div
+                    class={`doc-comment-card${selectedCommentId() === comment.id ? " selected" : ""}${comment.resolved ? " resolved" : ""}`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => selectComment(comment)}
+                      style={{ display: "block", width: "100%", padding: "0", background: "transparent", "text-align": "left" }}
+                      title="Select comment anchor"
+                    >
+                      <span class="doc-comment-author">{comment.author}</span>
+                      <span class="doc-comment-text" style={{ display: "block", "margin-top": "3px" }}>{comment.text}</span>
+                    </button>
+                    {/* Threaded replies */}
+                    <Show when={(comment.replies?.length ?? 0) > 0}>
+                      <div class="doc-comment-replies">
+                        <For each={comment.replies}>
+                          {(reply) => (
+                            <div style={{ "font-size": "12px" }}>
+                              <span class="doc-comment-author">{reply.author}</span>
+                              <span class="doc-comment-text" style={{ display: "block" }}>{reply.text}</span>
+                            </div>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
+                    <Show when={selectedCommentId() === comment.id}>
+                      <div style={{ display: "flex", gap: "4px" }}>
+                        <input
+                          type="text"
+                          placeholder="Reply…"
+                          aria-label={`Reply to ${comment.author}'s comment`}
+                          value={replyDrafts()[comment.id] ?? ""}
+                          onInput={(e) => { setReplyDrafts((prev) => ({ ...prev, [comment.id]: e.currentTarget.value })); }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              submitReply(comment.id);
+                            }
+                          }}
+                          style={{ flex: 1, "font-size": "12px", padding: "3px 8px", border: "1px solid var(--border-color)", "border-radius": "4px", background: "var(--bg-input, transparent)", color: "inherit" }}
+                        />
+                        <button type="button" class="g-toolbar-btn" onClick={() => submitReply(comment.id)}>Reply</button>
+                      </div>
+                    </Show>
+                    <div class="doc-panel-actions">
+                      <button type="button" class="g-toolbar-btn" onClick={() => updateComment(comment.id, { resolved: !comment.resolved })}>
+                        {comment.resolved ? "Reopen" : "Resolve"}
+                      </button>
+                      <button type="button" class="g-toolbar-btn" onClick={() => removeComment(comment.id)}>Delete</button>
+                    </div>
+                  </div>
+                )}
+              </For>
+            </Show>
+          </div>
         </div>
       ),
     },
@@ -2268,26 +2553,24 @@ export function DocEditor(props: DocEditorProps) {
   const zoom = () => props.zoomLevel ?? 100;
 
   return (
-    <div style={{ display: "flex", "flex-direction": "column", height: "100%", background: "var(--bg-canvas)", overflow: "hidden" }}>
+    <div
+      class="doc-editor-root"
+      style={{
+        "--doc-inset-right": sidebarPanel()
+          ? "calc(var(--sidebar-rail-w, 28px) + var(--sidebar-panel-w, 220px) + 20px)"
+          : "calc(var(--sidebar-rail-w, 28px) + 20px)",
+      }}
+    >
       <Show when={loadWarning()}>
         <div
           data-testid="doc-load-warning"
-          style={{
-            display: "flex", "align-items": "center", "justify-content": "space-between",
-            gap: "12px", padding: "8px 16px",
-            background: "var(--warn-bg, #3a2b0b)", color: "var(--warn-fg, #ffd479)",
-            "font-size": "13px", "border-bottom": "1px solid rgba(255, 212, 121, 0.35)",
-          }}
+          class="doc-load-warning"
           role="status"
         >
           <span>{loadWarning()}</span>
           <button
             type="button"
             aria-label="Dismiss warning"
-            style={{
-              background: "transparent", border: "1px solid currentColor",
-              color: "inherit", "border-radius": "6px", padding: "2px 10px", cursor: "pointer",
-            }}
             onClick={() => setLoadWarning(null)}
           >
             Dismiss
@@ -2306,8 +2589,13 @@ export function DocEditor(props: DocEditorProps) {
         onPaste={() => clipboard("paste")}
         onUndo={execUndo}
         onRedo={execRedo}
+        onPrintPreview={() => setPrintPreviewOpen(true)}
         findOpen={findOpen()}
-        onToggleFind={() => setFindOpen(!findOpen())}
+        onToggleFind={() => (findOpen() ? closeFind() : setFindOpen(true))}
+        activeMarks={activeMarks()}
+        bulletListActive={activeList() === "bullet_list"}
+        orderedListActive={activeList() === "ordered_list"}
+        onAddComment={openCommentDialog}
         onInsertTable={() => insertTable()}
         onInsertImage={() => setImageDialogOpen(true)}
         onInsertLink={openLinkDialog}
@@ -2384,7 +2672,7 @@ export function DocEditor(props: DocEditorProps) {
           setMatchCase(v);
           handleSearch();
         }}
-        onClose={() => setFindOpen(false)}
+        onClose={closeFind}
       />
 
       <Show when={pageSetup().header || pageSetup().footer}>
@@ -2501,10 +2789,6 @@ export function DocEditor(props: DocEditorProps) {
         </div>
       </Show>
 
-      <style>{`.doc-comment-highlight { background: color-mix(in srgb, var(--doc-accent) 24%, transparent); border-bottom: 2px solid var(--doc-accent); } .doc-track-insert { background: color-mix(in srgb, #22c55e 18%, transparent); border-bottom: 2px solid #22c55e; } .doc-track-delete { background: color-mix(in srgb, #ef4444 14%, transparent); color: #b91c1c; text-decoration: line-through; }`}</style>
-
-      <style>{`.doc-spell-misspelled { text-decoration: underline wavy #e74c3c; text-underline-offset: 2px; }`}</style>
-
       <Ruler
         zoom={zoom()}
         leftMargin={pageSetup().margins.left * 96}
@@ -2516,29 +2800,18 @@ export function DocEditor(props: DocEditorProps) {
 
       <div style={{ flex: 1, display: "flex", "min-height": "0", overflow: "hidden" }}>
         <main
+          class="doc-canvas"
           data-pane="canvas"
           aria-label="Document canvas"
-          style={{
-            flex: 1,
-            overflow: "auto",
-            display: "flex",
-            "justify-content": "center",
-            padding: "16px 16px 48px",
-            "background-color": "var(--bg-canvas)",
-          }}
         >
           <div
-            class={layoutMode() === "focused" ? "doc-focused" : "doc-paginated"}
+            class={layoutMode() === "focused" ? "doc-page doc-focused" : "doc-page doc-paginated"}
             style={{
               width: layoutMode() === "focused" ? "816px" : `${paperDimensions().width}px`,
               "min-height": layoutMode() === "focused" ? "calc(100vh - 220px)" : `${paperDimensions().height}px`,
-              background: "var(--bg-paper)",
-              "border-radius": "0",
-              "box-shadow": "var(--shadow-paper)",
-              padding: layoutMode() === "focused" 
-                ? "48px 72px" 
+              padding: layoutMode() === "focused"
+                ? "48px 72px"
                 : `${pageSetup().margins.top * 96}px ${pageSetup().margins.right * 96}px ${pageSetup().margins.bottom * 96}px ${pageSetup().margins.left * 96}px`,
-              color: "#000000",
               outline: "none",
               transform: `scale(${zoom() / 100})`,
               "transform-origin": "top center",
@@ -2547,12 +2820,9 @@ export function DocEditor(props: DocEditorProps) {
           >
             <div
               ref={editorRef}
+              class="doc-surface"
               spellcheck={props.spellcheckEnabled !== false}
               style={{
-                "min-height": "800px",
-                outline: "none",
-                "font-family": "Liberation Serif, serif",
-                "font-size": "12pt",
                 "column-count": Math.max(1, Math.min(4, pageSetup().columns || 1)),
                 "column-gap": "36px",
               }}
@@ -2643,7 +2913,11 @@ export function DocEditor(props: DocEditorProps) {
             </Show>
           </div>
         </main>
-        <IconSidebar panels={sidebarPanels()} defaultPanel="properties" />
+        <IconSidebar
+          panels={sidebarPanels()}
+          activePanel={sidebarPanel()}
+          onActivePanelChange={(id) => setSidebarPanel(id)}
+        />
       </div>
 
       <Show when={contextMenu()}>
@@ -2658,35 +2932,34 @@ export function DocEditor(props: DocEditorProps) {
       </Show>
 
       <Dialog open={linkDialogOpen()} title="Insert hyperlink" onClose={() => setLinkDialogOpen(false)}>
-        <div style={{ display: "flex", "flex-direction": "column", gap: "12px", "min-width": "360px" }}>
-          <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+        <div class="doc-dialog">
+          <label class="doc-dialog-field">
             URL
             <input
               class="g-toolbar-input"
               value={linkHref()}
               onInput={(e) => setLinkHref(e.currentTarget.value)}
-              style={{ width: "100%", height: "28px", padding: "0 8px" }}
             />
           </label>
           <Show when={linkError()}>
-            <div role="alert" style={{ "font-size": "12px", color: "var(--danger, #b91c1c)" }}>{linkError()}</div>
+            <div role="alert" class="doc-dialog-error">{linkError()}</div>
           </Show>
-          <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
+          <div class="doc-dialog-actions">
             <button type="button" class="g-toolbar-btn" onClick={() => setLinkDialogOpen(false)}>Cancel</button>
             <button type="button" class="g-toolbar-btn active" onClick={applyLink}>Apply</button>
           </div>
-          <div style={{ "font-size": "11px", color: "var(--text-muted)" }}>
+          <div class="doc-dialog-hint">
             For a same-document target, use <code>internal:BookmarkName</code> or <code>#BookmarkName</code>.
           </div>
         </div>
       </Dialog>
 
       <Dialog open={bookmarkDialogOpen()} title="Insert bookmark" onClose={() => setBookmarkDialogOpen(false)}>
-        <div style={{ display: "flex", "flex-direction": "column", gap: "12px", "min-width": "360px" }}>
-          <div style={{ "font-size": "12px", color: "var(--text-muted)" }}>
+        <div class="doc-dialog">
+          <div class="doc-dialog-hint">
             Select text before opening this dialog. Word-compatible names are limited to 40 characters.
           </div>
-          <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+          <label class="doc-dialog-field">
             Bookmark name
             <input
               class="g-toolbar-input"
@@ -2699,13 +2972,12 @@ export function DocEditor(props: DocEditorProps) {
               autofocus
               aria-label="Bookmark name"
               placeholder="ProjectPlan"
-              style={{ width: "100%", height: "28px", padding: "0 8px" }}
             />
           </label>
           <Show when={bookmarkError()}>
-            <div role="alert" style={{ "font-size": "12px", color: "var(--danger, #b91c1c)" }}>{bookmarkError()}</div>
+            <div role="alert" class="doc-dialog-error">{bookmarkError()}</div>
           </Show>
-          <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
+          <div class="doc-dialog-actions">
             <button type="button" class="g-toolbar-btn" onClick={() => setBookmarkDialogOpen(false)}>Cancel</button>
             <button type="button" class="g-toolbar-btn active" onClick={applyBookmark}>Insert</button>
           </div>
@@ -2713,8 +2985,8 @@ export function DocEditor(props: DocEditorProps) {
       </Dialog>
 
       <Dialog open={commentDialogOpen()} title="New comment" onClose={() => setCommentDialogOpen(false)}>
-        <div style={{ display: "flex", "flex-direction": "column", gap: "10px", "min-width": "360px" }}>
-          <div style={{ "font-size": "12px", color: "var(--text-muted)" }}>Your comment will be attached to the selected text.</div>
+        <div class="doc-dialog">
+          <div class="doc-dialog-hint">Your comment will be attached to the selected text.</div>
           <textarea
             class="g-toolbar-input"
             value={commentDraft()}
@@ -2723,9 +2995,8 @@ export function DocEditor(props: DocEditorProps) {
             autofocus
             aria-label="Comment text"
             placeholder="Write a comment…"
-            style={{ width: "100%", resize: "vertical", padding: "8px" }}
           />
-          <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
+          <div class="doc-dialog-actions">
             <button type="button" class="g-toolbar-btn" onClick={() => setCommentDialogOpen(false)}>Cancel</button>
             <button type="button" class="g-toolbar-btn active" disabled={!commentDraft().trim()} onClick={saveComment}>Add comment</button>
           </div>
@@ -2733,18 +3004,17 @@ export function DocEditor(props: DocEditorProps) {
       </Dialog>
 
       <Dialog open={imageDialogOpen()} title="Insert image" onClose={() => setImageDialogOpen(false)}>
-        <div style={{ display: "flex", "flex-direction": "column", gap: "12px", "min-width": "360px" }}>
-          <label style={{ display: "flex", "flex-direction": "column", gap: "4px", "font-size": "13px" }}>
+        <div class="doc-dialog">
+          <label class="doc-dialog-field">
             Image URL or data URI
             <input
               class="g-toolbar-input"
               value={imageSrc()}
               onInput={(e) => setImageSrc(e.currentTarget.value)}
-              style={{ width: "100%", height: "28px", padding: "0 8px" }}
               placeholder="https://… or paste data:image/…"
             />
           </label>
-          <label style={{ "font-size": "13px" }}>
+          <label class="doc-dialog-field">
             Or choose a local file
             <input
               type="file"
@@ -2759,7 +3029,7 @@ export function DocEditor(props: DocEditorProps) {
               }}
             />
           </label>
-          <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
+          <div class="doc-dialog-actions">
             <button type="button" class="g-toolbar-btn" onClick={() => setImageDialogOpen(false)}>Cancel</button>
             <button type="button" class="g-toolbar-btn active" onClick={applyImage}>Insert</button>
           </div>
@@ -2775,7 +3045,62 @@ export function DocEditor(props: DocEditorProps) {
         onUnderline={execToggleUnderline}
         onStrikethrough={execToggleStrike}
         onLink={openLinkDialog}
+        onHighlight={() => execColor("highlight", highlightColor())}
+        onComment={openCommentDialog}
       />
+
+      <Show when={linkPopover()}>
+        {(pop) => (
+          <div
+            class="doc-link-pop g-no-print"
+            role="dialog"
+            aria-label="Link options"
+            style={{ position: "fixed", left: `${pop().left}px`, top: `${pop().top}px` }}
+          >
+            <div class="doc-link-pop-url">
+              <IconLink width={12} height={12} />
+              <span title={pop().href}>{displayHref(pop().href)}</span>
+            </div>
+            <div class="doc-link-pop-actions">
+              <button
+                type="button"
+                class="doc-link-pop-btn"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => openExternalHref(pop().href)}
+              >
+                Open
+              </button>
+              <button
+                type="button"
+                class="doc-link-pop-btn"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => copyLinkToClipboard(pop().href)}
+              >
+                Copy
+              </button>
+              <button
+                type="button"
+                class="doc-link-pop-btn"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={editLinkFromPopover}
+              >
+                Edit
+              </button>
+              <span style={{ flex: 1 }} />
+              <button
+                type="button"
+                class="doc-link-pop-btn danger"
+                title="Remove link"
+                aria-label="Remove link"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => removeLinkAt(pop().pos, pop().href)}
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        )}
+      </Show>
 
       <PageSetupDialog
         open={pageSetupOpen()}

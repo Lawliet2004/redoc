@@ -41,7 +41,13 @@ type PresenterElement = {
   chartTitle?: string;
   chartData?: number[];
   chartLabels?: string[];
+  lineColor?: string;
+  lineWidth?: number;
+  fillGradient?: { from: string; to: string; angle?: number };
+  shadow?: boolean;
 };
+
+const PRESENTER_FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
 
 export type PresenterSlide = {
   id: string;
@@ -125,11 +131,29 @@ function parseElement(element: any): PresenterElement | null {
   if (kind.Shape) {
     const shapeType = kind.Shape.shapeType || "rect";
     const stroke = kind.Shape.strokeColor;
-    const color =
-      shapeType === "line" || shapeType === "arrow"
-        ? (stroke && stroke !== "transparent" ? stroke : kind.Shape.fillColor)
-        : kind.Shape.fillColor;
-    return { ...base, type: shapeType, color, content: kind.Shape.text || "" };
+    const isLine = shapeType === "line" || shapeType === "arrow";
+    const color = isLine
+      ? (stroke && stroke !== "transparent" ? stroke : kind.Shape.fillColor)
+      : kind.Shape.fillColor;
+    const strokeWidth = Number(kind.Shape.strokeWidth);
+    const gradient = kind.Shape.fillGradient;
+    return {
+      ...base,
+      type: shapeType,
+      color,
+      content: kind.Shape.text || "",
+      lineColor: !isLine && typeof stroke === "string" && stroke !== "transparent" ? stroke : undefined,
+      lineWidth: Number.isFinite(strokeWidth) ? Math.max(0, Math.min(24, strokeWidth)) : undefined,
+      fillGradient:
+        gradient && typeof gradient === "object" && typeof gradient.from === "string" && typeof gradient.to === "string"
+          ? { from: gradient.from, to: gradient.to, angle: Number.isFinite(gradient.angle) ? gradient.angle : 90 }
+          : undefined,
+      shadow: kind.Shape.shadow === true,
+      fontFamily: typeof kind.Shape.fontFamily === "string" ? kind.Shape.fontFamily : undefined,
+      bold: Boolean(kind.Shape.bold),
+      italic: Boolean(kind.Shape.italic),
+      underline: Boolean(kind.Shape.underline),
+    };
   }
   if (kind.Image) {
     return { ...base, type: "image", content: kind.Image.assetHash ?? "" };
@@ -232,7 +256,7 @@ function SlideElementView(props: {
           display: "flex",
           "align-items": "center",
           "justify-content": align === "left" ? "flex-start" : align === "right" ? "flex-end" : "center",
-          "font-family": el.fontFamily || "Inter, sans-serif",
+          "font-family": el.fontFamily || PRESENTER_FONT,
           "font-weight": el.bold ? "bold" : "normal",
           "font-style": el.italic ? "italic" : "normal",
           "text-decoration": el.underline ? "underline" : "none",
@@ -257,7 +281,7 @@ function SlideElementView(props: {
   if (el.type === "line" || el.type === "arrow") {
     return (
       <div style={baseStyle}>
-        <ShapeBody type={el.type} color={el.color || "#3b82f6"} id={el.id} />
+        <ShapeBody type={el.type} color={el.color || "#3b82f6"} id={el.id} strokeColor={el.lineColor} strokeWidth={el.lineWidth} />
       </div>
     );
   }
@@ -265,8 +289,8 @@ function SlideElementView(props: {
   if (isFilledShape(el.type)) {
     return (
       <div style={baseStyle}>
-        <ShapeBody type={el.type} color={el.color || "#3b82f6"} id={el.id} />
-        <div style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center", "text-align": "center", "font-family": el.fontFamily || "Inter, sans-serif", "font-weight": el.bold ? "bold" : "normal", "font-style": el.italic ? "italic" : "normal", "text-decoration": el.underline ? "underline" : "none", "font-size": `${el.fontSize || 20}px`, color: el.color && el.color.toLowerCase() === "#ffffff" ? "#000" : "#fff", "white-space": "pre-wrap", padding: "8px" }}>
+        <ShapeBody type={el.type} color={el.color || "#3b82f6"} id={el.id} strokeColor={el.lineColor} strokeWidth={el.lineWidth} gradient={el.fillGradient} shadow={el.shadow} />
+        <div style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center", "text-align": "center", "font-family": el.fontFamily || PRESENTER_FONT, "font-weight": el.bold ? "bold" : "normal", "font-style": el.italic ? "italic" : "normal", "text-decoration": el.underline ? "underline" : "none", "font-size": `${el.fontSize || 20}px`, color: el.color && el.color.toLowerCase() === "#ffffff" ? "#000" : "#fff", "white-space": "pre-wrap", padding: "8px" }}>
           {el.content}
         </div>
       </div>
@@ -484,7 +508,8 @@ export function SlideStage(props: {
         background: slideBg(props.slide, props.theme),
         position: "relative",
         overflow: "hidden",
-        "box-shadow": "0 4px 24px rgba(0,0,0,.4)",
+        "border-radius": "6px",
+        "box-shadow": "0 2px 8px rgba(0,0,0,.35), 0 16px 48px rgba(0,0,0,.45)",
         cursor: props.onClick ? "pointer" : "default",
       }}
     >
@@ -644,7 +669,8 @@ export function PresenterView() {
         if (typeof idx === "number" && idx !== slideIndex()) {
           showSlide(idx, false);
         }
-      }).then((fn: () => void) => { unlisten = fn; });
+      }).then((fn: () => void) => { unlisten = fn; })
+        .catch(() => undefined);
       // Live deck updates broadcast by the editor window.
       mod.listen("presenter-deck-changed", (event: { payload?: { deck?: unknown; slideIndex?: number } }) => {
         const payload = event.payload;
@@ -655,7 +681,8 @@ export function PresenterView() {
             setSlideIndex(clampPresenterIndex(idx, slides().length));
           }
         }
-      }).then((fn: () => void) => { unlistenSync = fn; });
+      }).then((fn: () => void) => { unlistenSync = fn; })
+        .catch(() => undefined);
     }).catch(() => undefined);
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -700,60 +727,57 @@ export function PresenterView() {
   });
 
   return (
-    <div style={{
-      display: "flex",
-      "flex-direction": "column",
-      height: "100vh",
-      background: "#0f172a",
-      color: "#f8fafc",
-      "font-family": "Inter, sans-serif",
-      padding: "16px",
-      "box-sizing": "border-box",
-      gap: "12px",
-    }}>
-      <div style={{ display: "flex", "justify-content": "space-between", "align-items": "center", "border-bottom": "1px solid #334155", "padding-bottom": "10px" }}>
-        <h2 style={{ margin: 0, "font-size": "17px", color: "#38bdf8" }}>Redoc Presenter</h2>
-        <div style={{ display: "flex", gap: "10px", "align-items": "center", "font-size": "13px", color: "#94a3b8" }}>
-          <span>Slide <strong style={{ color: "#f8fafc" }}>{slideIndex() + 1}</strong> / {slides().length}</span>
-          <span>Elapsed <strong style={{ color: "#f8fafc" }}>{formatPresenterTimer(elapsedSeconds())}</strong></span>
-          <button type="button" aria-pressed={timerRunning()} aria-label={timerRunning() ? "Pause presenter timer" : "Resume presenter timer"} style={{ padding: "4px 8px", background: "#334155", color: "#fff", border: "none", "border-radius": "4px", cursor: "pointer" }} onClick={() => setTimerRunning((running) => !running)}>
+    <div class="slide-presenter">
+      <div class="slide-presenter-top">
+        <div class="slide-presenter-brand">
+          <span class="slide-presenter-brand-mark" aria-hidden="true" />
+          <span>Redoc <span style={{ color: "#818cf8" }}>Presenter</span></span>
+        </div>
+        <div class="slide-presenter-meta">
+          <span class="slide-pill">Slide <strong>{slideIndex() + 1}</strong> / {slides().length}</span>
+          <span class="slide-pill slide-pill--timer" aria-label="Elapsed presentation time">
+            {formatPresenterTimer(elapsedSeconds())}
+          </span>
+          <button type="button" class="slide-btn slide-btn--ghost" aria-pressed={timerRunning()} aria-label={timerRunning() ? "Pause presenter timer" : "Resume presenter timer"} onClick={() => setTimerRunning((running) => !running)}>
             {timerRunning() ? "Pause" : "Resume"}
           </button>
-          <button type="button" aria-label="Restart presentation" style={{ padding: "4px 8px", background: "#334155", color: "#fff", border: "none", "border-radius": "4px", cursor: "pointer" }} onClick={restartPresentation}>
+          <button type="button" class="slide-btn slide-btn--ghost" aria-label="Restart presentation" onClick={restartPresentation}>
             Restart
           </button>
         </div>
       </div>
 
-      <div style={{ flex: 1, display: "flex", gap: "16px", "min-height": 0 }}>
-        <div style={{ flex: 2, display: "flex", "flex-direction": "column", gap: "10px", "min-width": 0 }}>
-          <div style={{ flex: 1, display: "flex", "align-items": "center", "justify-content": "center", background: "#020617", "border-radius": "6px", border: "1px solid #334155", padding: "12px" }}>
+      <div class="slide-presenter-main">
+        <div class="slide-presenter-stagecol">
+          <div class="slide-presenter-stageframe">
             <SlideStage slide={currentSlide()} theme={theme()} revealCount={revealCount()} animClass={animClass()} exiting={exiting()} onClick={advance} canvasWidth={deckRaw().canvasWidth} canvasHeight={deckRaw().canvasHeight} masters={deckRaw().masters} slideIndex={slideIndex()} />
           </div>
           <Show when={nextSlide()}>
-            <div style={{ display: "flex", "align-items": "center", gap: "10px" }}>
-              <span style={{ "font-size": "11px", color: "#94a3b8", width: "72px" }}>Next slide</span>
-              <SlideStage slide={nextSlide()!} theme={theme()} revealCount={999} scale={0.22} canvasWidth={deckRaw().canvasWidth} canvasHeight={deckRaw().canvasHeight} masters={deckRaw().masters} slideIndex={slideIndex() + 1} />
+            <div class="slide-presenter-next">
+              <span class="slide-presenter-next-label">Up next</span>
+              <div class="slide-presenter-nextframe">
+                <SlideStage slide={nextSlide()!} theme={theme()} revealCount={999} scale={0.22} canvasWidth={deckRaw().canvasWidth} canvasHeight={deckRaw().canvasHeight} masters={deckRaw().masters} slideIndex={slideIndex() + 1} />
+              </div>
             </div>
           </Show>
         </div>
 
-        <div style={{ flex: 1, display: "flex", "flex-direction": "column", gap: "10px", background: "#1e293b", border: "1px solid #334155", "border-radius": "8px", padding: "14px", "min-width": "220px" }}>
-          <h3 style={{ margin: 0, "font-size": "13px", color: "#94a3b8" }}>Speaker notes</h3>
-          <div style={{ flex: 1, "font-size": "13px", color: "#cbd5e1", "line-height": "1.55", overflow: "auto", "white-space": "pre-wrap" }}>
+        <div class="slide-presenter-panel">
+          <h3 class="slide-presenter-panel-title">Speaker notes</h3>
+          <div class="slide-presenter-notes">
             {currentSlide().notes || "No notes for this slide."}
           </div>
-          <div style={{ "font-size": "11px", color: "#64748b" }}>
+          <div class="slide-presenter-hint">
             Space / click reveals fades, then next slide · Home/End jump · R restart · Esc close
           </div>
-          <div style={{ display: "flex", gap: "8px", "margin-top": "8px" }}>
-            <button type="button" style={{ padding: "6px 12px", background: "#334155", color: "#fff", border: "none", "border-radius": "4px", cursor: "pointer" }} onClick={back}>
-              Previous
+          <div class="slide-presenter-controls">
+            <button type="button" class="slide-btn" onClick={back}>
+              ← Prev
             </button>
-            <button type="button" style={{ padding: "6px 12px", background: "#0284c7", color: "#fff", border: "none", "border-radius": "4px", cursor: "pointer" }} onClick={advance}>
-              Next
+            <button type="button" class="slide-btn slide-btn--primary" style={{ flex: 1 }} onClick={advance}>
+              Next →
             </button>
-            <button type="button" style={{ padding: "6px 12px", background: "#334155", color: "#fff", border: "none", "border-radius": "4px", cursor: "pointer" }} onClick={revealAll}>
+            <button type="button" class="slide-btn" onClick={revealAll}>
               Reveal all
             </button>
           </div>

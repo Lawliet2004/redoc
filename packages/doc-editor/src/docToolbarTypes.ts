@@ -10,8 +10,18 @@ export interface DocToolbarProps {
   onPaste: () => void;
   onUndo: () => void;
   onRedo: () => void;
+  /** Opens the paginated print preview overlay. */
+  onPrintPreview?: () => void;
   findOpen: boolean;
   onToggleFind: () => void;
+  /** Marks active at the caret / across the selection (bold, italic, …). */
+  activeMarks?: Record<string, boolean>;
+  /** Selection is inside a bullet list. */
+  bulletListActive?: boolean;
+  /** Selection is inside an ordered list. */
+  orderedListActive?: boolean;
+  /** Adds a comment anchored to the current selection. */
+  onAddComment?: () => void;
   onInsertTable: () => void;
   onInsertImage: () => void;
   onInsertLink: () => void;

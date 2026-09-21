@@ -120,14 +120,17 @@ export interface Slide {
   showSlideNumber?: boolean;
 }
 
+/** System-only font stack for deck themes — no remote font imports (offline). */
+export const SLIDE_FONT_STACK = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif';
+
 export const defaultMasters: SlideMaster[] = [
   {
     id: "master-default",
     name: "Default",
     bgColor: "#ffffff",
-    textColor: "#1e293b",
-    accentColor: "#3b82f6",
-    fontFamily: "Inter, sans-serif",
+    textColor: "#0f172a",
+    accentColor: "#4f46e5",
+    fontFamily: SLIDE_FONT_STACK,
     showHeader: false,
     showFooter: true,
     footerText: "",
@@ -138,10 +141,10 @@ export const defaultMasters: SlideMaster[] = [
   {
     id: "master-midnight",
     name: "Midnight",
-    bgColor: "#0f172a",
-    textColor: "#f8fafc",
-    accentColor: "#38bdf8",
-    fontFamily: "Inter, sans-serif",
+    bgColor: "#0d1117",
+    textColor: "#e6edf3",
+    accentColor: "#818cf8",
+    fontFamily: SLIDE_FONT_STACK,
     showHeader: false,
     showFooter: true,
     footerText: "",
@@ -154,8 +157,8 @@ export const defaultMasters: SlideMaster[] = [
     name: "Corporate",
     bgColor: "#f8fafc",
     textColor: "#0f172a",
-    accentColor: "#0d9488",
-    fontFamily: "Arial, sans-serif",
+    accentColor: "#0f766e",
+    fontFamily: "Arial, Helvetica, sans-serif",
     showHeader: true,
     headerText: "Company",
     showFooter: true,
@@ -300,13 +303,71 @@ export function normalizeSlideComments(value: unknown): SlideComment[] {
     .filter((comment) => comment.text.trim().length > 0);
 }
 
-export const defaultTheme = {
+export interface SlideTheme {
+  id: string;
+  name: string;
+  bgColor: string;
+  textColor: string;
+  accentColor: string;
+  fontFamily: string;
+}
+
+export const defaultTheme: SlideTheme = {
   id: "default-light",
   name: "Modern Light",
   bgColor: "#ffffff",
-  textColor: "#1e293b",
-  accentColor: "#3b82f6",
-  fontFamily: "Inter, sans-serif",
+  textColor: "#0f172a",
+  accentColor: "#4f46e5",
+  fontFamily: SLIDE_FONT_STACK,
+};
+
+/**
+ * Built-in deck themes — contemporary, muted palettes in the spirit of
+ * Linear/Stripe/Notion. Keys are stable preset ids used by the Styles panel
+ * and `setThemePreset`; `light` aliases `defaultTheme`.
+ */
+export const SLIDE_THEME_PRESETS: Record<string, SlideTheme> = {
+  light: defaultTheme,
+  midnight: {
+    id: "midnight",
+    name: "Midnight",
+    bgColor: "#0d1117",
+    textColor: "#e6edf3",
+    accentColor: "#818cf8",
+    fontFamily: SLIDE_FONT_STACK,
+  },
+  coral: {
+    id: "coral",
+    name: "Coral",
+    bgColor: "#fff6f1",
+    textColor: "#41291f",
+    accentColor: "#e04e27",
+    fontFamily: SLIDE_FONT_STACK,
+  },
+  forest: {
+    id: "forest",
+    name: "Forest",
+    bgColor: "#f2f7f4",
+    textColor: "#0e2a1e",
+    accentColor: "#15803d",
+    fontFamily: SLIDE_FONT_STACK,
+  },
+  lavender: {
+    id: "lavender",
+    name: "Lavender",
+    bgColor: "#f7f5fb",
+    textColor: "#272244",
+    accentColor: "#6d28d9",
+    fontFamily: SLIDE_FONT_STACK,
+  },
+  sunset: {
+    id: "sunset",
+    name: "Sunset",
+    bgColor: "#1b1410",
+    textColor: "#f3e9e0",
+    accentColor: "#fb923c",
+    fontFamily: SLIDE_FONT_STACK,
+  },
 };
 
 export function normalizeTransition(value: unknown, fallbackFade = false): SlideTransition {
@@ -340,6 +401,16 @@ function normalizeEntranceTiming(element: any, fallbackOrder = 0) {
   };
 }
 
+/** Bounded group id: grouping applies to every element kind, not just shapes. */
+function normalizeGroupId(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, 80) : undefined;
+}
+
+/** True only for explicitly flagged scaffold placeholders (never user text). */
+function normalizePlaceholderFlag(value: unknown): true | undefined {
+  return value === true ? true : undefined;
+}
+
 export function normalizeFlatElement(element: any, rotation: number, entrance: ElementEntrance, fallbackOrder = 0): SlideElement | null {
   const type = element.type as string;
   const link = typeof element.hyperlink === "string" ? element.hyperlink : undefined;
@@ -362,6 +433,8 @@ export function normalizeFlatElement(element: any, rotation: number, entrance: E
     rotation,
     entrance,
     hyperlink: link,
+    groupId: normalizeGroupId(element.groupId),
+    placeholder: normalizePlaceholderFlag(element.placeholder),
     ...normalizeEntranceTiming(element, fallbackOrder),
   };
   if (type === "text") {
@@ -431,7 +504,6 @@ export function normalizeFlatElement(element: any, rotation: number, entrance: E
       type,
       content: element.content ?? "",
       color: element.color ?? "#3b82f6",
-      groupId: element.groupId,
       ...style,
     };
   }
@@ -510,8 +582,8 @@ export function parseInternalSlideId(value: string): string | null {
 export function normalizeDeck(deck: any): Slide[] {
   if (!deck?.slides?.length) return [{
     id: "slide-1", title: "Title Slide", layout: "title", notes: "", transition: "none", elements: [
-      { id: "el-1", type: "text", x: 100, y: 180, width: 760, height: 80, content: PLACEHOLDER_TITLE, fontSize: 40, color: "#1e293b", rotation: 0, align: "center", placeholder: true },
-      { id: "el-2", type: "text", x: 150, y: 280, width: 660, height: 50, content: PLACEHOLDER_BODY, fontSize: 22, color: "#64748b", rotation: 0, align: "center", placeholder: true },
+      { id: "el-1", type: "text", x: 100, y: 180, width: 760, height: 80, content: PLACEHOLDER_TITLE, fontSize: 40, color: "#0f172a", rotation: 0, align: "center", placeholder: true },
+      { id: "el-2", type: "text", x: 150, y: 280, width: 660, height: 50, content: PLACEHOLDER_BODY, fontSize: 22, color: "#475569", rotation: 0, align: "center", placeholder: true },
     ],
   }];
   const deckFade = Boolean(deck.fadeBetweenSlides);
@@ -557,6 +629,8 @@ export function normalizeDeck(deck: any): Slide[] {
           entrance,
           ...timing,
           hyperlink: typeof element.hyperlink === "string" ? element.hyperlink : undefined,
+          groupId: normalizeGroupId(element.groupId),
+          placeholder: normalizePlaceholderFlag(element.placeholder),
           fontFamily: kind.Text.fontFamily,
           bold: Boolean(kind.Text.bold),
           italic: Boolean(kind.Text.italic),
@@ -584,7 +658,8 @@ export function normalizeDeck(deck: any): Slide[] {
           entrance,
           ...timing,
           hyperlink: typeof element.hyperlink === "string" ? element.hyperlink : undefined,
-          groupId: element.groupId,
+          groupId: normalizeGroupId(element.groupId),
+          placeholder: normalizePlaceholderFlag(element.placeholder),
           fillGradient: normalizeGradient(kind.Shape.fillGradient),
           lineColor: normalizeHexColor(
             type === "line" || type === "arrow" ? undefined : kind.Shape.strokeColor,
@@ -606,10 +681,12 @@ export function normalizeDeck(deck: any): Slide[] {
             x: element.x, y: element.y, width: element.width, height: element.height,
             content: kind.Image.assetHash, color: "#0f172a", rotation, entrance, ...timing,
             hyperlink: typeof element.hyperlink === "string" ? element.hyperlink : undefined,
+            groupId: normalizeGroupId(element.groupId),
+            placeholder: normalizePlaceholderFlag(element.placeholder),
             mediaMime: mime.slice(0, 80),
           };
         }
-        return { id: element.id, type: "image", x: element.x, y: element.y, width: element.width, height: element.height, content: kind.Image.assetHash, color: "#ffffff", rotation, entrance, ...timing, hyperlink: typeof element.hyperlink === "string" ? element.hyperlink : undefined };
+        return { id: element.id, type: "image", x: element.x, y: element.y, width: element.width, height: element.height, content: kind.Image.assetHash, color: "#ffffff", rotation, entrance, ...timing, hyperlink: typeof element.hyperlink === "string" ? element.hyperlink : undefined, groupId: normalizeGroupId(element.groupId), placeholder: normalizePlaceholderFlag(element.placeholder) };
       }
       if (kind.Table) {
         const data = normalizeTableData(kind.Table.data, kind.Table.rows, kind.Table.cols);
@@ -625,6 +702,8 @@ export function normalizeDeck(deck: any): Slide[] {
           entrance,
           ...timing,
           hyperlink: typeof element.hyperlink === "string" ? element.hyperlink : undefined,
+          groupId: normalizeGroupId(element.groupId),
+          placeholder: normalizePlaceholderFlag(element.placeholder),
           tableRows: data.length,
           tableCols: data[0]?.length ?? 0,
           tableData: data,
@@ -646,6 +725,8 @@ export function normalizeDeck(deck: any): Slide[] {
           entrance,
           ...timing,
           hyperlink: typeof element.hyperlink === "string" ? element.hyperlink : undefined,
+          groupId: normalizeGroupId(element.groupId),
+          placeholder: normalizePlaceholderFlag(element.placeholder),
           chartType: normalizeChartType(kind.Chart.chartType),
           chartTitle: kind.Chart.labels?.[0] || "Chart",
           chartData: normalizeChartData(kind.Chart.data),
@@ -655,7 +736,7 @@ export function normalizeDeck(deck: any): Slide[] {
           chartShowAxes: kind.Chart.showAxes === false ? false : undefined,
         };
       }
-      return { id: element.id, type: "rect", x: element.x ?? 100, y: element.y ?? 100, width: element.width ?? 200, height: element.height ?? 120, content: "", color: "#e2e8f0", rotation, entrance, ...timing, hyperlink: typeof element.hyperlink === "string" ? element.hyperlink : undefined };
+      return { id: element.id, type: "rect", x: element.x ?? 100, y: element.y ?? 100, width: element.width ?? 200, height: element.height ?? 120, content: "", color: "#e2e8f0", rotation, entrance, ...timing, hyperlink: typeof element.hyperlink === "string" ? element.hyperlink : undefined, groupId: normalizeGroupId(element.groupId), placeholder: normalizePlaceholderFlag(element.placeholder) };
     }),
   }));
 }
@@ -713,12 +794,13 @@ export function toDeck(slides: Slide[], source: any, theme: typeof defaultTheme,
         exitDurationMs: element.exitDurationMs ?? 350,
         hyperlink: element.hyperlink,
         groupId: element.groupId,
+        placeholder: element.placeholder === true ? true : undefined,
         kind: element.type === "text"
           ? {
               Text: {
                 text: element.content,
                 fontSize: element.fontSize || 20,
-                fontFamily: element.fontFamily || "Inter, sans-serif",
+                fontFamily: element.fontFamily || theme.fontFamily,
                 color: element.color || "#1e293b",
                 align: element.align || "center",
                 bullets: Boolean(element.bullets),

@@ -135,6 +135,46 @@ describe("toDeck", () => {
     expect(restored[0].elements[0].chartData).toEqual([1, 2]);
   });
 
+  it("round-trips groupId for non-shape elements", () => {
+    const slides = normalizeDeck({
+      slides: [{
+        id: "s1",
+        layout: "blank",
+        elements: [
+          { id: "t1", type: "text", x: 0, y: 0, width: 100, height: 40, content: "A", groupId: "grp-1" },
+          { id: "i1", type: "image", x: 0, y: 50, width: 100, height: 40, content: "img", groupId: "grp-1" },
+          { id: "tb1", type: "table", x: 0, y: 100, width: 200, height: 80, content: "", tableData: [["a"]], groupId: "grp-1" },
+          { id: "c1", type: "chart", x: 0, y: 200, width: 200, height: 100, content: "", chartData: [1], groupId: "grp-1" },
+          { id: "r1", type: "rect", x: 0, y: 320, width: 60, height: 40, content: "", groupId: "grp-1" },
+        ],
+      }],
+    });
+    for (const el of slides[0].elements) expect(el.groupId).toBe("grp-1");
+    const deck = toDeck(slides, {}, defaultTheme, 0);
+    const restored = normalizeDeck(deck);
+    for (const el of restored[0].elements) expect(el.groupId).toBe("grp-1");
+  });
+
+  it("round-trips the placeholder flag so scaffolded text stays placeholder", () => {
+    const slides = normalizeDeck({
+      slides: [{
+        id: "s1",
+        layout: "title",
+        elements: [
+          { id: "t1", type: "text", x: 0, y: 0, width: 100, height: 40, content: "Click to add Title", placeholder: true },
+          { id: "t2", type: "text", x: 0, y: 60, width: 100, height: 40, content: "Real user text" },
+        ],
+      }],
+    });
+    expect(slides[0].elements[0].placeholder).toBe(true);
+    expect(slides[0].elements[1].placeholder).toBeUndefined();
+    const deck = toDeck(slides, {}, defaultTheme, 0);
+    expect(deck.slides[0].elements[0].placeholder).toBe(true);
+    const restored = normalizeDeck(deck);
+    expect(restored[0].elements[0].placeholder).toBe(true);
+    expect(restored[0].elements[1].placeholder).toBeUndefined();
+  });
+
   it("round-trips table merges through kind.Table", () => {
     const slides = normalizeDeck({
       slides: [{

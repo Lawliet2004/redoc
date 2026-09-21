@@ -47,7 +47,7 @@ export function DataValidationDialog(props: DataValidationDialogProps) {
 
   return (
     <Dialog open={props.open} title="Data Validation — List" onClose={props.onClose}>
-      <div style={{ display: "flex", "flex-direction": "column", gap: "12px", "min-width": "360px" }}>
+      <div class="sheet-dialog-body" style={{ "min-width": "360px" }}>
         <p style={{ "font-size": "13px", color: "var(--text-secondary)", margin: 0 }}>
           Enter one option per line. Applied to the current selection.
         </p>
@@ -69,13 +69,12 @@ export function DataValidationDialog(props: DataValidationDialogProps) {
             aria-label="Validation source range or formula"
           />
         </label>
-        <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
-          <button type="button" class="g-toolbar-btn" onClick={handleClear}>Clear</button>
-          <button type="button" class="g-toolbar-btn" onClick={props.onClose}>Cancel</button>
+        <div class="sheet-dialog-actions">
+          <button type="button" class="g-toolbar-btn sheet-btn" style={{ "margin-right": "auto" }} onClick={handleClear}>Clear</button>
+          <button type="button" class="g-toolbar-btn sheet-btn" onClick={props.onClose}>Cancel</button>
           <button
             type="button"
-            class="g-toolbar-btn"
-            style={{ background: "var(--accent-color, #1a73e8)", color: "#fff" }}
+            class="g-toolbar-btn sheet-btn sheet-btn-primary"
             onClick={handleApply}
           >
             Apply

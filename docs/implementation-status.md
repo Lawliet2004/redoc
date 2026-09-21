@@ -8,7 +8,7 @@ Evidence-based snapshot of the current repository. Claims below are tied to sour
 
 - **Home screen** with blank/open flows and template starters (`HomeScreen.tsx`).
 - **Recents + pins** persisted via Tauri commands `get_recents` / `toggle_pin_recent` (`lib.rs`, `HomeScreen.tsx`).
-- **Settings** dialog with autosave interval, theme, telemetry toggle (`SettingsDialog.tsx`, `App.tsx`).
+- **Settings** dialog with autosave interval, theme (`SettingsDialog.tsx`, `App.tsx`).
 - **Command palette** (`Ctrl+K`) and registry-driven menus from `registerCommands.ts` / `buildMenus`.
 - **F1** opens keyboard-shortcuts dialog; **F4** repeats last formatting command (`registerCommands.ts`, `EditorCommands.ts`).
 - **Drag-and-drop**: `.redoc` files via `tauri://drag-drop` and `RunEvent::Opened`; images dropped on home (`App.tsx`, `lib.rs`).

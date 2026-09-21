@@ -13,7 +13,7 @@ export interface SheetProtectionDialogProps {
 export function SheetProtectionDialog(props: SheetProtectionDialogProps) {
   return (
     <Dialog open={props.open} title="Protect Sheet" onClose={props.onClose}>
-      <div style={{ display: "flex", "flex-direction": "column", gap: "12px", "min-width": "300px" }}>
+      <div class="sheet-dialog-body">
         <label style={{ display: "flex", "align-items": "center", gap: "8px", "font-size": "13px" }}>
           <input
             type="checkbox"
@@ -51,9 +51,9 @@ export function SheetProtectionDialog(props: SheetProtectionDialogProps) {
           When a sheet is protected, locked cells cannot be edited. Use Format Cells to lock or unlock specific cells.
         </p>
 
-        <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
-          <button type="button" class="g-toolbar-btn" onClick={props.onClose}>Cancel</button>
-          <button type="button" class="g-toolbar-btn" onClick={props.onApply}>OK</button>
+        <div class="sheet-dialog-actions">
+          <button type="button" class="g-toolbar-btn sheet-btn" onClick={props.onClose}>Cancel</button>
+          <button type="button" class="g-toolbar-btn sheet-btn sheet-btn-primary" onClick={props.onApply}>OK</button>
         </div>
       </div>
     </Dialog>

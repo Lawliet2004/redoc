@@ -149,8 +149,9 @@ export interface FormulaBarProps {
   cellsBySheet?: Accessor<Record<string, Record<string, GridCell>>>;
   namedRanges?: Accessor<Array<{ name: string; rangeStr: string; sheet: string | null }>>;
   activeSheetName?: Accessor<string>;
-  containerRef?: HTMLDivElement;
-  formulaInputRef?: HTMLInputElement;
+  containerRef?: () => HTMLDivElement | undefined;
+  /** Callback ref: the formula input element is handed up to the parent. */
+  formulaInputRef?: (el: HTMLInputElement) => void;
 }
 
 export interface SheetToolbarProps {
@@ -175,8 +176,9 @@ export interface SheetToolbarProps {
 }
 
 export interface GridCanvasProps {
-  containerRef: HTMLDivElement;
-  canvasRef: HTMLCanvasElement;
+  /** Callback refs: the rendered elements are handed up to the parent. */
+  containerRef: (el: HTMLDivElement) => void;
+  canvasRef: (el: HTMLCanvasElement) => void;
   scrollTop: Accessor<number>;
   scrollLeft: Accessor<number>;
   setScrollTop: Setter<number>;
@@ -194,11 +196,15 @@ export interface GridCanvasProps {
   pasteTsv: () => void | Promise<void>;
   selectCell: (row: number, col: number, extend?: boolean) => void;
   moveActiveCell: (dRow: number, dCol: number, extend?: boolean) => void;
+  /** Current selection rectangle (anchor ∪ active cell) — used for context-menu labels. */
+  selectedBounds: () => { startRow: number; endRow: number; startCol: number; endCol: number };
+  /** Hover cursor affordance for a canvas pointer position (cell/crosshair/resize). */
+  cursorForPoint?: (event: MouseEvent) => string;
   lastUsedCell: () => { row: number; col: number };
   jumpToDataEdge: (dRow: number, dCol: number, extend?: boolean) => void;
   setEditing: Setter<boolean>;
   setFormulaValue: Setter<string>;
-  formulaInputRef?: HTMLInputElement;
+  formulaInputRef?: () => HTMLInputElement | undefined;
   handleCanvasClick: (event: MouseEvent) => void;
   setContextMenu: Setter<{ x: number; y: number; items: import("@redoc/editor-common").ContextMenuItem[] } | null>;
   emitEditorCommand: typeof import("@redoc/editor-common").emitEditorCommand;

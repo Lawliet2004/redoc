@@ -3098,6 +3098,7 @@ dependencies = [
 name = "redoc-export"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "calamine",
  "docx-rs",
  "image 0.24.9",
