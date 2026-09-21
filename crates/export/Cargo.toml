@@ -10,7 +10,7 @@ redoc-slide-engine = { path = "../slide-engine" }
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 printpdf = { version = "0.7", features = ["embedded_images"] }
 image = { version = "0.24.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 docx-rs = "0.4"
